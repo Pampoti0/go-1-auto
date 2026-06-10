@@ -1,0 +1,8 @@
+requests
+google-auth
+google-api-python-client
+schedule
+fastapi
+uvicorn
+httpx
+python-dotenv

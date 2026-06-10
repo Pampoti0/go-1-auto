@@ -1,0 +1,13 @@
+# Secrets — không bake vào Docker image (image sẽ push lên registry)
+.env
+service_account.json
+*.json.json
+
+# Rác
+__pycache__/
+*.pyc
+*.log
+.venv/
+.agentbase/
+runtime_config.json
+.git/

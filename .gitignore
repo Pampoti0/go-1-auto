@@ -1,0 +1,13 @@
+# SECRETS — tuyệt đối không commit
+.env
+service_account.json
+service_account.json.json
+*.json.json
+
+# Runtime
+runtime_config.json
+__pycache__/
+*.pyc
+*.log
+.venv/
+.agentbase/

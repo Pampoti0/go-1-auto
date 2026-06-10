@@ -1,0 +1,552 @@
+<!DOCTYPE html>
+<html lang="vi" data-theme="light">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>PageSpeed Checker Agent</title>
+<style>
+:root, [data-theme="light"]{
+  --bg:#f4f6fb; --bg-grad1:rgba(52,211,153,.10); --bg-grad2:rgba(34,211,238,.10);
+  --surface:#ffffff; --border:#e3e8f0; --text:#1a2333; --muted:#64748b;
+  --accent:#0ea371; --accent2:#0891b2; --user:linear-gradient(135deg,#2563eb,#4f46e5);
+  --bubble:#ffffff; --input-bg:#f1f5f9; --shadow:0 1px 3px rgba(16,24,40,.07),0 4px 14px rgba(16,24,40,.05);
+  --side:#ffffff;
+}
+[data-theme="dark"]{
+  --bg:#0b1020; --bg-grad1:rgba(52,211,153,.10); --bg-grad2:rgba(34,211,238,.12);
+  --surface:#121a30; --border:rgba(255,255,255,.1); --text:#e8edf7; --muted:#8b96ad;
+  --accent:#34d399; --accent2:#22d3ee; --user:linear-gradient(135deg,#2563eb,#4f46e5);
+  --bubble:rgba(255,255,255,.05); --input-bg:rgba(255,255,255,.06); --shadow:none;
+  --side:#0e1428;
+}
+*{box-sizing:border-box;margin:0;padding:0}
+html,body{height:100%}
+body{
+  font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Inter,Roboto,sans-serif;
+  color:var(--text);
+  background:radial-gradient(1100px 500px at 90% -10%,var(--bg-grad2),transparent 60%),
+             radial-gradient(900px 500px at -10% 110%,var(--bg-grad1),transparent 55%), var(--bg);
+  background-attachment:fixed; transition:background .25s,color .25s;
+}
+.app{display:flex;height:100vh;overflow:hidden}
+
+/* ── Sidebar ── */
+aside{
+  width:220px;flex:none;display:flex;flex-direction:column;gap:6px;padding:18px 12px;
+  background:var(--side);border-right:1px solid var(--border);
+}
+.brand{display:flex;align-items:center;gap:10px;padding:4px 10px 16px}
+.brand .logo{width:36px;height:36px;border-radius:10px;display:grid;place-items:center;font-size:18px;
+  background:linear-gradient(135deg,rgba(14,163,113,.15),rgba(8,145,178,.15));border:1px solid var(--border)}
+.brand b{font-size:14px;line-height:1.25}
+.navItem{
+  display:flex;align-items:center;gap:10px;padding:11px 14px;border-radius:11px;cursor:pointer;
+  font-size:14px;color:var(--muted);border:1px solid transparent;background:transparent;width:100%;text-align:left;
+  transition:.15s;text-decoration:none;
+}
+.navItem:hover{background:var(--input-bg);color:var(--text)}
+.navItem.active{background:linear-gradient(135deg,rgba(14,163,113,.12),rgba(8,145,178,.12));
+  color:var(--accent);border-color:var(--border);font-weight:600}
+.sideSpace{flex:1}
+.sideFoot{display:flex;flex-direction:column;gap:6px;border-top:1px solid var(--border);padding-top:10px}
+
+/* ── Content ── */
+.content{flex:1;display:flex;flex-direction:column;min-width:0}
+header{
+  display:grid;grid-template-columns:1fr auto 1fr;align-items:center;gap:12px;
+  padding:12px 22px;border-bottom:1px solid var(--border);background:var(--surface);
+}
+.hmeta h1{font-size:15px;font-weight:700}
+.hmeta p{font-size:11.5px;color:var(--muted);margin-top:2px;display:flex;align-items:center;gap:5px}
+.dot{width:7px;height:7px;border-radius:50%;background:var(--accent);box-shadow:0 0 6px var(--accent);flex:none}
+/* model select ở giữa header */
+.modelWrap{display:flex;align-items:center;gap:8px;justify-self:center}
+.modelWrap label{font-size:12px;color:var(--muted)}
+#modelSel{
+  appearance:none;-webkit-appearance:none;padding:8px 30px 8px 14px;font-size:13px;border-radius:10px;cursor:pointer;
+  color:var(--text);border:1px solid var(--border);background:var(--input-bg);outline:0;
+  background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6'%3E%3Cpath d='M1 1l4 4 4-4' stroke='%2364748b' fill='none' stroke-width='1.5'/%3E%3C/svg%3E");
+  background-repeat:no-repeat;background-position:right 11px center;
+}
+#modelSel:focus{border-color:var(--accent2)}
+
+/* ── Views ── */
+.view{flex:1;display:flex;flex-direction:column;min-height:0}
+.hidden{display:none!important}
+
+/* Chat view */
+.chips{display:flex;gap:8px;flex-wrap:wrap;padding:14px 26px 12px;max-width:1150px;width:100%;margin:0 auto;border-bottom:1px solid var(--border)}
+.chip{font-size:12.5px;padding:7px 13px;border-radius:999px;cursor:pointer;color:var(--text);
+  border:1px solid var(--border);background:var(--surface);box-shadow:var(--shadow);transition:.16s;white-space:nowrap}
+.chip:hover{border-color:var(--accent);color:var(--accent);transform:translateY(-1px)}
+.chip:disabled{opacity:.45;cursor:default;pointer-events:none;transform:none}
+#chatScroll{flex:1;min-height:0;overflow-y:auto;scroll-behavior:smooth}
+.chatWrap{max-width:1150px;margin:0 auto;padding:18px 26px;display:flex;flex-direction:column;gap:14px}
+.row{display:flex;gap:10px;align-items:flex-end;animation:up .25s ease}
+.row.me{flex-direction:row-reverse}
+@keyframes up{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:none}}
+.ava{width:32px;height:32px;border-radius:50%;flex:none;display:grid;place-items:center;font-size:15px;
+  background:linear-gradient(135deg,rgba(14,163,113,.15),rgba(8,145,178,.15));border:1px solid var(--border)}
+.bubble{max-width:82%;padding:13px 17px;font-size:15px;line-height:1.6;white-space:pre-wrap;word-break:break-word;
+  background:var(--bubble);border:1px solid var(--border);border-radius:18px;border-bottom-left-radius:6px;box-shadow:var(--shadow)}
+.me .bubble{background:var(--user);border:none;color:#fff;border-radius:18px;border-bottom-right-radius:6px}
+details.think{margin-bottom:8px;border:1px dashed var(--border);border-radius:10px;padding:7px 10px;background:var(--input-bg)}
+details.think summary{cursor:pointer;font-size:12px;color:var(--muted);font-weight:600;user-select:none;list-style:none;display:flex;align-items:center;gap:6px}
+details.think summary::before{content:'▸';transition:transform .15s}
+details.think[open] summary::before{transform:rotate(90deg)}
+.thinkText{font-size:12.5px;color:var(--muted);white-space:pre-wrap;word-break:break-word;
+  max-height:320px;overflow-y:auto;margin-top:6px;line-height:1.7;font-family:ui-monospace,monospace}
+.err{color:#ef4444}
+.bubble code{background:var(--input-bg);border:1px solid var(--border);border-radius:5px;padding:1px 5px;font-size:12.5px;font-family:ui-monospace,monospace}
+.bubble b{font-weight:700}
+.dots{display:inline-flex;gap:4px;padding:4px 2px}
+.dots i{width:6px;height:6px;border-radius:50%;background:var(--muted);animation:blink 1.2s infinite}
+.dots i:nth-child(2){animation-delay:.2s}.dots i:nth-child(3){animation-delay:.4s}
+@keyframes blink{0%,80%,100%{opacity:.25}40%{opacity:1}}
+.composerBar{padding:12px 26px 18px}
+.composer{max-width:1150px;margin:0 auto;display:flex;gap:10px;padding:9px;border-radius:16px;
+  background:var(--surface);border:1px solid var(--border);box-shadow:var(--shadow)}
+.composer input{flex:1;background:transparent;border:0;outline:0;color:var(--text);font-size:15px;padding:11px 10px}
+.composer input::placeholder{color:var(--muted)}
+.sendbtn{width:46px;height:46px;border:0;border-radius:12px;cursor:pointer;font-size:18px;color:#fff;
+  background:linear-gradient(135deg,var(--accent),var(--accent2));transition:.18s;flex:none}
+.sendbtn:hover{filter:brightness(1.08)}
+.sendbtn:disabled{opacity:.45;cursor:default}
+.sendbtn.stop{background:#ef4444}
+
+/* Config view — full page */
+#viewConfig{overflow-y:auto;padding:16px 22px}
+.cfgGrid{
+  max-width:1150px;width:100%;margin:0 auto;display:grid;
+  grid-template-columns:minmax(0,1fr) 340px;gap:14px;align-items:start;
+}
+.card{
+  background:var(--surface);border:1px solid var(--border);border-radius:16px;
+  padding:18px;display:flex;flex-direction:column;gap:11px;box-shadow:var(--shadow);
+}
+.card h3{font-size:14px;display:flex;align-items:center;gap:8px}
+.card .desc{font-size:12.5px;color:var(--muted);margin-top:-6px}
+.cfgBar{
+  grid-column:1/-1;display:flex;gap:10px;align-items:center;justify-content:flex-end;
+  background:var(--surface);border:1px solid var(--border);border-radius:14px;padding:10px 16px;box-shadow:var(--shadow);
+  position:sticky;bottom:0;
+}
+.cfgBar .msg{font-size:13px;margin-right:auto;color:var(--muted)}
+label.sec{font-size:11.5px;color:var(--muted);font-weight:700;letter-spacing:.5px;text-transform:uppercase;display:block;margin-bottom:8px}
+/* lưới 2 cột compact — vừa khít, không scroll trong card */
+#urlList{display:grid;grid-template-columns:repeat(auto-fill,minmax(340px,1fr));gap:6px}
+#urlCount{font-size:12px;color:var(--muted);font-weight:400;margin-left:auto}
+.urlRow{display:flex;gap:5px}
+.urlRow input{flex:1;min-width:0;background:var(--input-bg);color:var(--text);border:1px solid var(--border);border-radius:8px;
+  padding:6px 10px;font-size:12px;outline:0;font-family:ui-monospace,monospace}
+.urlRow input:focus{border-color:var(--accent2);background:var(--surface)}
+.urlRow input.bad{border-color:#ef4444}
+.delBtn{width:28px;border:1px solid var(--border);border-radius:8px;background:var(--input-bg);color:var(--muted);
+  cursor:pointer;font-size:13px;flex:none;transition:.15s}
+.delBtn:hover{color:#ef4444;border-color:#ef4444}
+.addUrl{margin-top:4px;padding:6px 13px;font-size:12.5px;border:1px dashed var(--border);border-radius:8px;
+  background:transparent;color:var(--accent);cursor:pointer;font-weight:600;align-self:flex-start}
+.addUrl:hover{border-color:var(--accent)}
+.seg{display:inline-flex;border:1px solid var(--border);border-radius:10px;overflow:hidden;background:var(--input-bg)}
+.seg button{padding:8px 16px;border:0;background:transparent;color:var(--muted);font-size:13px;cursor:pointer;transition:.15s}
+.seg button.on{background:var(--accent);color:#fff;font-weight:600}
+.togglePill{padding:8px 16px;border-radius:10px;border:1px solid var(--border);background:var(--input-bg);
+  color:var(--muted);font-size:13px;cursor:pointer;transition:.15s}
+.togglePill.on{background:var(--accent);border-color:var(--accent);color:#fff;font-weight:600}
+.frow{display:flex;gap:10px;flex-wrap:wrap;align-items:center}
+.frow input[type=time],.frow input[type=number],.frow select{
+  background:var(--input-bg);color:var(--text);border:1px solid var(--border);border-radius:9px;padding:8px 10px;font-size:13.5px;outline:0}
+.frow input:focus,.frow select:focus{border-color:var(--accent2)}
+.hint{font-size:12px;color:var(--muted)}
+.btn{padding:10px 20px;border-radius:10px;border:1px solid var(--border);background:var(--surface);color:var(--text);cursor:pointer;font-size:13.5px}
+.btn.primary{background:linear-gradient(135deg,var(--accent),var(--accent2));color:#fff;border:0;font-weight:700}
+.btn:hover{filter:brightness(1.05)}
+::-webkit-scrollbar{width:8px}::-webkit-scrollbar-thumb{background:var(--border);border-radius:4px}
+
+@media(max-width:980px){.cfgGrid{grid-template-columns:1fr}}
+@media(max-width:720px){
+  .app{flex-direction:column}
+  aside{width:100%;flex-direction:row;align-items:center;padding:8px 12px;gap:8px;border-right:0;border-bottom:1px solid var(--border)}
+  .brand{padding:0;margin-right:4px}.brand b{display:none}
+  .navItem{width:auto;padding:8px 12px}
+  .sideSpace{flex:1}.sideFoot{flex-direction:row;border:0;padding:0}
+  header{grid-template-columns:1fr;gap:8px}
+  .modelWrap{justify-self:start}
+  .bubble{max-width:86%}
+}
+</style>
+</head>
+<body>
+<div class="app">
+
+  <!-- ── Side nav ── -->
+  <aside>
+    <div class="brand"><div class="logo">⚡</div><b>PageSpeed<br>Checker Agent</b></div>
+    <button class="navItem active" id="navChat" onclick="showView('chat')">💬 Chat</button>
+    <button class="navItem" id="navConfig" onclick="showView('config')">⚙️ Cấu hình</button>
+    <div class="sideSpace"></div>
+    <div class="sideFoot">
+      <a class="navItem" id="sheetLink" href="#" target="_blank">📊 Google Sheet</a>
+      <button class="navItem" id="themeBtn" onclick="toggleTheme()">🌙 Dark mode</button>
+    </div>
+  </aside>
+
+  <!-- ── Content ── -->
+  <div class="content">
+    <header>
+      <div class="hmeta">
+        <h1 id="viewTitle">Chat</h1>
+        <p><span class="dot"></span><span id="metaLine">Đang kết nối...</span></p>
+      </div>
+      <div class="modelWrap">
+        <label for="modelSel">Model</label>
+        <select id="modelSel">
+          <option value="google/gemma-4-31b-it">Gemma 4 31B</option>
+          <option value="qwen/qwen3-5-27b">Qwen3.5 27B</option>
+          <option value="minimax/minimax-m2.5">MiniMax M2.5</option>
+        </select>
+      </div>
+      <div></div>
+    </header>
+
+    <!-- Chat view -->
+    <section class="view" id="viewChat">
+      <div class="chips">
+        <button class="chip" onclick="send('Chạy kiểm tra ngay')">▶ Chạy ngay</button>
+        <button class="chip" onclick="send('Trạng thái thế nào?')">📋 Trạng thái</button>
+        <button class="chip" onclick="send('Danh sách URL')">🔗 URLs</button>
+        <button class="chip" onclick="send('Phân tích kết quả lần chạy gần nhất')">📈 Phân tích kết quả</button>
+        <button class="chip" onclick="clearHist()" title="Xóa lịch sử chat">🗑 Xóa lịch sử</button>
+      </div>
+      <div id="chatScroll"><div class="chatWrap" id="chat"></div></div>
+      <div class="composerBar">
+        <form class="composer" id="f">
+          <input id="i" placeholder="Nhắn với agent... (vd: thêm https://example.com)" autocomplete="off">
+          <button class="sendbtn" id="sendBtn" title="Gửi">➤</button>
+        </form>
+      </div>
+    </section>
+
+    <!-- Config view — full page -->
+    <section class="view hidden" id="viewConfig">
+      <div class="cfgGrid">
+
+        <div class="card">
+          <h3>🔗 URLs theo dõi <span id="urlCount"></span></h3>
+          <p class="desc">Mỗi URL sẽ được kiểm tra theo các strategy đã chọn và ghi một dòng kết quả vào Google Sheet.</p>
+          <div id="urlList"></div>
+          <button class="addUrl" onclick="addUrlRow('')">＋ Thêm URL</button>
+        </div>
+
+        <div style="display:flex;flex-direction:column;gap:18px;min-width:0">
+          <div class="card">
+            <h3>🖥️ Strategy</h3>
+            <p class="desc">Thiết bị giả lập khi đo Core Web Vitals.</p>
+            <div class="frow">
+              <button class="togglePill" id="pMobile" onclick="this.classList.toggle('on')">📱 Mobile</button>
+              <button class="togglePill" id="pDesktop" onclick="this.classList.toggle('on')">🖥️ Desktop</button>
+            </div>
+          </div>
+
+          <div class="card">
+            <h3>🕐 Lịch chạy tự động</h3>
+            <p class="desc">Agent tự chạy theo lịch, không cần thao tác.</p>
+            <div class="seg" id="modeSeg" style="align-self:flex-start">
+              <button data-v="daily">Hàng ngày</button>
+              <button data-v="weekly">Hàng tuần</button>
+              <button data-v="monthly">Hàng tháng</button>
+            </div>
+            <div class="frow">
+              <span class="hint">lúc</span>
+              <input type="time" id="cfgTime">
+              <span id="dayWrap" class="frow" style="gap:6px">
+                <span class="hint">ngày</span>
+                <input type="number" id="cfgDay" min="1" max="28" style="width:64px">
+                <span class="hint">hàng tháng</span>
+              </span>
+              <span id="weekWrap" class="frow" style="gap:6px;display:none">
+                <select id="cfgWeekday">
+                  <option value="monday">Thứ 2</option><option value="tuesday">Thứ 3</option>
+                  <option value="wednesday">Thứ 4</option><option value="thursday">Thứ 5</option>
+                  <option value="friday">Thứ 6</option><option value="saturday">Thứ 7</option>
+                  <option value="sunday">Chủ nhật</option>
+                </select>
+              </span>
+            </div>
+          </div>
+        </div>
+
+        <div class="cfgBar">
+          <span class="msg" id="cfgMsg"></span>
+          <button class="btn" onclick="loadCfg()">↺ Hoàn tác</button>
+          <button class="btn primary" onclick="saveCfg()">💾 Lưu cấu hình</button>
+        </div>
+
+      </div>
+    </section>
+  </div>
+</div>
+
+<script>
+const chat=document.getElementById('chat'),chatScroll=document.getElementById('chatScroll'),
+      f=document.getElementById('f'),inp=document.getElementById('i'),sendBtn=document.getElementById('sendBtn');
+
+/* ── Theme (mặc định light) ── */
+function applyTheme(t){
+  document.documentElement.dataset.theme=t;
+  document.getElementById('themeBtn').textContent=t==='light'?'🌙 Dark mode':'☀️ Light mode';
+  try{localStorage.setItem('psi-theme',t)}catch(e){}
+}
+function toggleTheme(){applyTheme(document.documentElement.dataset.theme==='light'?'dark':'light')}
+try{applyTheme(localStorage.getItem('psi-theme')||'light')}catch(e){applyTheme('light')}
+
+/* ── View switching ── */
+function showView(v){
+  document.getElementById('viewChat').classList.toggle('hidden',v!=='chat');
+  document.getElementById('viewConfig').classList.toggle('hidden',v!=='config');
+  document.getElementById('navChat').classList.toggle('active',v==='chat');
+  document.getElementById('navConfig').classList.toggle('active',v==='config');
+  document.getElementById('viewTitle').textContent=v==='chat'?'Chat':'Cấu hình';
+  if(v==='config')loadCfg();
+  if(v==='chat')scrollBottom();
+}
+
+/* ── Scroll helper (fix: luôn cuộn đúng container) ── */
+function scrollBottom(){requestAnimationFrame(()=>{chatScroll.scrollTop=chatScroll.scrollHeight})}
+
+/* ── Model select (mặc định qwen) ── */
+const modelSel=document.getElementById('modelSel');
+try{modelSel.value=localStorage.getItem('psi-model')||'google/gemma-4-31b-it'}catch(e){}
+if(!modelSel.value)modelSel.value='google/gemma-4-31b-it';
+modelSel.addEventListener('change',()=>{try{localStorage.setItem('psi-model',modelSel.value)}catch(e){}});
+
+/* ── Markdown nhẹ: escape HTML rồi render đậm/code/bullet, giữ pre-wrap ── */
+function md(s){
+  /* LaTeX lẻ tẻ từ model → ký tự unicode */
+  s=s.replace(/\$?\\(rightarrow|to)\$?/g,'→').replace(/\$?\\leftarrow\$?/g,'←')
+     .replace(/\$?\\(uparrow)\$?/g,'↑').replace(/\$?\\(downarrow)\$?/g,'↓')
+     .replace(/\$?\\times\$?/g,'×').replace(/\$?\\(le|leq)\$?/g,'≤')
+     .replace(/\$?\\(ge|geq)\$?/g,'≥').replace(/\$?\\approx\$?/g,'≈')
+     .replace(/\$(\d[\d.,]*)\$/g,'$1');
+  s=s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+  s=s.replace(/```[a-z]*\n?([\s\S]*?)```/g,(m,c)=>'<code>'+c.trim()+'</code>');
+  s=s.replace(/`([^`\n]+)`/g,'<code>$1</code>');
+  s=s.replace(/\*\*([^*\n]+)\*\*/g,'<b>$1</b>');
+  s=s.replace(/(^|\n)#{1,4} (.*)/g,'$1<b>$2</b>');
+  s=s.replace(/(^|\n)[ \t]*[-*] /g,'$1• ');          /* bullet */
+  s=s.replace(/(^|\n)[ \t]*(\d+)\. /g,'$1$2. ');      /* numbered giữ nguyên, bỏ indent */
+  s=s.replace(/\n{3,}/g,'\n\n');                       /* gọn dòng trống */
+  return s;
+}
+function setAnswer(el,text){
+  if(text.startsWith('❌')){el.innerHTML='';const s=document.createElement('span');s.className='err';s.textContent=text;el.appendChild(s)}
+  else el.innerHTML=md(text);
+  el.dataset.raw=text;
+}
+
+/* ── Chat ── */
+function row(me,content){
+  const r=document.createElement('div');r.className='row'+(me?' me':'');
+  const a=document.createElement('div');a.className='ava';a.textContent=me?'🧑':'🤖';
+  const b=document.createElement('div');b.className='bubble';
+  if(typeof content==='string')b.textContent=content;else b.appendChild(content);
+  r.append(a,b);chat.appendChild(r);scrollBottom();return b;
+}
+function typing(){
+  const d=document.createElement('span');d.className='dots';d.innerHTML='<i></i><i></i><i></i>';
+  return row(false,d);
+}
+/* ── Lịch sử chat (localStorage — sống qua redeploy vì nằm phía trình duyệt) ── */
+const GREETING='Xin chào! Mình là AI agent kiểm tra PageSpeed 🤖\nMình tự động quét Core Web Vitals theo lịch và ghi kết quả vào Google Sheet.\n\nBạn có thể: bấm "▶ Chạy ngay", hỏi "trạng thái?", hoặc nhắn "thêm https://..." để quản lý URL.';
+let hist=[];
+function saveHist(me,text,steps){
+  hist.push(steps?{me,text,steps}:{me,text});
+  if(hist.length>100)hist=hist.slice(-100);
+  try{localStorage.setItem('psi-chat',JSON.stringify(hist))}catch(e){}
+}
+function renderBot(text,steps){
+  const b=row(false,'');b.textContent='';
+  if(steps){
+    const d=document.createElement('details');d.className='think';
+    d.innerHTML='<summary>⚙️ Actions</summary>';
+    const t=document.createElement('div');t.className='thinkText';t.textContent=steps;
+    d.appendChild(t);b.appendChild(d);
+  }
+  const a=document.createElement('div');
+  setAnswer(a,text);
+  b.appendChild(a);
+}
+function clearHist(){
+  hist=[];try{localStorage.removeItem('psi-chat')}catch(e){}
+  chat.innerHTML='';row(false,GREETING);
+}
+row(false,GREETING);
+try{
+  hist=JSON.parse(localStorage.getItem('psi-chat')||'[]');
+  for(const m of hist){if(m.me)row(true,m.text);else renderBot(m.text,m.steps)}
+}catch(e){hist=[]}
+
+let busy=false,aborter=null;
+function setBusy(b){
+  busy=b;
+  document.querySelectorAll('.chips .chip').forEach(c=>c.disabled=b);
+  sendBtn.textContent=b?'⏹':'➤';
+  sendBtn.title=b?'Dừng':'Gửi';
+  sendBtn.classList.toggle('stop',b);
+}
+async function send(text){
+  if(busy)return; // đang có request chạy
+  row(true,text);
+  saveHist(true,text);
+  const bubble=typing();
+  setBusy(true);
+  aborter=new AbortController();
+
+  let think=null,thinkText=null,ans=null,stepCount=0,ansRaw='';
+  function ensureParts(){
+    if(ans)return;
+    bubble.textContent='';
+    think=document.createElement('details');think.className='think';think.open=true;
+    think.innerHTML='<summary>⚙️ Actions</summary>';
+    thinkText=document.createElement('div');thinkText.className='thinkText';
+    think.appendChild(thinkText);
+    ans=document.createElement('div');
+    bubble.append(think,ans);
+    think.style.display='none';
+  }
+
+  try{
+    const r=await fetch('/api/chat/stream',{
+      method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({message:text,model:modelSel.value}),
+      signal:aborter.signal
+    });
+    if(!r.ok||!r.body)throw new Error('HTTP '+r.status);
+    const reader=r.body.getReader(),dec=new TextDecoder();
+    let buf='';
+    while(true){
+      const{done,value}=await reader.read();
+      if(done)break;
+      buf+=dec.decode(value,{stream:true});
+      const events=buf.split('\n\n');buf=events.pop();
+      for(const e of events){
+        const line=e.split('\n').find(l=>l.startsWith('data:'));
+        if(!line)continue;
+        let msg;try{msg=JSON.parse(line.slice(5))}catch(_){continue}
+        ensureParts();
+        if(msg.type==='step'){
+          think.style.display='';
+          stepCount++;
+          thinkText.textContent+=(thinkText.textContent?'\n':'')+msg.text;
+          thinkText.scrollTop=thinkText.scrollHeight;
+          if(!ans.textContent)ans.innerHTML='<span class="dots"><i></i><i></i><i></i></span>';
+        }else if(msg.type==='delta'){
+          ansRaw+=msg.delta;
+          setAnswer(ans,ansRaw);
+        }else if(msg.type==='final'){
+          setAnswer(ans,msg.text);
+          if(think.style.display!=='none'&&stepCount<=3)think.open=false;
+        }else if(msg.type==='error'){
+          ans.innerHTML='';
+          const s=document.createElement('span');s.className='err';s.textContent=msg.text;
+          ans.appendChild(s);ans.dataset.raw=msg.text;
+        }
+        scrollBottom();
+      }
+    }
+    if(ans&&!ans.textContent.trim())setAnswer(ans,'❌ Không nhận được phản hồi từ model.');
+    saveHist(false,ans?(ans.dataset.raw||ans.textContent):'',thinkText&&thinkText.textContent?thinkText.textContent:undefined);
+  }catch(e){
+    if(e.name==='AbortError'){
+      const note='⏹ Đã dừng theo yêu cầu.';
+      if(ans){const cur=ans.dataset.raw||'';setAnswer(ans,cur?cur+'\n\n'+note:note)}
+      else{bubble.textContent=note}
+      saveHist(false,(ans&&ans.dataset.raw)||note,thinkText&&thinkText.textContent?thinkText.textContent:undefined);
+    }else{
+      bubble.innerHTML='';
+      const s=document.createElement('span');s.className='err';
+      s.textContent='❌ Lỗi kết nối server: '+e.message;
+      bubble.appendChild(s);
+      saveHist(false,s.textContent);
+    }
+  }
+  finally{aborter=null;setBusy(false);scrollBottom();inp.focus()}
+}
+f.addEventListener('submit',e=>{
+  e.preventDefault();
+  if(busy){if(aborter)aborter.abort();return} /* nút đang là ⏹ Stop */
+  const v=inp.value.trim();if(!v)return;inp.value='';send(v);
+});
+
+/* ── Header meta ── */
+function setMeta(n,sched,configured){
+  document.getElementById('metaLine').innerHTML=
+    `Online · ${n} URL · lịch ${sched}${configured===false?' · ⚠️ chưa có API key':''}`;
+}
+(async()=>{
+  try{
+    const h=await(await fetch('/healthz')).json();
+    setMeta(h.urls,h.schedule,h.configured);
+    if(h.sheet_url)document.getElementById('sheetLink').href=h.sheet_url;
+  }catch(e){document.getElementById('metaLine').textContent='Không kết nối được server'}
+})();
+
+/* ── Config view ── */
+const urlList=document.getElementById('urlList');
+let mode='monthly';
+
+function updateUrlCount(){
+  const n=urlList.querySelectorAll('input').length;
+  document.getElementById('urlCount').textContent=n+' URL';
+}
+function addUrlRow(val){
+  const r=document.createElement('div');r.className='urlRow';
+  const i=document.createElement('input');i.value=val;i.placeholder='https://...';i.spellcheck=false;
+  i.addEventListener('input',()=>i.classList.toggle('bad',i.value.trim()&&!/^https?:\/\/\S+$/.test(i.value.trim())));
+  const d=document.createElement('button');d.type='button';d.className='delBtn';d.textContent='✕';d.title='Xóa URL';
+  d.onclick=()=>{r.remove();updateUrlCount()};
+  r.append(i,d);urlList.appendChild(r);
+  updateUrlCount();
+  if(!val)i.focus();
+}
+function setMode(v){
+  mode=v;
+  document.querySelectorAll('#modeSeg button').forEach(b=>b.classList.toggle('on',b.dataset.v===v));
+  document.getElementById('dayWrap').style.display=v==='monthly'?'':'none';
+  document.getElementById('weekWrap').style.display=v==='weekly'?'':'none';
+}
+document.querySelectorAll('#modeSeg button').forEach(b=>b.onclick=()=>setMode(b.dataset.v));
+
+async function loadCfg(){
+  const c=await(await fetch('/api/config')).json();
+  urlList.innerHTML='';
+  c.urls.forEach(u=>addUrlRow(u));
+  document.getElementById('pMobile').classList.toggle('on',c.strategies.includes('mobile'));
+  document.getElementById('pDesktop').classList.toggle('on',c.strategies.includes('desktop'));
+  setMode(c.schedule_mode);
+  document.getElementById('cfgTime').value=c.schedule_time;
+  document.getElementById('cfgDay').value=c.schedule_day_of_month;
+  document.getElementById('cfgWeekday').value=c.schedule_weekday;
+  document.getElementById('cfgMsg').textContent='';
+}
+async function saveCfg(){
+  const urls=[...urlList.querySelectorAll('input')].map(i=>i.value.trim()).filter(Boolean);
+  const strategies=[];
+  if(document.getElementById('pMobile').classList.contains('on'))strategies.push('mobile');
+  if(document.getElementById('pDesktop').classList.contains('on'))strategies.push('desktop');
+  const body={
+    urls,strategies,schedule_mode:mode,
+    schedule_time:document.getElementById('cfgTime').value,
+    schedule_day_of_month:parseInt(document.getElementById('cfgDay').value)||4,
+    schedule_weekday:document.getElementById('cfgWeekday').value
+  };
+  const msg=document.getElementById('cfgMsg');
+  const r=await(await fetch('/api/config',{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)})).json();
+  if(r.ok){
+    msg.textContent='✅ Đã lưu cấu hình';
+    setMeta(r.config.urls.length,`${r.config.schedule_mode} ${r.config.schedule_time}`);
+  }else msg.textContent='❌ '+r.error;
+}
+</script>
+</body>
+</html>
