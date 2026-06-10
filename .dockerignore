@@ -11,3 +11,4 @@ __pycache__/
 .agentbase/
 runtime_config.json
 .git/
+.greennode.json

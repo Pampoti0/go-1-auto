@@ -102,6 +102,7 @@ def startup():
         threading.Thread(target=_scheduler_loop, daemon=True).start()
 
 
+@app.get("/health")
 @app.get("/healthz")
 def healthz():
     cfg = runtime_config.current()
