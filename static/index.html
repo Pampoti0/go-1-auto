@@ -18,6 +18,10 @@ tailwind.config={darkMode:'class',theme:{extend:{colors:{accent:'#0ea371',accent
 ::-webkit-scrollbar{width:8px;height:8px}::-webkit-scrollbar-thumb{background:rgba(120,130,150,.35);border-radius:4px}
 .md b{font-weight:700}
 .md code{background:rgba(120,130,150,.15);border:1px solid rgba(120,130,150,.25);border-radius:5px;padding:1px 5px;font-size:12.5px;font-family:ui-monospace,monospace}
+.md table{border-collapse:collapse;margin:8px 0;font-size:12.5px;display:block;max-width:100%;overflow-x:auto;white-space:nowrap}
+.md th,.md td{border:1px solid rgba(120,130,150,.28);padding:4px 11px;text-align:right}
+.md th:first-child,.md td:first-child{text-align:left}
+.md thead th{background:rgba(120,130,150,.13);font-weight:700}
 svg rect.bar{transition:width .6s cubic-bezier(.2,.8,.2,1)}
 @keyframes up{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:none}}
 .msg-in{animation:up .25s ease}
@@ -60,6 +64,26 @@ function md(s){
   s=s.replace(/\*\*([^*\n]+)\*\*/g,'<b>$1</b>');
   s=s.replace(/(^|\n)#{1,4} (.*)/g,'$1<b>$2</b>');
   s=s.replace(/(^|\n)[ \t]*[-*] /g,'$1• ');
+  /* bảng markdown | a | b | → <table> */
+  {
+    const lines=s.split('\n');const out=[];let buf=[];
+    const isRow=l=>/^\s*\|.*\|\s*$/.test(l);
+    const isSep=l=>/^\s*\|[\s:•\-|]+\|\s*$/.test(l);
+    const cells=r=>r.trim().replace(/^\||\|$/g,'').split('|').map(c=>c.trim());
+    const flush=()=>{
+      const rows=buf.filter(l=>!isSep(l));
+      if(rows.length>=2){
+        let h='<table><thead><tr>'+cells(rows[0]).map(c=>'<th>'+c+'</th>').join('')+'</tr></thead><tbody>';
+        rows.slice(1).forEach(r=>{h+='<tr>'+cells(r).map(c=>'<td>'+c+'</td>').join('')+'</tr>'});
+        out.push(h+'</tbody></table>');
+      }else out.push(...buf);
+      buf=[];
+    };
+    for(const l of lines){ if(isRow(l))buf.push(l); else {flush();out.push(l)} }
+    flush();
+    s=out.join('\n');
+    s=s.replace(/\n?(<table>)/g,'$1').replace(/(<\/table>)\n?/g,'$1');
+  }
   s=s.replace(/\n{3,}/g,'\n\n');
   return s;
 }
@@ -67,11 +91,90 @@ const scoreColor=n=>n>=90?'#0ea371':(n>=50?'#d97706':'#dc2626');
 const pathOf=u=>{try{const x=new URL(u);return x.pathname==='/'?x.hostname:x.pathname}catch(e){return u}};
 const MODELS=[['google/gemma-4-31b-it','Gemma 4 31B'],['qwen/qwen3-5-27b','Qwen3.5 27B'],['minimax/minimax-m2.5','MiniMax M2.5']];
 
+/* SVG icons (lucide-style, stroke) */
+const ICON_PATHS={
+  home:'M3 10.5L12 3l9 7.5M5 9.5V21h14V9.5',
+  chat:'M21 12a8 8 0 0 1-8 8H4l2-3a8 8 0 1 1 15-5z',
+  urls:'M11 19a8 8 0 1 0 0-16 8 8 0 0 0 0 16zM21 21l-4.35-4.35',
+  dash:'M4 20V10M10 20V4M16 20v-7M22 20H2',
+  ads:'M3 11l14-5v12L3 13v-2zM17 8a4 4 0 0 1 0 8M7 13v5a2 2 0 0 0 4 0v-4',
+  alerts:'M18 8a6 6 0 1 0-12 0c0 7-3 9-3 9h18s-3-2-3-9M10.3 21a1.9 1.9 0 0 0 3.4 0',
+  config:'M12 15a3 3 0 1 0 0-6 3 3 0 0 0 0 6zM19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06A1.65 1.65 0 0 0 15 19.4a1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.6 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.6a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9c.14.31.22.65.22 1h.29a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.42 1z',
+  psiSheet:'M14 3v5h5M5 3h9l5 5v13H5V3zM9 13h6M9 17h6',
+  link:'M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71',
+  device:'M2 5h20v12H2zM8 21h8M12 17v4',
+  clock:'M12 22a10 10 0 1 0 0-20 10 10 0 0 0 0 20zM12 7v5l3.5 2',
+  trend:'M22 7l-8.5 8.5-5-5L2 17M15 7h7v7',
+  play:'M6 4l14 8-14 8V4z',
+  news:'M14 3v5h5M5 3h9l5 5v13H5V3zM9 12h6M9 16h6',
+  clipboard:'M9 3h6v3H9zM9 4H6a1 1 0 0 0-1 1v15a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1V5a1 1 0 0 0-1-1h-3M9 11h6M9 15h4',
+  trash:'M3 6h18M8 6V4h8v2M6 6l1 15h10l1-15M10 10v7M14 10v7',
+  refresh:'M21 12a9 9 0 1 1-2.64-6.36M21 3v6h-6',
+  save:'M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2zM17 21v-8H7v8M7 3v5h7',
+  undo:'M3 7v6h6M3 13a9 9 0 1 0 3-7.7',
+  warn:'M12 9v4M12 17h.01M10.3 3.9L1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z',
+  zap:'M13 2L3 14h7l-1 8 10-12h-7l1-8z',down:'M3 7l6 6 4-4 8 8M21 13v6h-6',
+  seoSheet:'M14 3v5h5M5 3h9l5 5v13H5V3zM9 13h6M9 17h6',
+};
+const NavIcon=({id,cls})=>(
+  <svg viewBox="0 0 24 24" className={cls||"w-[17px] h-[17px] flex-none"} fill="none"
+       stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+    <path d={ICON_PATHS[id]||ICON_PATHS.home}/>
+  </svg>
+);
+
 /* ───────────────────────── shared bits ───────────────────────── */
 const Dots=()=> <span className="inline-flex gap-1"><i className="dot1 w-1.5 h-1.5 rounded-full bg-slate-400 inline-block"/><i className="dot2 w-1.5 h-1.5 rounded-full bg-slate-400 inline-block"/><i className="dot3 w-1.5 h-1.5 rounded-full bg-slate-400 inline-block"/></span>;
 
+const Spinner=({label})=>(
+  <div className="flex-1 grid place-items-center py-16">
+    <div className="flex flex-col items-center gap-3">
+      <svg className="w-9 h-9 animate-spin text-violet-500" viewBox="0 0 24 24" fill="none">
+        <circle cx="12" cy="12" r="10" stroke="currentColor" strokeOpacity=".15" strokeWidth="4"/>
+        <path d="M22 12A10 10 0 0 0 12 2" stroke="currentColor" strokeWidth="4" strokeLinecap="round"/>
+      </svg>
+      <span className="text-xs text-slate-400">{label||'Đệ đang lấy dữ liệu…'}</span>
+    </div>
+  </div>
+);
+
+function Select({value,onChange,options,className}){
+  const [open,setOpen]=useState(false);
+  const ref=useRef(null);
+  useEffect(()=>{
+    const h=e=>{if(ref.current&&!ref.current.contains(e.target))setOpen(false)};
+    document.addEventListener('mousedown',h);
+    return()=>document.removeEventListener('mousedown',h);
+  },[]);
+  const opts=options.map(o=>typeof o==='object'?o:{value:o,label:String(o)});
+  const cur=opts.find(o=>String(o.value)===String(value));
+  return (
+    <div ref={ref} className={"relative "+(className||'')}>
+      <button type="button" onClick={()=>setOpen(!open)}
+        className="w-full flex items-center gap-2 bg-white dark:bg-slate-900 text-slate-700 dark:text-slate-200 border border-slate-300 dark:border-slate-600 rounded-lg px-3 py-2 text-sm transition hover:border-slate-400 focus:outline-none focus:border-violet-400 focus:ring-2 focus:ring-violet-500/20">
+        <span className="truncate">{cur?cur.label:String(value)}</span>
+        <svg className={"w-3.5 h-3.5 ml-auto flex-none text-slate-400 transition-transform "+(open?'rotate-180':'')} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M6 9l6 6 6-6"/></svg>
+      </button>
+      {open&&(
+        <div className="absolute z-50 mt-1.5 w-full min-w-max max-h-64 overflow-y-auto rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 shadow-xl py-1.5">
+          {opts.map(o=>{
+            const sel=String(o.value)===String(value);
+            return (
+              <button key={o.value} type="button" onClick={()=>{onChange(o.value);setOpen(false)}}
+                className={"w-full text-left px-3 py-1.5 text-sm flex items-center gap-2 transition hover:bg-violet-50 dark:hover:bg-violet-900/25 "+(sel?'text-violet-600 dark:text-violet-400 font-semibold':'text-slate-600 dark:text-slate-300')}>
+                <svg className={"w-3.5 h-3.5 flex-none "+(sel?'':'opacity-0')} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><path d="M20 6L9 17l-5-5"/></svg>
+                <span className="truncate">{o.label}</span>
+              </button>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}
+
 const card="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-2xl shadow-sm";
-const input="bg-slate-100 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-lg px-3 py-2 text-sm outline-none focus:border-accent2";
+const input="bg-white dark:bg-slate-900 text-slate-700 dark:text-slate-200 border border-slate-300 dark:border-slate-600 rounded-lg px-3 py-2 text-sm outline-none transition hover:border-slate-400 dark:hover:border-slate-500 focus:border-violet-400 focus:ring-2 focus:ring-violet-500/20";
 const chipCls="text-xs px-3.5 py-1.5 rounded-full border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 shadow-sm hover:border-accent hover:text-accent transition disabled:opacity-40 disabled:pointer-events-none";
 
 /* ───────────────────────── DeCho event bus ─────────────────────────
@@ -83,7 +186,8 @@ const dechoBus={
   listeners:new Set(),
   emit(e){this.listeners.forEach(f=>f(e))},
   on(f){this.listeners.add(f);return()=>this.listeners.delete(f)},
-  say(text,ms=7000){this.emit({type:'say',text,ms})},
+  /* thời gian hiện theo độ dài text (≈60ms/ký tự), tối thiểu 12s, tối đa 45s */
+  say(text,ms){this.emit({type:'say',text,ms:ms||(text?Math.min(45000,Math.max(12000,text.length*60)):1)})},
   busy(b){this.emit({type:'busy',b})},
   act(a){this.emit({type:'act',a})},
 };
@@ -365,11 +469,18 @@ function DechoDock({showAsk}){
         </div>
         {showAsk&&<form onSubmit={ask} className="flex gap-1 px-2 pb-1.5">
           <input value={q} onChange={e=>setQ(e.target.value)} placeholder="Hỏi Đệ về màn hình này…"
-            className="flex-1 min-w-0 text-[11.5px] px-2 py-1.5 rounded-lg bg-white/80 dark:bg-slate-900/60 border border-slate-200 dark:border-slate-700 outline-none focus:border-accent2"/>
-          <button disabled={asking} className="text-[11px] px-2.5 rounded-lg bg-gradient-to-br from-accent to-accent2 text-white font-bold disabled:opacity-50">{asking?'…':'➤'}</button>
+            className="flex-1 min-w-0 text-[11.5px] px-2 py-1.5 rounded-lg bg-white/80 dark:bg-slate-900/60 border border-slate-200 dark:border-slate-700 outline-none transition focus:border-violet-400 focus:ring-2 focus:ring-violet-500/20"/>
+          <button disabled={asking} className="px-2.5 rounded-lg bg-violet-500 hover:bg-violet-600 text-white grid place-items-center disabled:opacity-50 transition">
+            {asking
+              ?<svg className="w-3 h-3 animate-spin" viewBox="0 0 24 24" fill="none"><circle cx="12" cy="12" r="10" stroke="currentColor" strokeOpacity=".3" strokeWidth="4"/><path d="M22 12A10 10 0 0 0 12 2" stroke="currentColor" strokeWidth="4" strokeLinecap="round"/></svg>
+              :<svg className="w-3 h-3" viewBox="0 0 24 24" fill="currentColor"><path d="M3.5 20.3c-.4.9.5 1.8 1.4 1.4l16.5-8.3c.9-.4.9-1.7 0-2.1L4.9 2.9c-.9-.4-1.8.5-1.4 1.4L6 11.2c.1.3.1.6 0 .9l-2.5 8.2z"/></svg>}
+          </button>
         </form>}
         <div className="pb-1.5 text-center text-[10px] text-slate-400 select-none">
-          {busy?'⚙️ Đệ đang chạy việc':(showAsk?'🟢 Đệ đang rảnh · hỏi Đệ bên trên':'🟢 Đệ đang rảnh · nhắn Đệ ở khung chat')}
+          <span className="inline-flex items-center justify-center gap-1.5">
+            <span className={"w-1.5 h-1.5 rounded-full flex-none "+(busy?'bg-amber-400 animate-pulse':'bg-emerald-500')}/>
+            {busy?'Đệ đang chạy việc':(showAsk?'Đệ đang rảnh · hỏi Đệ bên trên':'Đệ đang rảnh · nhắn Đệ ở khung chat')}
+          </span>
         </div>
       </div>
     </div>
@@ -382,12 +493,12 @@ function Bubble({m}){
   return (
     <div className={"msg-in flex gap-2.5 items-end "+(m.me?"flex-row-reverse":"")}>
       {m.me
-        ?<div className="w-8 h-8 rounded-full flex-none grid place-items-center text-[15px] bg-gradient-to-br from-blue-100 to-indigo-100 dark:from-blue-900 dark:to-indigo-900 border border-slate-200 dark:border-slate-700">🧑</div>
+        ?<div className="w-8 h-8 rounded-full flex-none grid place-items-center text-slate-500 dark:text-slate-300 bg-gradient-to-br from-blue-100 to-indigo-100 dark:from-blue-900 dark:to-indigo-900 border border-slate-200 dark:border-slate-700"><svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg></div>
         :<div className="w-8 h-8 rounded-full flex-none grid place-items-center text-[12px] font-extrabold text-white bg-gradient-to-br from-accent to-accent2 border border-slate-200 dark:border-slate-700" title="DeCho">Đệ</div>}
       <div className={"max-w-[82%] px-4 py-3 text-[14.5px] leading-relaxed whitespace-pre-wrap break-words rounded-2xl "+(m.me?"bg-gradient-to-br from-blue-600 to-indigo-600 text-white rounded-br-md":"bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 shadow-sm rounded-bl-md")}>
         {!m.me&&m.steps&&(
           <details open={m.streaming||m.stepsOpen} className="mb-2 border border-dashed border-slate-300 dark:border-slate-600 rounded-lg px-2.5 py-1.5 bg-slate-50 dark:bg-slate-800">
-            <summary className="cursor-pointer text-[11.5px] font-semibold text-slate-500 select-none">⚙️ Actions</summary>
+            <summary className="cursor-pointer text-[11.5px] font-semibold text-slate-500 select-none"><span className="inline-flex items-center gap-1.5 align-middle"><NavIcon id="config" cls="w-3.5 h-3.5"/>Actions</span></summary>
             <div className="mt-1.5 text-[12px] leading-relaxed text-slate-500 font-mono whitespace-pre-wrap max-h-72 overflow-y-auto"
                  ref={el=>{if(el&&m.streaming)el.scrollTop=el.scrollHeight}}>{m.steps}</div>
           </details>
@@ -493,22 +604,30 @@ function ChatView({cfg,model}){
   return (
     <div className="flex-1 flex flex-col min-h-0">
       <div className="flex gap-2 flex-wrap items-center px-6 pt-3.5 pb-3 border-b border-slate-200 dark:border-slate-800 max-w-[1150px] w-full mx-auto">
-        {cfg.chips.map(([label,m])=>
-          <button key={label} disabled={busy} className={chipCls} onClick={()=>send(m)}>{label}</button>)}
-        <button disabled={busy} className={chipCls} onClick={clearHist}>🗑 Xóa lịch sử</button>
+        {cfg.chips.map(([ic,label,m])=>
+          <button key={label} disabled={busy} className={chipCls+" inline-flex items-center gap-1.5"} onClick={()=>send(m)}>
+            <span className="text-violet-500"><NavIcon id={ic} cls="w-3.5 h-3.5"/></span>{label}
+          </button>)}
+        <button disabled={busy} className={chipCls+" inline-flex items-center gap-1.5"} onClick={clearHist}>
+          <span className="text-slate-400"><NavIcon id="trash" cls="w-3.5 h-3.5"/></span>Xóa lịch sử
+        </button>
         {cfg.meta&&<span className="ml-auto text-xs text-slate-400">{cfg.meta}</span>}
       </div>
-      <div ref={scrollRef} className="flex-1 min-h-0 overflow-y-auto scroll-smooth">
+      <div ref={scrollRef} className="flex-1 min-h-0 overflow-y-auto scroll-smooth bg-slate-50 dark:bg-slate-950">
         <div className="max-w-[1150px] mx-auto px-6 py-4 flex flex-col gap-3.5">
           {msgs.map((m,i)=><Bubble key={i} m={m}/>)}
         </div>
       </div>
       <div className="px-6 pb-4 pt-2">
-        <form onSubmit={submit} className={"max-w-[1150px] mx-auto flex gap-2.5 p-2 rounded-2xl "+card}>
+        <form onSubmit={submit} className={"max-w-[1150px] mx-auto flex gap-2.5 p-2 rounded-2xl transition focus-within:border-violet-400 focus-within:ring-2 focus-within:ring-violet-500/20 "+card}>
           <input value={inp} onChange={e=>setInp(e.target.value)} placeholder={cfg.placeholder}
                  className="flex-1 bg-transparent outline-none px-2.5 text-[14.5px]"/>
-          <button className={"w-11 h-11 rounded-xl text-white text-lg font-bold transition "+(busy?"bg-red-500 hover:bg-red-600":"bg-gradient-to-br from-accent to-accent2 hover:brightness-110")}
-                  title={busy?'Dừng':'Gửi'}>{busy?'⏹':'➤'}</button>
+          <button className={"w-11 h-11 rounded-xl text-white grid place-items-center transition "+(busy?"bg-red-500 hover:bg-red-600":"bg-violet-500 hover:bg-violet-600")}
+                  title={busy?'Dừng':'Gửi'}>
+            {busy
+              ?<svg className="w-4 h-4" viewBox="0 0 24 24" fill="currentColor"><rect x="5" y="5" width="14" height="14" rx="3"/></svg>
+              :<svg className="w-[18px] h-[18px] -mr-0.5" viewBox="0 0 24 24" fill="currentColor"><path d="M3.5 20.3c-.4.9.5 1.8 1.4 1.4l16.5-8.3c.9-.4.9-1.7 0-2.1L4.9 2.9c-.9-.4-1.8.5-1.4 1.4L6 11.2c.1.3.1.6 0 .9l-2.5 8.2z" transform="rotate(0 12 12)"/></svg>}
+          </button>
         </form>
       </div>
     </div>
@@ -525,7 +644,7 @@ function cellCls(i,v){
   return ok?'bg-emerald-100 dark:bg-emerald-900/40':(soso?'bg-amber-100 dark:bg-amber-900/40':'bg-red-100 dark:bg-red-900/40');
 }
 const VIOLET='#8b5cf6',SKY='#0ea5e9';
-const mosaicCard="bg-white dark:bg-slate-900 shadow-xs rounded-xl border border-slate-200 dark:border-slate-800";
+const mosaicCard="bg-white dark:bg-slate-900 shadow-xs rounded-xl border border-slate-200 dark:border-slate-800 overflow-hidden";
 
 function Sparkline({points,color}){
   if(!points||points.length<2)return <div className="h-9"/>;
@@ -679,7 +798,7 @@ function Dashboard(){
   },[data,run]);
 
   if(err)return <div className="p-8 text-red-500 text-sm">❌ {err}</div>;
-  if(!data)return <div className="p-8 text-slate-400 text-sm">Đang tải...</div>;
+  if(!data)return <Spinner/>;
 
   const runs=[...new Set(data.rows.map(x=>x[0]))].sort();
   const rows=data.rows.filter(x=>x[0]===run);
@@ -715,14 +834,12 @@ function Dashboard(){
             <p className="text-xs text-slate-400 mt-0.5">{data.rows.length} dòng · {runs.length} lần chạy trong tháng</p>
           </div>
           <div className="ml-auto flex gap-2 items-center">
-            <select className={input+" shadow-xs"} value={month} onChange={e=>load(e.target.value)}>
-              {data.tabs.slice().reverse().map(t=><option key={t}>{t}</option>)}
-            </select>
-            <select className={input+" shadow-xs max-w-[200px]"} value={run} onChange={e=>setRun(e.target.value)}>
-              {runs.slice().reverse().map((t,i)=><option key={t} value={t}>{t}{i===0?' (mới nhất)':''}</option>)}
-            </select>
+            <Select value={month} onChange={v=>load(v)} className="w-32"
+                    options={data.tabs.slice().reverse()}/>
+            <Select value={run} onChange={setRun} className="w-56"
+                    options={runs.slice().reverse().map((t,i)=>({value:t,label:t+(i===0?' (mới nhất)':'')}))}/>
             <button onClick={()=>load(month)}
-              className="px-3.5 py-2 rounded-lg text-sm font-medium text-white bg-violet-500 hover:bg-violet-600 shadow-xs">↻ Tải lại</button>
+              className="px-3.5 py-2 rounded-lg text-sm font-medium text-white bg-violet-500 hover:bg-violet-600 shadow-xs inline-flex items-center gap-1.5"><NavIcon id="refresh" cls="w-4 h-4"/>Tải lại</button>
           </div>
         </div>
 
@@ -840,10 +957,10 @@ function computeAlerts(psi,seo){
     const prevMap={};prev.forEach(x=>{prevMap[x[1]+x[2]]=parseFloat(x[3])});
     cur.forEach(x=>{
       const v=parseFloat(x[3]);
-      if(x[3]==='ERROR')alerts.push({lv:'high',icon:'🔴',text:`${pathOf(x[1])} (${x[2].toLowerCase()}): check PSI lỗi`,go:'dash'});
-      else if(!isNaN(v)&&v<50)alerts.push({lv:'high',icon:'⚡',text:`${pathOf(x[1])} (${x[2].toLowerCase()}): score ${v} — dưới ngưỡng 50`,go:'dash'});
+      if(x[3]==='ERROR')alerts.push({lv:'high',icon:'warn',text:`${pathOf(x[1])} (${x[2].toLowerCase()}): check PSI lỗi`,go:'dash'});
+      else if(!isNaN(v)&&v<50)alerts.push({lv:'high',icon:'zap',text:`${pathOf(x[1])} (${x[2].toLowerCase()}): score ${v} — dưới ngưỡng 50`,go:'dash'});
       const pv=prevMap[x[1]+x[2]];
-      if(!isNaN(v)&&pv!=null&&pv-v>=10)alerts.push({lv:'med',icon:'📉',text:`${pathOf(x[1])} (${x[2].toLowerCase()}): score tụt ${Math.round(pv-v)} điểm (${pv}→${v})`,go:'dash'});
+      if(!isNaN(v)&&pv!=null&&pv-v>=10)alerts.push({lv:'med',icon:'down',text:`${pathOf(x[1])} (${x[2].toLowerCase()}): score tụt ${Math.round(pv-v)} điểm (${pv}→${v})`,go:'dash'});
     });
   }
   if(seo&&seo.rows&&seo.rows.length&&seo.headers){
@@ -851,7 +968,7 @@ function computeAlerts(psi,seo){
     seo.rows.forEach(r=>{
       const ch=parseFloat(r[icc]),clicks=parseFloat(r[ic]);
       if(!isNaN(ch)&&ch<=-20&&clicks>=20)
-        alerts.push({lv:ch<=-40?'high':'med',icon:'🔻',text:`${pathOf(r[iu]||'')}: clicks giảm ${ch}% so với tháng trước (${seo.tab})`,go:'urls'});
+        alerts.push({lv:ch<=-40?'high':'med',icon:'down',text:`${pathOf(r[iu]||'')}: clicks giảm ${ch}% so với tháng trước (${seo.tab})`,go:'urls'});
     });
   }
   alerts.sort((a,b)=>(a.lv==='high'?0:1)-(b.lv==='high'?0:1));
@@ -890,8 +1007,17 @@ function Overview({go}){
   const {psi,seo,sum}=useAgentData();
   const [cfg,setCfg]=useState(null);
   useEffect(()=>{(async()=>{try{setCfg(await(await fetch('/api/config')).json())}catch(e){}})()},[]);
-  useEffect(()=>{if(psi)dechoCtx.info='Màn hình Tổng quan: sức khỏe website (PSI + SEO), alerts, lịch chạy.'},[psi]);
-  if(!psi||!seo||!sum)return <div className="p-8 text-slate-400 text-sm">Đang tải...</div>;
+  useEffect(()=>{
+    if(!psi||!seo||!sum)return;
+    const run=lastRun(psi);
+    const rows=run?psiRunRows(psi,run):[];
+    const sc=s=>rows.filter(x=>x[2]===s).map(x=>parseFloat(x[3])).filter(n=>!isNaN(n));
+    const avg=a=>a.length?Math.round(a.reduce((p,c)=>p+c,0)/a.length):'—';
+    const ms=(sum.months||[]).map(m=>`${m.month}: clicks=${m.clicks??'—'}, views=${m.views??'—'}, users=${m.users??'—'}`).join('; ');
+    const al=computeAlerts(psi,seo).slice(0,8).map(a=>`[${a.lv}] ${a.text}`).join('\n');
+    dechoCtx.info=`Màn hình Tổng quan. PSI lần chạy ${run||'—'}: điểm TB mobile ${avg(sc('MOBILE'))}, desktop ${avg(sc('DESKTOP'))}. SEO theo tháng: ${ms||'chưa có'}. Alerts:\n${al||'không có'}`;
+  },[psi,seo,sum]);
+  if(!psi||!seo||!sum)return <Spinner/>;
 
   const run=lastRun(psi);
   const rows=run?psiRunRows(psi,run):[];
@@ -914,8 +1040,8 @@ function Overview({go}){
             <p className="text-xs text-slate-400 mt-0.5">DeCho đang theo dõi PageSpeed + GSC + GA4</p>
           </div>
           <div className="ml-auto flex gap-2">
-            <button onClick={()=>go('chat')} className="px-3.5 py-2 rounded-lg text-sm font-medium text-white bg-violet-500 hover:bg-violet-600 shadow-xs">💬 Hỏi DeCho</button>
-            <button onClick={()=>go('dash')} className={chipCls+" !text-sm !px-3.5 !py-2 !rounded-lg"}>📊 PageSpeed</button>
+            <button onClick={()=>go('chat')} className="px-3.5 py-2 rounded-lg text-sm font-medium text-white bg-violet-500 hover:bg-violet-600 shadow-xs inline-flex items-center gap-1.5"><NavIcon id="chat" cls="w-4 h-4"/>Hỏi DeCho</button>
+            <button onClick={()=>go('dash')} className={chipCls+" !text-sm !px-3.5 !py-2 !rounded-lg inline-flex items-center gap-1.5"}><NavIcon id="dash" cls="w-4 h-4"/>PageSpeed</button>
           </div>
         </div>
 
@@ -958,13 +1084,13 @@ function Overview({go}){
         <div className="grid grid-cols-12 gap-5">
           <div className={"col-span-12 xl:col-span-7 "+mosaicCard}>
             <div className="px-5 pt-4 pb-2 border-b border-slate-100 dark:border-slate-800 flex items-center">
-              <h3 className="font-semibold text-[15px]">🚨 Alerts cần xử lý</h3>
+              <h3 className="font-semibold text-[15px] flex items-center gap-2"><span className="text-red-500"><NavIcon id="alerts" cls="w-4 h-4"/></span>Alerts cần xử lý</h3>
               {alerts.length>5&&<button onClick={()=>go('alerts')} className="ml-auto text-xs text-violet-500 hover:underline">Xem tất cả ({alerts.length})</button>}
             </div>
             <div className="p-4 flex flex-col gap-2">
               {alerts.length?alerts.slice(0,5).map((a,i)=>(
                 <button key={i} onClick={()=>go(a.go)} className="flex items-start gap-2.5 text-left text-[13px] px-3 py-2 rounded-lg hover:bg-slate-50 dark:hover:bg-slate-800/50">
-                  <span>{a.icon}</span>
+                  <span className={"mt-0.5 flex-none "+(a.lv==='high'?'text-red-500':'text-amber-500')}><NavIcon id={a.icon} cls="w-4 h-4"/></span>
                   <span className={a.lv==='high'?'text-red-600 dark:text-red-400':'text-slate-600 dark:text-slate-300'}>{a.text}</span>
                 </button>
               )):<div className="text-sm text-slate-400 py-6 text-center">Không có alert nào — Đệ canh kỹ rồi, chill đi Đại ca 🟢</div>}
@@ -972,14 +1098,14 @@ function Overview({go}){
           </div>
           <div className={"col-span-12 xl:col-span-5 "+mosaicCard}>
             <div className="px-5 pt-4 pb-2 border-b border-slate-100 dark:border-slate-800">
-              <h3 className="font-semibold text-[15px]">🗓 Việc sắp diễn ra</h3>
+              <h3 className="font-semibold text-[15px] flex items-center gap-2"><span className="text-violet-500"><NavIcon id="clock" cls="w-4 h-4"/></span>Việc sắp diễn ra</h3>
             </div>
             <div className="p-4 flex flex-col gap-2.5 text-[13px] text-slate-600 dark:text-slate-300">
               {cfg&&<React.Fragment>
-                <div className="flex gap-2"><span>⚡</span><span>PageSpeed check: <b>{cfg.schedule_mode}</b> lúc <b>{cfg.schedule_time}</b>{cfg.schedule_mode==='monthly'?` (ngày ${cfg.schedule_day_of_month})`:''}</span></div>
-                <div className="flex gap-2"><span>📈</span><span>Báo cáo SEO: ngày <b>{cfg.seo_run_day_of_month}</b> hàng tháng lúc <b>{cfg.seo_run_time}</b></span></div>
+                <div className="flex gap-2"><span className="text-violet-500 mt-0.5 flex-none"><NavIcon id="zap" cls="w-4 h-4"/></span><span>PageSpeed check: <b>{cfg.schedule_mode}</b> lúc <b>{cfg.schedule_time}</b>{cfg.schedule_mode==='monthly'?` (ngày ${cfg.schedule_day_of_month})`:''}</span></div>
+                <div className="flex gap-2"><span className="text-sky-500 mt-0.5 flex-none"><NavIcon id="trend" cls="w-4 h-4"/></span><span>Báo cáo SEO: ngày <b>{cfg.seo_run_day_of_month}</b> hàng tháng lúc <b>{cfg.seo_run_time}</b></span></div>
               </React.Fragment>}
-              <div className="flex gap-2"><span>💾</span><span>Kết quả tự ghi vào Google Sheet (PSI + SEO + log)</span></div>
+              <div className="flex gap-2"><span className="text-slate-400 mt-0.5 flex-none"><NavIcon id="save" cls="w-4 h-4"/></span><span>Kết quả tự ghi vào Google Sheet (PSI + SEO + log)</span></div>
               <button onClick={()=>go('config')} className="self-start mt-1 text-xs text-violet-500 hover:underline">Chỉnh lịch →</button>
             </div>
           </div>
@@ -998,9 +1124,9 @@ function AlertsView({go}){
       if(a.filter(x=>x.lv==='high').length)dechoBus.say(`🚨 Có ${a.filter(x=>x.lv==='high').length} alert ưu tiên cao đó Đại ca, xử sớm nha.`,7000);
     }
   },[psi,seo]);
-  if(!psi||!seo)return <div className="p-8 text-slate-400 text-sm">Đang tải...</div>;
+  if(!psi||!seo)return <Spinner/>;
   const alerts=computeAlerts(psi,seo);
-  const groups=[['high','🔥 High priority'],['med','⚠️ Medium priority']];
+  const groups=[['high','High priority','text-red-500'],['med','Medium priority','text-amber-500']];
   return (
     <div className="flex-1 min-h-0 overflow-y-auto px-6 py-5 bg-slate-50 dark:bg-slate-950">
       <div className="max-w-[900px] mx-auto flex flex-col gap-5">
@@ -1011,18 +1137,18 @@ function AlertsView({go}){
         {alerts.length===0&&(
           <div className={mosaicCard+" p-10 text-center text-slate-400 text-sm"}>Không có bất thường nào — hệ thống xanh, Đệ vẫn canh đều 🟢</div>
         )}
-        {groups.map(([lv,title])=>{
+        {groups.map(([lv,title,tc])=>{
           const list=alerts.filter(a=>a.lv===lv);
           if(!list.length)return null;
           return (
             <div key={lv} className={mosaicCard}>
               <div className="px-5 pt-4 pb-2 border-b border-slate-100 dark:border-slate-800">
-                <h3 className="font-semibold text-[15px]">{title} <span className="text-slate-400 font-normal">({list.length})</span></h3>
+                <h3 className="font-semibold text-[15px] flex items-center gap-2"><span className={tc}><NavIcon id="warn" cls="w-4 h-4"/></span>{title} <span className="text-slate-400 font-normal">({list.length})</span></h3>
               </div>
               <div className="p-4 flex flex-col gap-1.5">
                 {list.map((a,i)=>(
                   <button key={i} onClick={()=>go(a.go)} className="flex items-start gap-2.5 text-left text-[13.5px] px-3 py-2.5 rounded-lg hover:bg-slate-50 dark:hover:bg-slate-800/50">
-                    <span>{a.icon}</span>
+                    <span className={"mt-0.5 flex-none "+(a.lv==='high'?'text-red-500':'text-amber-500')}><NavIcon id={a.icon} cls="w-4 h-4"/></span>
                     <span className={lv==='high'?'text-red-600 dark:text-red-400':''}>{a.text}</span>
                     <span className="ml-auto text-[11px] text-slate-400 flex-none">{a.go==='dash'?'PageSpeed →':'URL Intel →'}</span>
                   </button>
@@ -1040,8 +1166,22 @@ function UrlIntel(){
   const {psi,seo}=useAgentData();
   const [q,setQ]=useState('');
   const [sel,setSel]=useState(null);
-  useEffect(()=>{dechoCtx.info='Màn hình URL Intelligence: hợp nhất PSI score + traffic GSC/GA4 theo từng URL.'},[]);
-  if(!psi||!seo)return <div className="p-8 text-slate-400 text-sm">Đang tải...</div>;
+  useEffect(()=>{ /* bối cảnh chi tiết cho DeCho: data từng dòng + URL đang chọn */
+    if(!psi||!seo||!seo.headers||!seo.headers.length)return;
+    const run=lastRun(psi);
+    const pm={};
+    if(run)psiRunRows(psi,run).forEach(x=>{const k=pathOf(x[1]);(pm[k]=pm[k]||{})[x[2]]=x[3]});
+    const h=seo.headers,idx={};h.forEach((c,i)=>idx[c]=i);
+    const g=(r,c)=>r[idx[c]]??'';
+    const lines=(seo.rows||[]).slice(0,60).map(r=>{
+      const p=pathOf(g(r,'url'));const ps=pm[p]||{};
+      return `${p}: views=${g(r,'views')} (Δ${g(r,'views_change_%')}%), users=${g(r,'users')}, clicks=${g(r,'clicks')} (Δ${g(r,'clicks_change_%')}%), impressions=${g(r,'impressions')}, PSI mobile=${ps.MOBILE??'—'}, desktop=${ps.DESKTOP??'—'}`;
+    });
+    dechoCtx.info=`Màn hình URL Intelligence: bảng hợp nhất traffic GSC/GA4 tháng ${seo.tab} + PageSpeed (lần chạy ${run||'—'}), ${(seo.rows||[]).length} URL. Δ% = so với tháng trước. Dữ liệu từng dòng:\n`
+      +lines.join('\n')
+      +(sel?`\n\nNgười dùng ĐANG XEM CHI TIẾT: ${sel.path} — views ${sel.views}, users ${sel.users}, clicks ${sel.clicks}, impressions ${sel.impr}, PSI mobile ${sel.psiM??'—'} / desktop ${sel.psiD??'—'}`:'');
+  },[psi,seo,sel]);
+  if(!psi||!seo)return <Spinner/>;
 
   const run=lastRun(psi);
   const psiMap={};
@@ -1131,6 +1271,120 @@ function UrlIntel(){
   );
 }
 
+function AdsView(){
+  const [camps,setCamps]=useState(null);
+  const [perf,setPerf]=useState(null);
+  const [days,setDays]=useState(7);
+  const [err,setErr]=useState('');
+  const load=useCallback(async d=>{
+    setErr('');setPerf(null);
+    try{
+      const [c,p]=await Promise.all([
+        fetch('/api/ads/campaigns').then(r=>r.json()),
+        fetch('/api/ads/perf?days='+d).then(r=>r.json()),
+      ]);
+      if(c.error||p.error){setErr(c.error||p.error);return}
+      setCamps(c.campaigns);setPerf(p);
+    }catch(e){setErr(e.message)}
+  },[]);
+  useEffect(()=>{load(days)},[]);
+  useEffect(()=>{
+    if(!perf)return;
+    const agg={};
+    perf.rows.forEach(r=>{const a=agg[r.name]=agg[r.name]||{cost:0,clicks:0,conv:0};a.cost+=r.cost;a.clicks+=r.clicks;a.conv+=r.conversions});
+    dechoCtx.info=`Màn hình Paid Campaigns (Google Ads, ${perf.start}→${perf.end}):\n`+
+      Object.entries(agg).map(([n,a])=>`${n}: cost=${a.cost.toFixed(0)}, clicks=${a.clicks}, conv=${a.conv.toFixed(1)}`).join('\n');
+  },[perf]);
+
+  if(err)return <div className="p-8 text-sm text-red-500">❌ {err}</div>;
+  if(!perf||!camps)return <Spinner label="Đệ đang gọi Google Ads…"/>;
+
+  /* aggregate theo campaign + theo ngày */
+  const byCamp={},byDate={};
+  perf.rows.forEach(r=>{
+    const a=byCamp[r.name]=byCamp[r.name]||{name:r.name,status:r.status,impressions:0,clicks:0,cost:0,conversions:0};
+    a.impressions+=r.impressions;a.clicks+=r.clicks;a.cost+=r.cost;a.conversions+=r.conversions;
+    const d=byDate[r.date]=byDate[r.date]||{cost:0,clicks:0};
+    d.cost+=r.cost;d.clicks+=r.clicks;
+  });
+  const campRows=Object.values(byCamp).sort((a,b)=>b.cost-a.cost);
+  const dates=Object.keys(byDate).sort();
+  const totCost=campRows.reduce((p,c)=>p+c.cost,0),totClicks=campRows.reduce((p,c)=>p+c.clicks,0),
+        totConv=campRows.reduce((p,c)=>p+c.conversions,0);
+  const fmtN=v=>v>=1e6?(v/1e6).toFixed(1)+'M':v>=1e3?(v/1e3).toFixed(1)+'k':Math.round(v).toLocaleString();
+
+  return (
+    <div className="flex-1 min-h-0 overflow-y-auto px-6 py-5 bg-slate-50 dark:bg-slate-950">
+      <div className="max-w-[1180px] mx-auto flex flex-col gap-5">
+        <div className="flex items-center gap-3 flex-wrap">
+          <div>
+            <h2 className="text-xl font-bold">Paid Campaigns</h2>
+            <p className="text-xs text-slate-400 mt-0.5">Google Ads · read-only monitor · {perf.start} → {perf.end}</p>
+          </div>
+          <Select value={days} onChange={v=>{setDays(+v);load(+v)}} className="ml-auto w-28"
+                  options={[7,14,30,90].map(d=>({value:d,label:d+' ngày'}))}/>
+          <button onClick={()=>load(days)} className="px-3.5 py-2 rounded-lg text-sm font-medium text-white bg-violet-500 hover:bg-violet-600 shadow-xs inline-flex items-center gap-1.5"><NavIcon id="refresh" cls="w-4 h-4"/>Tải lại</button>
+        </div>
+
+        <div className="grid gap-4" style={{gridTemplateColumns:'repeat(auto-fit,minmax(170px,1fr))'}}>
+          <StatCard label="Tổng chi tiêu" value={fmtN(totCost)} sub={days+' ngày'}/>
+          <StatCard label="Clicks" value={fmtN(totClicks)} sub={'CTR phụ thuộc từng campaign'}/>
+          <StatCard label="Conversions" value={totConv.toFixed(1)} sub=""/>
+          <StatCard label="CPA trung bình" value={totConv?fmtN(totCost/totConv):'—'} sub={totConv?'':'chưa có conversion'}/>
+          <StatCard label="Campaigns" value={camps.length} sub={campRows.length+' có hoạt động'}/>
+        </div>
+
+        <div className={mosaicCard}>
+          <div className="px-5 pt-4 pb-1 border-b border-slate-100 dark:border-slate-800 flex items-center gap-2">
+            <h3 className="font-semibold text-[15px]">Chi tiêu & clicks theo ngày</h3>
+            <span className="ml-auto flex gap-3 text-[11px] text-slate-400">
+              <span><i className="inline-block w-2.5 h-2.5 rounded-full mr-1" style={{background:VIOLET}}/>Cost</span>
+              <span><i className="inline-block w-2.5 h-2.5 rounded-full mr-1" style={{background:SKY}}/>Clicks</span>
+            </span>
+          </div>
+          <div className="px-3 py-2">
+            {dates.length>1
+              ?<MiniLine labels={dates.map(d=>d.slice(5))} series={[
+                  {name:'cost',color:VIOLET,data:dates.map(d=>Math.round(byDate[d].cost))},
+                  {name:'clicks',color:SKY,data:dates.map(d=>byDate[d].clicks)}]}/>
+              :<div className="text-sm text-slate-400 py-8 text-center">Chưa đủ dữ liệu theo ngày</div>}
+          </div>
+        </div>
+
+        <div className={mosaicCard}>
+          <div className="px-5 pt-4 pb-3 border-b border-slate-100 dark:border-slate-800">
+            <h3 className="font-semibold text-[15px]">Theo campaign <span className="text-slate-400 font-normal">({days} ngày)</span></h3>
+          </div>
+          <div className="overflow-x-auto">
+            <table className="w-full text-[12.5px]">
+              <thead><tr className="text-[10.5px] uppercase tracking-wide text-slate-400 bg-slate-50 dark:bg-slate-800/60">
+                {['Campaign','Status','Impressions','Clicks','CTR','Cost','Conv.','CPA'].map(c=>
+                  <th key={c} className="px-3 py-2.5 text-right first:text-left font-semibold whitespace-nowrap">{c}</th>)}
+              </tr></thead>
+              <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
+                {campRows.map((c,i)=>(
+                  <tr key={i} className="hover:bg-slate-50 dark:hover:bg-slate-800/40">
+                    <td className="px-3 py-1.5 max-w-[300px] truncate" title={c.name}>{c.name}</td>
+                    <td className="px-3 py-1.5 text-right">
+                      <span className={"px-1.5 py-0.5 rounded-full text-[11px] font-semibold "+(c.status==='ENABLED'?'bg-emerald-500/20 text-emerald-700 dark:text-emerald-400':'bg-slate-200 dark:bg-slate-700 text-slate-500')}>{c.status}</span>
+                    </td>
+                    <td className="px-3 py-1.5 text-right">{fmtN(c.impressions)}</td>
+                    <td className="px-3 py-1.5 text-right">{fmtN(c.clicks)}</td>
+                    <td className="px-3 py-1.5 text-right">{c.impressions?(c.clicks/c.impressions*100).toFixed(2)+'%':'—'}</td>
+                    <td className="px-3 py-1.5 text-right font-semibold">{fmtN(c.cost)}</td>
+                    <td className="px-3 py-1.5 text-right">{c.conversions.toFixed(1)}</td>
+                    <td className="px-3 py-1.5 text-right">{c.conversions?fmtN(c.cost/c.conversions):'—'}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 /* ───────────────────────── Config ───────────────────────── */
 function ConfigView(){
   const [cfg,setCfg]=useState(null);
@@ -1148,7 +1402,7 @@ function ConfigView(){
     if(cfg)dechoCtx.info=`Màn hình cấu hình. PageSpeed: ${cfg.urls.filter(u=>u.trim()).length} URL, strategy ${cfg.strategies.join('+')||'chưa chọn'}, lịch ${cfg.mode} lúc ${cfg.time}${cfg.mode==='monthly'?' ngày '+cfg.day:''}. SEO: chạy ngày ${cfg.seoDay} hàng tháng lúc ${cfg.seoTime}, theo dõi ${cfg.seoTracked.trim()?cfg.seoTracked.split('\n').filter(s=>s.trim()).length+' path':'tất cả URL'}.`;
   },[cfg]);
 
-  if(!cfg)return <div className="p-8 text-slate-400 text-sm">Đang tải...</div>;
+  if(!cfg)return <Spinner/>;
 
   const set=p=>setCfg(c=>({...c,...p}));
   const setUrl=(i,v)=>set({urls:cfg.urls.map((u,j)=>j===i?v:u)});
@@ -1167,45 +1421,49 @@ function ConfigView(){
     }else dechoBus.say('❌ Lưu không được: '+r.error);
   }
   const pill=on=>"px-4 py-2 rounded-lg text-[13px] border transition "+(on
-    ?"bg-accent border-accent text-white font-semibold"
+    ?"bg-violet-500 border-violet-500 text-white font-semibold"
     :"bg-slate-100 dark:bg-slate-800 border-slate-200 dark:border-slate-700 text-slate-500");
 
   return (
-    <div className="flex-1 min-h-0 overflow-y-auto px-6 py-4">
+    <div className="flex-1 min-h-0 overflow-y-auto px-6 py-5 bg-slate-50 dark:bg-slate-950">
+      <div className="max-w-[1150px] mx-auto mb-4">
+        <h2 className="text-xl font-bold text-slate-800 dark:text-slate-100">Cấu hình</h2>
+        <p className="text-xs text-slate-400 mt-0.5">PageSpeed + SEO Agent · lưu là áp dụng ngay, đồng bộ lên Sheet</p>
+      </div>
       <div className="max-w-[1150px] mx-auto grid gap-4 items-start" style={{gridTemplateColumns:'minmax(0,1fr) 340px'}}>
-        <div className={card+" p-5 flex flex-col gap-3"}>
-          <h3 className="text-sm font-bold flex items-center gap-2">🔗 URLs theo dõi
+        <div className={mosaicCard+" p-5 flex flex-col gap-3"}>
+          <h3 className="text-sm font-bold flex items-center gap-2"><span className="text-violet-500"><NavIcon id="link"/></span>URLs theo dõi
             <span className="text-[11.5px] font-normal text-slate-400 ml-auto">{cfg.urls.filter(u=>u.trim()).length} URL</span></h3>
           <p className="text-xs text-slate-400 -mt-1">Mỗi URL được kiểm tra theo strategy đã chọn, ghi 1 dòng kết quả vào Google Sheet.</p>
           <div className="grid gap-1.5" style={{gridTemplateColumns:'repeat(auto-fill,minmax(340px,1fr))'}}>
             {cfg.urls.map((u,i)=>(
               <div key={i} className="flex gap-1.5">
                 <input value={u} onChange={e=>setUrl(i,e.target.value)} spellCheck={false}
-                  className={"flex-1 min-w-0 font-mono text-xs px-2.5 py-1.5 rounded-lg border outline-none bg-slate-100 dark:bg-slate-800 focus:bg-white dark:focus:bg-slate-900 "+
-                    (u.trim()&&!/^https?:\/\/\S+$/.test(u.trim())?"border-red-400":"border-slate-200 dark:border-slate-700 focus:border-accent2")}/>
+                  className={"flex-1 min-w-0 font-mono text-xs px-2.5 py-1.5 rounded-lg border outline-none transition bg-white dark:bg-slate-900 text-slate-700 dark:text-slate-200 "+
+                    (u.trim()&&!/^https?:\/\/\S+$/.test(u.trim())?"border-red-400 focus:ring-2 focus:ring-red-500/20":"border-slate-300 dark:border-slate-600 hover:border-slate-400 focus:border-violet-400 focus:ring-2 focus:ring-violet-500/20")}/>
                 <button onClick={()=>set({urls:cfg.urls.filter((_,j)=>j!==i)})} title="Xóa URL"
-                  className="w-7 rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-100 dark:bg-slate-800 text-slate-400 hover:text-red-500 hover:border-red-400 text-sm">✕</button>
+                  className="w-7 rounded-lg border border-slate-300 dark:border-slate-600 bg-white dark:bg-slate-900 text-slate-400 hover:text-red-500 hover:border-red-400 text-sm transition">✕</button>
               </div>
             ))}
           </div>
           <button onClick={()=>set({urls:[...cfg.urls,'']})}
-            className="self-start mt-1 px-3.5 py-1.5 text-xs font-semibold text-accent border border-dashed border-slate-300 dark:border-slate-600 rounded-lg hover:border-accent">＋ Thêm URL</button>
+            className="self-start mt-1 px-3.5 py-1.5 text-xs font-semibold text-violet-500 border border-dashed border-slate-300 dark:border-slate-600 rounded-lg hover:border-violet-400">＋ Thêm URL</button>
         </div>
 
         <div className="flex flex-col gap-4 min-w-0">
-          <div className={card+" p-5 flex flex-col gap-3"}>
-            <h3 className="text-sm font-bold">🖥️ Strategy</h3>
+          <div className={mosaicCard+" p-5 flex flex-col gap-3"}>
+            <h3 className="text-sm font-bold flex items-center gap-2"><span className="text-violet-500"><NavIcon id="device"/></span>Strategy</h3>
             <div className="flex gap-2.5">
-              <button className={pill(cfg.strategies.includes('mobile'))} onClick={()=>toggleStrat('mobile')}>📱 Mobile</button>
-              <button className={pill(cfg.strategies.includes('desktop'))} onClick={()=>toggleStrat('desktop')}>🖥️ Desktop</button>
+              <button className={pill(cfg.strategies.includes('mobile'))} onClick={()=>toggleStrat('mobile')}>Mobile</button>
+              <button className={pill(cfg.strategies.includes('desktop'))} onClick={()=>toggleStrat('desktop')}>Desktop</button>
             </div>
           </div>
-          <div className={card+" p-5 flex flex-col gap-3"}>
-            <h3 className="text-sm font-bold">🕐 Lịch chạy tự động</h3>
+          <div className={mosaicCard+" p-5 flex flex-col gap-3"}>
+            <h3 className="text-sm font-bold flex items-center gap-2"><span className="text-violet-500"><NavIcon id="clock"/></span>Lịch chạy tự động</h3>
             <div className="inline-flex rounded-lg overflow-hidden border border-slate-200 dark:border-slate-700 self-start">
               {[['daily','Hàng ngày'],['weekly','Hàng tuần'],['monthly','Hàng tháng']].map(([v,lb])=>(
                 <button key={v} onClick={()=>set({mode:v})}
-                  className={"px-4 py-2 text-[13px] transition "+(cfg.mode===v?"bg-accent text-white font-semibold":"bg-slate-100 dark:bg-slate-800 text-slate-500")}>{lb}</button>
+                  className={"px-3.5 py-2 text-[13px] whitespace-nowrap transition "+(cfg.mode===v?"bg-violet-500 text-white font-semibold":"bg-slate-100 dark:bg-slate-800 text-slate-500 hover:text-slate-700 dark:hover:text-slate-300")}>{lb}</button>
               ))}
             </div>
             <div className="flex gap-2.5 items-center flex-wrap text-xs text-slate-400">
@@ -1213,14 +1471,13 @@ function ConfigView(){
               {cfg.mode==='monthly'&&<span className="flex gap-1.5 items-center">ngày
                 <input type="number" min="1" max="28" className={input+" w-16"} value={cfg.day} onChange={e=>set({day:e.target.value})}/> hàng tháng</span>}
               {cfg.mode==='weekly'&&
-                <select className={input} value={cfg.weekday} onChange={e=>set({weekday:e.target.value})}>
-                  {[['monday','Thứ 2'],['tuesday','Thứ 3'],['wednesday','Thứ 4'],['thursday','Thứ 5'],['friday','Thứ 6'],['saturday','Thứ 7'],['sunday','Chủ nhật']].map(([v,lb])=><option key={v} value={v}>{lb}</option>)}
-                </select>}
+                <Select value={cfg.weekday} onChange={v=>set({weekday:v})} className="w-32"
+                        options={[['monday','Thứ 2'],['tuesday','Thứ 3'],['wednesday','Thứ 4'],['thursday','Thứ 5'],['friday','Thứ 6'],['saturday','Thứ 7'],['sunday','Chủ nhật']].map(([v,lb])=>({value:v,label:lb}))}/>}
             </div>
           </div>
 
-          <div className={card+" p-5 flex flex-col gap-3"}>
-            <h3 className="text-sm font-bold">📈 SEO Agent</h3>
+          <div className={mosaicCard+" p-5 flex flex-col gap-3"}>
+            <h3 className="text-sm font-bold flex items-center gap-2"><span className="text-violet-500"><NavIcon id="trend"/></span>SEO Agent</h3>
             <p className="text-xs text-slate-400 -mt-1">Báo cáo GSC + GA4 tự chạy hàng tháng.</p>
             <div className="flex gap-2.5 items-center flex-wrap text-xs text-slate-400">
               ngày <input type="number" min="1" max="28" className={input+" w-16"} value={cfg.seoDay} onChange={e=>set({seoDay:e.target.value})}/>
@@ -1229,16 +1486,16 @@ function ConfigView(){
             <div>
               <label className="text-xs text-slate-400 block mb-1.5">URLs theo dõi — mỗi dòng 1 path (vd <code className="text-[11px]">/product/vks</code>), để trống = tất cả</label>
               <textarea rows="4" spellCheck={false} value={cfg.seoTracked} onChange={e=>set({seoTracked:e.target.value})}
-                className="w-full font-mono text-xs px-2.5 py-2 rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-100 dark:bg-slate-800 outline-none focus:border-accent2 focus:bg-white dark:focus:bg-slate-900 resize-y"
+                className="w-full font-mono text-xs px-2.5 py-2 rounded-lg border border-slate-300 dark:border-slate-600 bg-white dark:bg-slate-900 text-slate-700 dark:text-slate-200 outline-none transition hover:border-slate-400 focus:border-violet-400 focus:ring-2 focus:ring-violet-500/20 resize-y"
                 placeholder="(đang theo dõi tất cả URL từ GSC & GA4)"/>
             </div>
           </div>
         </div>
 
-        <div className={card+" p-3.5 px-5 flex gap-2.5 items-center sticky bottom-0"} style={{gridColumn:'1/-1'}}>
-          <span className="text-xs text-slate-400 mr-auto">{msg}</span>
-          <button className={chipCls+" !text-sm !px-4 !py-2 !rounded-lg"} onClick={load}>↺ Hoàn tác</button>
-          <button onClick={save} className="px-5 py-2 rounded-lg text-sm font-bold text-white bg-gradient-to-br from-accent to-accent2 hover:brightness-110">💾 Lưu cấu hình</button>
+        <div className={mosaicCard+" p-3.5 px-5 flex gap-2.5 items-center sticky bottom-0"} style={{gridColumn:'1/-1'}}>
+          <span className="text-xs text-slate-400 mr-auto">{msg||`${cfg.urls.filter(u=>u.trim()).length} URL · ${cfg.strategies.join(" + ")||"chưa chọn strategy"} · PSI ${cfg.mode} ${cfg.time} · SEO ngày ${cfg.seoDay} lúc ${cfg.seoTime}`}</span>
+          <button className={chipCls+" !text-sm !px-4 !py-2 !rounded-lg inline-flex items-center gap-1.5"} onClick={load}><NavIcon id="undo" cls="w-4 h-4"/>Hoàn tác</button>
+          <button onClick={save} className="px-5 py-2 rounded-lg text-sm font-bold text-white bg-violet-500 hover:bg-violet-600 shadow-xs inline-flex items-center gap-1.5"><NavIcon id="save" cls="w-4 h-4"/>Lưu cấu hình</button>
         </div>
       </div>
     </div>
@@ -1248,18 +1505,20 @@ function ConfigView(){
 /* ───────────────────────── Shell ───────────────────────── */
 const NAV=[
   {sec:'Core'},
-  {id:'home',icon:'🏠',label:'Tổng quan'},
-  {id:'chat',icon:'💬',label:'Chat với DeCho'},
+  {id:'home',label:'Tổng quan'},
+  {id:'chat',label:'Chat với DeCho'},
   {sec:'Analysis'},
-  {id:'urls',icon:'🔎',label:'URL Intelligence'},
-  {id:'dash',icon:'📊',label:'PageSpeed'},
+  {id:'urls',label:'URL Intelligence'},
+  {id:'dash',label:'PageSpeed'},
+  {id:'ads',label:'Paid Campaigns'},
   {sec:'Monitoring'},
-  {id:'alerts',icon:'🚨',label:'Alerts'},
+  {id:'alerts',label:'Alerts'},
   {sec:'System'},
-  {id:'config',icon:'⚙️',label:'Cấu hình'},
-  {id:'psiSheet',icon:'🔗',label:'PSI Sheet',link:true},
+  {id:'config',label:'Cấu hình'},
+  {id:'psiSheet',label:'PSI Sheet',link:true},
+  {id:'seoSheet',label:'SEO Sheet',link:true},
 ];
-const TITLES={home:'Tổng quan',chat:'Chat với DeCho',urls:'URL Intelligence',dash:'PageSpeed · Dashboard',alerts:'Alerts',config:'Cấu hình'};
+const TITLES={home:'Tổng quan',chat:'Chat với DeCho',urls:'URL Intelligence',dash:'PageSpeed · Dashboard',alerts:'Alerts',ads:'Paid Campaigns',config:'Cấu hình'};
 
 function App(){
   const [view,setView]=useState('home');
@@ -1267,6 +1526,7 @@ function App(){
   const [model,setModel]=useLS('psi-model','google/gemma-4-31b-it');
   const [meta,setMeta]=useState('Đang kết nối...');
   const [psiSheet,setPsiSheet]=useState('#');
+  const [seoSheet,setSeoSheet]=useState('#');
   const [seoMeta,setSeoMeta]=useState('');
 
   useEffect(()=>{document.documentElement.classList.toggle('dark',theme==='dark')},[theme]);
@@ -1279,19 +1539,19 @@ function App(){
     try{
       const c=await(await fetch('/api/seo/config')).json();
       setSeoMeta(`${c.site} · GA4 ${c.ga4_property} · lịch ${c.schedule}${c.token_configured?'':' · ⚠️ thiếu token'}`);
+      if(c.sheet_url)setSeoSheet(c.sheet_url);
     }catch(e){}
   })()},[]);
 
   const DECHO_CHAT={
     endpoint:'/api/agent/chat/stream',storageKey:'decho-chat',
     greeting:'Yo Đại ca! Đệ là DeCho 🤖 — all-in-one luôn:\n• "chạy kiểm tra ngay" → đo Core Web Vitals 19 URL\n• "chạy báo cáo SEO tháng vừa rồi" → kéo GSC + GA4\n• "trang nào chậm nhất?", "traffic tháng này sao?" → Đệ đọc Sheet phân tích liền\n• "thêm https://...", "đổi lịch sang daily 8h" → chỉnh cấu hình bằng mồm\n\nChill thôi, nhưng output thì xịn. No cap.',
-    chips:[['▶ Chạy PageSpeed','Chạy kiểm tra ngay'],['📰 Báo cáo SEO','Chạy báo cáo SEO tháng vừa rồi'],['📈 Phân tích PSI','Phân tích kết quả PageSpeed lần chạy gần nhất'],['📊 Phân tích SEO','Phân tích số liệu SEO tháng gần nhất'],['📋 Trạng thái','Trạng thái hệ thống thế nào?']],
+    chips:[['play','Chạy PageSpeed','Chạy kiểm tra ngay'],['news','Báo cáo SEO','Chạy báo cáo SEO tháng vừa rồi'],['dash','Phân tích PSI','Phân tích kết quả PageSpeed lần chạy gần nhất'],['trend','Phân tích SEO','Phân tích số liệu SEO tháng gần nhất'],['clipboard','Trạng thái','Trạng thái hệ thống thế nào?']],
     placeholder:'Nhắn Đệ bất cứ gì: chạy check, báo cáo SEO, phân tích, thêm URL…',
-    meta:seoMeta,
   };
 
   useEffect(()=>{
-    dechoCtx.view={home:'Tổng quan',chat:'Chat với DeCho (PSI + SEO)',urls:'URL Intelligence',dash:'Dashboard PSI',alerts:'Alerts',config:'Cấu hình (PSI + SEO)'}[view]||view;
+    dechoCtx.view={home:'Tổng quan',chat:'Chat với DeCho (PSI + SEO + Ads)',urls:'URL Intelligence',dash:'Dashboard PSI',ads:'Paid Campaigns (Google Ads)',alerts:'Alerts',config:'Cấu hình (PSI + SEO)'}[view]||view;
   },[view]);
   useEffect(()=>{dechoCtx.model=model},[model]);
 
@@ -1300,6 +1560,7 @@ function App(){
   useEffect(()=>{
     const TIPS={
       urls:'URL Intelligence: traffic + PageSpeed gộp theo từng trang. Click 1 dòng để xem chi tiết nha Đại ca.',
+      ads:'Khu Google Ads: Đệ theo dõi campaign, chi tiêu, CTR/CPA — read-only, không đụng tiền của Đại ca.',
       alerts:'Đây là chỗ Đệ báo bất thường: score tụt, clicks giảm. Click alert để nhảy tới nơi xử lý.',
       dash:'Đây là Dashboard — số liệu thật từ PSI Sheet, Đệ vừa đọc xong sẽ bình luận cho Đại ca.',
       config:'Chỉnh URLs với lịch ở đây nha Đại ca. Bấm Lưu là Đệ nhớ ngay, đồng bộ cả lên Sheet.',
@@ -1315,22 +1576,24 @@ function App(){
       {/* Sidebar */}
       <aside className="w-60 flex-none flex flex-col gap-1 p-3 bg-white dark:bg-slate-900 border-r border-slate-200 dark:border-slate-800">
         <div className="flex items-center gap-2.5 px-2.5 pb-3">
-          <div className="w-9 h-9 rounded-xl grid place-items-center text-lg bg-gradient-to-br from-emerald-100 to-cyan-100 dark:from-emerald-900 dark:to-cyan-900 border border-slate-200 dark:border-slate-700">⚡</div>
+          <div className="w-9 h-9 rounded-xl grid place-items-center text-emerald-600 dark:text-emerald-400 bg-gradient-to-br from-emerald-100 to-cyan-100 dark:from-emerald-900 dark:to-cyan-900 border border-slate-200 dark:border-slate-700"><NavIcon id="zap"/></div>
           <b className="text-[14.5px]">DeCho Agent</b>
         </div>
         {NAV.map((n,i)=>n.sec
           ?<div key={i} className="text-[10.5px] font-bold tracking-widest uppercase text-slate-400 px-3.5 pt-3 pb-1">{n.sec}</div>
           :n.link
-            ?<a key={n.id} href={psiSheet} target="_blank" className="flex items-center gap-2.5 px-3.5 py-2.5 rounded-xl text-sm text-slate-500 hover:bg-slate-100 dark:hover:bg-slate-800 hover:text-inherit transition">{n.icon} {n.label}</a>
+            ?<a key={n.id} href={n.id==='seoSheet'?seoSheet:psiSheet} target="_blank" className="flex items-center gap-2.5 px-3.5 py-2.5 rounded-xl text-sm text-slate-500 hover:bg-slate-100 dark:hover:bg-slate-800 hover:text-inherit transition"><NavIcon id={n.id}/>{n.label}</a>
             :<button key={n.id} onClick={()=>setView(n.id)}
                className={"flex items-center gap-2.5 px-3.5 py-2.5 rounded-xl text-sm text-left transition "+(view===n.id
-                 ?"bg-gradient-to-r from-emerald-50 to-cyan-50 dark:from-emerald-900/40 dark:to-cyan-900/40 text-accent font-semibold border border-slate-200 dark:border-slate-700"
-                 :"text-slate-500 hover:bg-slate-100 dark:hover:bg-slate-800 hover:text-inherit")}>{n.icon} {n.label}</button>)}
+                 ?"bg-violet-500/10 text-violet-600 dark:text-violet-400 font-semibold"
+                 :"text-slate-500 hover:bg-slate-100 dark:hover:bg-slate-800 hover:text-inherit")}><NavIcon id={n.id}/>{n.label}</button>)}
         <div className="flex-1"/>
         <DechoDock showAsk={view!=='chat'}/>
         <button onClick={()=>setTheme(theme==='light'?'dark':'light')}
           className="flex items-center gap-2.5 px-3.5 py-2 rounded-xl text-[13px] text-slate-500 hover:bg-slate-100 dark:hover:bg-slate-800 transition">
-          {theme==='light'?'🌙 Dark mode':'☀️ Light mode'}
+          {theme==='light'
+            ?<span className="inline-flex items-center gap-1.5"><svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"/></svg>Dark mode</span>
+            :<span className="inline-flex items-center gap-1.5"><svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/></svg>Light mode</span>}
         </button>
       </aside>
 
@@ -1344,9 +1607,8 @@ function App(){
           </div>
           <div className="flex items-center gap-2 justify-self-center">
             <label className="text-xs text-slate-400">Model</label>
-            <select value={model} onChange={e=>setModel(e.target.value)} className={input+" cursor-pointer"}>
-              {MODELS.map(([v,lb])=><option key={v} value={v}>{lb}</option>)}
-            </select>
+            <Select value={model} onChange={setModel} className="w-40"
+                    options={MODELS.map(([v,lb])=>({value:v,label:lb}))}/>
           </div>
           <div/>
         </header>
@@ -1354,6 +1616,7 @@ function App(){
         {view==='chat'&&<ChatView cfg={DECHO_CHAT} model={model}/>}
         {view==='urls'&&<UrlIntel/>}
         {view==='alerts'&&<AlertsView go={setView}/>}
+        {view==='ads'&&<AdsView/>}
         {view==='dash'&&<Dashboard/>}
         {view==='config'&&<ConfigView/>}
       </div>

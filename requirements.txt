@@ -13,3 +13,6 @@ python-dateutil
 gspread
 google-auth-oauthlib
 google-analytics-data
+
+# Paid Campaigns
+google-ads

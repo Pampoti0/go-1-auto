@@ -238,6 +238,53 @@ def run_for_month(target_year: int, target_month: int):
     return {"label": label, "rows": len(report)}
 
 
+def run_for_range(start: str, end: str):
+    """Báo cáo theo khoảng ngày bất kỳ (YYYY-MM-DD), tự so sánh với kỳ liền trước
+    cùng số ngày. Sheet label = 'start__end'."""
+    if not (SEO_SHEET_ID and GA4_PROPERTY_ID):
+        raise RuntimeError("Thiếu SEO_SHEET_ID / GA4_PROPERTY_ID trong env — xem .env.example.")
+    from datetime import datetime as _dt, timedelta
+
+    d0 = _dt.strptime(start, "%Y-%m-%d").date()
+    d1 = _dt.strptime(end, "%Y-%m-%d").date()
+    if d0 > d1:
+        d0, d1 = d1, d0
+    days = (d1 - d0).days + 1
+    if days > 366:
+        raise RuntimeError(f"Khoảng quá dài ({days} ngày) — tối đa 366 ngày.")
+    p1 = d0 - timedelta(days=1)
+    p0 = p1 - timedelta(days=days - 1)
+    s1, e1, s2, e2 = d0.isoformat(), d1.isoformat(), p0.isoformat(), p1.isoformat()
+    label = f"{s1}__{e1}"
+
+    log.info(f"Khoảng lấy data: {s1} → {e1} ({days} ngày) — so sánh {s2} → {e2}")
+    cur_gsc = filter_urls(fetch_gsc(s1, e1))
+    cur_ga4 = filter_urls(fetch_ga4(s1, e1))
+    log.info(f"Kỳ chính: GSC {len(cur_gsc)} URL, GA4 {len(cur_ga4)} URL")
+    prev_gsc = filter_urls(fetch_gsc(s2, e2))
+    prev_ga4 = filter_urls(fetch_ga4(s2, e2))
+    log.info(f"Kỳ so sánh ({s2} → {e2}): GSC {len(prev_gsc)} URL, GA4 {len(prev_ga4)} URL")
+
+    report = build_report(cur_gsc, cur_ga4, prev_gsc, prev_ga4)
+    report.insert(0, "range", label)
+    save_to_sheet(report, label)
+
+    # Tổng + % thay đổi so với kỳ trước (hiện trong kết quả chat)
+    def _tot(df, col):
+        return int(df[col].sum()) if col in df.columns else 0
+    totals = {}
+    for col, cdf, pdf in (("views", cur_ga4, prev_ga4), ("users", cur_ga4, prev_ga4),
+                          ("clicks", cur_gsc, prev_gsc), ("impressions", cur_gsc, prev_gsc)):
+        c, p = _tot(cdf, col), _tot(pdf, col)
+        totals[col] = {"cur": c, "prev": p, "pct": round((c - p) / p * 100, 1) if p else None}
+    log.info("So với kỳ trước: " + ", ".join(
+        f"{k} {v['cur']:,} ({('+' if v['pct'] > 0 else '') + str(v['pct']) + '%' if v['pct'] is not None else 'N/A'})"
+        for k, v in totals.items()))
+    log.info("Hoàn thành!")
+    return {"label": label, "rows": len(report), "days": days,
+            "compare": f"{s2} → {e2}", "totals": totals}
+
+
 def run():
     """Chạy cho tháng vừa kết thúc."""
     from datetime import date

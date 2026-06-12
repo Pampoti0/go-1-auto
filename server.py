@@ -123,6 +123,40 @@ def _run_seo_safe(year: int | None = None, month: int | None = None):
         _invalidate_cache()
 
 
+_pending_range: dict = {}  # đề xuất date range đang chờ user xác nhận
+
+
+def _run_seo_range_safe(start: str, end: str):
+    with _seo_lock:
+        if _seo_state["running"]:
+            return
+        _seo_state["running"] = True
+    try:
+        import seo_agent
+
+        result = seo_agent.run_for_range(start, end)
+        t = result.get("totals", {})
+
+        def _fmt(k):
+            v = t.get(k)
+            if not v:
+                return f"{k}: —"
+            pct = f" ({'+' if v['pct'] and v['pct'] > 0 else ''}{v['pct']}%)" if v["pct"] is not None else " (kỳ trước = 0)"
+            return f"{k} **{v['cur']:,}**{pct}"
+        summary = " · ".join(_fmt(k) for k in ("views", "users", "clicks", "impressions"))
+        _seo_state["last_result"] = (f"success: {result['rows']} URL → tab {result['label']} "
+                                     f"({result['days']} ngày, so sánh {result['compare']})\n"
+                                     f"📊 So với kỳ trước: {summary}\n"
+                                     f"Chi tiết %_change từng URL nằm trong sheet (cột tô màu xanh/đỏ).")
+    except Exception as e:  # noqa: BLE001
+        _seo_state["last_result"] = f"error: {type(e).__name__}: {e}"
+        _seo_state["log"].append(f"[{datetime.now().strftime('%H:%M:%S')}] ❌ {type(e).__name__}: {e}")
+    finally:
+        _seo_state["running"] = False
+        _seo_state["last_run"] = datetime.now().isoformat(timespec="seconds")
+        _invalidate_cache()
+
+
 def _run_check_safe(source: str = "schedule"):
     with _lock:
         if _state["running"]:
@@ -189,6 +223,15 @@ def startup():
     # 3) Khởi động scheduler theo config (có thể vừa khôi phục)
     if os.getenv("RUN_SCHEDULER", "true").lower() == "true":
         threading.Thread(target=_scheduler_loop, daemon=True).start()
+    # 4) Warm-up Google Ads client ở nền — request đầu tiên khỏi chờ init 2-3s
+    def _ads_warmup():
+        try:
+            import ads_agent
+
+            ads_agent.warmup()
+        except Exception:  # noqa: BLE001
+            pass
+    threading.Thread(target=_ads_warmup, daemon=True).start()
 
 
 @app.get("/health")
@@ -293,6 +336,46 @@ def _seo_summary_fetch(limit: int = 6):
         return {"months": out}
     except Exception as e:  # noqa: BLE001
         return {"error": f"{type(e).__name__}: {e}", "months": []}
+
+
+@app.get("/api/ads/campaigns")
+def api_ads_campaigns():
+    """Danh sách campaign Google Ads (cache 5 phút)."""
+    import ads_agent
+
+    if not ads_agent.configured():
+        return {"error": "Chưa cấu hình Google Ads (GOOGLE_ADS_* trong env).", "campaigns": []}
+    try:
+        return _cached("ads:camps", 300, lambda: {"campaigns": ads_agent.list_campaigns()})
+    except Exception as e:  # noqa: BLE001
+        return {"error": f"{type(e).__name__}: {e}", "campaigns": []}
+
+
+@app.get("/api/ads/perf")
+def api_ads_perf(days: int = 7):
+    """Hiệu suất campaign N ngày gần nhất (cache 5 phút)."""
+    import ads_agent
+
+    if not ads_agent.configured():
+        return {"error": "Chưa cấu hình Google Ads (GOOGLE_ADS_* trong env).", "rows": []}
+    try:
+        return _cached(f"ads:perf:{days}", 300, lambda: ads_agent.campaign_perf(days))
+    except Exception as e:  # noqa: BLE001
+        return {"error": f"{type(e).__name__}: {e}", "rows": []}
+
+
+def _ads_prompt(perf: dict) -> str:
+    rows = perf.get("rows", [])
+    lines = [f"{r['date']} | {r['name']} ({r['status']}) | impr={r['impressions']} | clicks={r['clicks']} | "
+             f"CTR={r['ctr']}% | cost={r['cost']} | conv={r['conversions']} | CPA={r['cpa'] or 'N/A'}"
+             for r in rows[-200:]]
+    return (
+        f"Bạn là DeCho — module Paid Campaigns (AI). Dữ liệu Google Ads từ {perf.get('start')} đến {perf.get('end')} "
+        "(mỗi dòng = 1 campaign × 1 ngày; cost tính theo đơn vị tiền tài khoản):\n\n"
+        + "\n".join(lines) +
+        "\n\nPhân tích theo câu hỏi: tổng chi tiêu, CTR/CPA bất thường, campaign nào hiệu quả/kém, đề xuất. "
+        "TIẾNG VIỆT, ngắn gọn, số liệu cụ thể, **đậm** + gạch đầu dòng. KHÔNG dùng LaTeX. Trả lời trực tiếp. /no_think"
+    ) + _knowledge() + _persona()
 
 
 @app.get("/api/llm-test")
@@ -614,11 +697,13 @@ def _unified_prompt() -> str:
     import seo_agent
 
     return (
+        f"Hôm nay là {datetime.now().strftime('%Y-%m-%d')} (thứ {datetime.now().isoweekday()+1 if datetime.now().isoweekday()<7 else 'CN'}).\n"
         "Bạn là DeCho — AI agent all-in-one (app DeCho Agent, luôn khai báo là AI), quản lý 2 mảng:\n"
         f"A. PAGESPEED: kiểm tra Core Web Vitals cho {len(cfg['urls'])} URL, lịch {cfg['schedule_mode']} "
         f"lúc {cfg['schedule_time']}, ghi Google Sheet. Trạng thái: {_status_text()}\n"
         f"B. SEO: báo cáo GSC + GA4 hàng tháng cho {seo_agent.SITE_URL}, so sánh tháng trước, ghi Sheet riêng. "
         f"Trạng thái: {_seo_status_text()}\n"
+        "C. PAID CAMPAIGNS: theo dõi Google Ads (read-only).\n"
         "Trả về DUY NHẤT một JSON theo intent:\n"
         '- Chạy kiểm tra PageSpeed ngay: {"action":"run_check"}\n'
         '- Phân tích KẾT QUẢ PageSpeed (điểm, score, LCP/CLS, trang nhanh/chậm): {"action":"query_results"}\n'
@@ -627,18 +712,90 @@ def _unified_prompt() -> str:
         '- Xóa URL: {"action":"remove_url","url":"<url hoặc từ khóa>"}\n'
         '- Đổi lịch PageSpeed: {"action":"set_schedule","schedule_mode":"daily|weekly|monthly","schedule_time":"HH:MM","schedule_day_of_month":<1-28>,"schedule_weekday":"<thứ>"} (chỉ kèm field người dùng nêu)\n'
         '- Chạy báo cáo SEO 1 tháng: {"action":"run_report","year":<năm>,"month":<1-12>} (bỏ year/month → tháng vừa rồi)\n'
-        '- Chạy báo cáo SEO NHIỀU tháng: {"action":"run_report","months":[{"year":2026,"month":1},...]}\n'
+        '- Chạy báo cáo SEO NHIỀU tháng TÁCH RIÊNG TỪNG THÁNG (mỗi tháng 1 sheet — CHỈ khi user nói rõ "từng tháng"/"backfill theo tháng"): {"action":"run_report","months":[{"year":2026,"month":1},...]}. Các cụm thời gian tự nhiên khác ("cả năm", "quý", "N tháng gần nhất") → dùng seo_range.\n'
         '- Phân tích số liệu SEO (traffic, views, users, clicks, impressions): {"action":"seo_query","month":"YYYY-MM hoặc bỏ"} '
         'hoặc nhiều tháng/xu hướng: {"action":"seo_query","months":["2026-01",...]} (tất cả: "months":"all")\n'
         '- Các tháng có báo cáo SEO: {"action":"list_months"}\n'
+        '- Báo cáo SEO theo KHOẢNG THỜI GIAN tự nhiên ("3 tháng gần nhất", "tuần trước", "quý 1 2026", "từ 01/05 đến 12/06", "từ đầu năm đến nay", "cả năm 2025", "năm ngoái", "6 tháng đầu năm"...): '
+        '{"action":"seo_range","start":"YYYY-MM-DD","end":"YYYY-MM-DD"} — TỰ TÍNH ngày từ hôm nay. '
+        'Quy ước: "N tháng gần nhất" = N tháng TRỌN VẸN trước tháng hiện tại (vd hôm nay 2026-06-12 thì "3 tháng gần nhất" = 2026-03-01 → 2026-05-31); '
+        '"N ngày gần nhất" = N ngày kết thúc hôm qua; "tuần trước" = thứ 2 → CN tuần trước. '
+        'Nếu input mơ hồ không tính được ngày → đừng đoán, dùng {"action":"reply"} hỏi lại.\n'
+        '- Người dùng XÁC NHẬN đề xuất ngay trước đó ("ok", "đồng ý", "chạy đi"): {"action":"confirm"}\n'
+        '- Danh sách campaign Google Ads: {"action":"ads_list"}\n'
+        '- Hiệu suất/chi tiêu/CPA Google Ads: {"action":"ads_perf","days":<số ngày, mặc định 7>}\n'
         '- Trạng thái hệ thống: {"action":"status"}\n'
         '- Còn lại: {"action":"reply","text":"<trả lời ngắn>"}\n'
         "Phân biệt: kiểm tra/điểm/score/LCP/CLS/pagespeed → PageSpeed; báo cáo/traffic/clicks/GSC/GA4/SEO → SEO."
     ) + _persona()
 
 
+def _parse_range_vi(m: str) -> dict | None:
+    """Fallback parse khoảng thời gian tiếng Việt phổ biến (không cần LLM)."""
+    import re
+    from datetime import date, timedelta
+
+    from dateutil.relativedelta import relativedelta
+
+    today = date.today()
+    mm = re.search(r"(\d+)\s*tháng gần nhất", m)
+    if mm:  # N tháng TRỌN VẸN trước tháng hiện tại
+        n = int(mm.group(1))
+        end = today.replace(day=1) - timedelta(days=1)
+        start = (end.replace(day=1) - relativedelta(months=n - 1))
+        return {"action": "seo_range", "start": start.isoformat(), "end": end.isoformat()}
+    mm = re.search(r"(\d+)\s*ngày gần nhất", m)
+    if mm:
+        end = today - timedelta(days=1)
+        start = end - timedelta(days=int(mm.group(1)) - 1)
+        return {"action": "seo_range", "start": start.isoformat(), "end": end.isoformat()}
+    if "tuần trước" in m:
+        end = today - timedelta(days=today.isoweekday())  # CN tuần trước
+        start = end - timedelta(days=6)
+        return {"action": "seo_range", "start": start.isoformat(), "end": end.isoformat()}
+    mm = re.search(r"(?:cả\s*)?năm\s*(20\d{2})", m)
+    if mm and "đầu năm" not in m:
+        y = int(mm.group(1))
+        end = date(y, 12, 31)
+        if end >= today:
+            end = today - timedelta(days=1)
+        return {"action": "seo_range", "start": date(y, 1, 1).isoformat(), "end": end.isoformat()}
+    if "năm ngoái" in m or "năm trước" in m:
+        y = today.year - 1
+        return {"action": "seo_range", "start": date(y, 1, 1).isoformat(), "end": date(y, 12, 31).isoformat()}
+    mm = re.search(r"(\d+)\s*tháng đầu năm(?:\s*(20\d{2}))?", m)
+    if mm:
+        n = int(mm.group(1)); y = int(mm.group(2) or today.year)
+        end = (date(y, n, 1) + relativedelta(months=1)) - timedelta(days=1)
+        if end >= today:
+            end = today - timedelta(days=1)
+        return {"action": "seo_range", "start": date(y, 1, 1).isoformat(), "end": end.isoformat()}
+    if "từ đầu năm" in m or "đầu năm đến nay" in m or "năm nay" in m:
+        return {"action": "seo_range", "start": today.replace(month=1, day=1).isoformat(),
+                "end": (today - timedelta(days=1)).isoformat()}
+    mm = re.search(r"quý\s*([1-4])(?:\s*năm)?\s*(20\d{2})?", m)
+    if mm:
+        q = int(mm.group(1)); y = int(mm.group(2) or today.year)
+        start = date(y, 3 * q - 2, 1)
+        end = (start + relativedelta(months=3)) - timedelta(days=1)
+        return {"action": "seo_range", "start": start.isoformat(), "end": end.isoformat()}
+    return None
+
+
 def _all_keyword_intent(message: str) -> dict | None:
+    import re as _re2
+
     m = message.lower()
+    if m.strip() in ("ok", "oke", "okay", "đồng ý", "dong y", "chạy đi", "chay di", "xác nhận", "xac nhan", "confirm", "yes", "lgtm"):
+        return {"action": "confirm"}
+    rng = _parse_range_vi(m)
+    if rng and any(k in m for k in ("seo", "traffic", "báo cáo", "clicks", "gsc", "ga4")):
+        return rng
+    if any(k in m for k in ("ads", "campaign", "quảng cáo", "cpa", "chi tiêu", "spend", "ngân sách")):
+        if any(k in m for k in ("danh sách", "list", "những campaign", "campaign nào đang")):
+            return {"action": "ads_list"}
+        dm = _re2.search(r"(\d{1,2})\s*ngày", m)
+        return {"action": "ads_perf", "days": int(dm.group(1)) if dm else 7}
     psiish = any(k in m for k in ("lcp", "cls", "fcp", "tbt", "inp", "ttfb", "score", "điểm",
                                   "pagespeed", "kiểm tra", "web vitals", "chậm", "nhanh"))
     seoish = any(k in m for k in ("seo", "traffic", "clicks", "gsc", "ga4", "impression",
@@ -703,8 +860,9 @@ async def agent_chat_stream(req: ChatStreamRequest):
 
         labels = {"run_check": "Chạy kiểm tra PageSpeed", "query_results": "Phân tích kết quả PageSpeed",
                   "list_urls": "Liệt kê URL", "add_url": "Thêm URL", "remove_url": "Xóa URL",
-                  "set_schedule": "Đổi lịch PageSpeed", "run_report": "Chạy báo cáo SEO",
+                  "set_schedule": "Đổi lịch PageSpeed", "run_report": "Chạy báo cáo SEO", "seo_range": "Xác định khoảng thời gian SEO", "confirm": "Xác nhận & thực thi",
                   "seo_query": "Phân tích số liệu SEO", "list_months": "Các tháng có báo cáo SEO",
+                  "ads_list": "Danh sách campaign Google Ads", "ads_perf": "Phân tích hiệu suất Google Ads",
                   "status": "Trạng thái hệ thống", "reply": "Trả lời"}
         yield ev({"type": "step", "text": f"⚙️ Action: {labels.get(action, action)}"})
 
@@ -831,6 +989,53 @@ async def agent_chat_stream(req: ChatStreamRequest):
             yield ev({"type": "done"})
             return
 
+        # ── Ads: danh sách campaign ──
+        if action == "ads_list":
+            import ads_agent
+
+            if not ads_agent.configured():
+                yield ev({"type": "error", "text": "❌ Chưa cấu hình Google Ads (GOOGLE_ADS_* trong env)."})
+                yield ev({"type": "done"})
+                return
+            try:
+                camps = await asyncio.to_thread(lambda: _cached("ads:camps", 300, lambda: {"campaigns": ads_agent.list_campaigns()}))
+            except Exception as e:  # noqa: BLE001
+                yield ev({"type": "error", "text": f"❌ Lỗi Google Ads: {type(e).__name__}: {e}"})
+                yield ev({"type": "done"})
+                return
+            cl = camps.get("campaigns", [])
+            listing = "\n".join(f"• **{c['name']}** — {c['status']} ({c['channel']})" for c in cl)
+            yield ev({"type": "final", "text": f"Đang có {len(cl)} campaign:\n{listing}" if cl else "Không thấy campaign nào trong tài khoản."})
+            yield ev({"type": "done"})
+            return
+
+        # ── Ads: phân tích hiệu suất ──
+        if action == "ads_perf":
+            import ads_agent
+
+            if not ads_agent.configured():
+                yield ev({"type": "error", "text": "❌ Chưa cấu hình Google Ads (GOOGLE_ADS_* trong env)."})
+                yield ev({"type": "done"})
+                return
+            days = int(data.get("days") or 7)
+            yield ev({"type": "step", "text": f"💰 Đọc hiệu suất Google Ads {days} ngày gần nhất..."})
+            try:
+                perf = await asyncio.to_thread(lambda: _cached(f"ads:perf:{days}", 300, lambda: ads_agent.campaign_perf(days)))
+            except Exception as e:  # noqa: BLE001
+                yield ev({"type": "error", "text": f"❌ Lỗi Google Ads: {type(e).__name__}: {e}"})
+                yield ev({"type": "done"})
+                return
+            if not perf.get("rows"):
+                yield ev({"type": "final", "text": f"Không có dữ liệu Ads trong {days} ngày gần nhất."})
+                yield ev({"type": "done"})
+                return
+            yield ev({"type": "step", "text": f"📊 {len(perf['rows'])} dòng ({perf['start']} → {perf['end']})"})
+            yield ev({"type": "step", "text": f"🧠 Phân tích dữ liệu ({model})..."})
+            async for chunk in stream_analysis(_ads_prompt(perf)):
+                yield chunk
+            yield ev({"type": "done"})
+            return
+
         # ── SEO: liệt kê tháng ──
         if action == "list_months":
             try:
@@ -842,6 +1047,75 @@ async def agent_chat_stream(req: ChatStreamRequest):
             yield ev({"type": "final",
                       "text": (f"Đang có báo cáo SEO của {len(tabs)} tháng: " + ", ".join(tabs)) if tabs
                       else "Chưa có báo cáo SEO tháng nào — nói 'chạy báo cáo SEO' để bắt đầu."})
+            yield ev({"type": "done"})
+            return
+
+        # ── SEO: báo cáo theo khoảng ngày tự nhiên — bước 1: đề xuất & chờ xác nhận ──
+        if action == "seo_range":
+            import re as _re3
+            from datetime import datetime as _dt, timedelta as _td
+
+            start, end = str(data.get("start") or ""), str(data.get("end") or "")
+            if not (_re3.match(r"^\d{4}-\d{2}-\d{2}$", start) and _re3.match(r"^\d{4}-\d{2}-\d{2}$", end)):
+                yield ev({"type": "final", "text": "Đệ chưa xác định được khoảng thời gian từ câu của Đại ca — nói rõ hơn giúp Đệ nhé (vd: '3 tháng gần nhất', 'từ 01/05 đến 12/06')."})
+                yield ev({"type": "done"})
+                return
+            try:
+                d0 = _dt.strptime(start, "%Y-%m-%d").date()
+                d1 = _dt.strptime(end, "%Y-%m-%d").date()
+            except ValueError:
+                yield ev({"type": "final", "text": "Ngày không hợp lệ — Đại ca thử lại giúp Đệ."})
+                yield ev({"type": "done"})
+                return
+            if d0 > d1:
+                d0, d1 = d1, d0
+            today = _dt.now().date()
+            if d1 > today:
+                d1 = today
+            days = (d1 - d0).days + 1
+            if days > 366:
+                yield ev({"type": "final", "text": f"Khoảng {days} ngày dài quá (tối đa 366) — Đại ca thu hẹp lại nhé."})
+                yield ev({"type": "done"})
+                return
+            p1 = d0 - _td(days=1)
+            p0 = p1 - _td(days=days - 1)
+            _pending_range.clear()
+            _pending_range.update({"start": d0.isoformat(), "end": d1.isoformat(), "ts": time.time()})
+            yield ev({"type": "step", "text": f"📅 Đã xác định khoảng: {d0} → {d1} ({days} ngày)"})
+            yield ev({"type": "final",
+                      "text": (f"Đệ xác định được rồi nha:\n• **Khoảng lấy data**: {d0} → {d1} ({days} ngày)\n"
+                               f"• **Kỳ so sánh tự động**: {p0} → {p1}\n• **Tên sheet**: {d0}__{d1}\n\n"
+                               "Đúng ý thì Đại ca gõ **ok** (hoặc 'chạy đi') để Đệ chạy nhé.")})
+            yield ev({"type": "done"})
+            return
+
+        # ── Bước 2: user xác nhận → chạy range đang chờ ──
+        if action == "confirm":
+            if not _pending_range.get("start") or time.time() - _pending_range.get("ts", 0) > 600:
+                yield ev({"type": "final", "text": "Hiện không có đề xuất nào đang chờ xác nhận (hoặc đã quá 10 phút). Đại ca nêu lại yêu cầu nhé."})
+                yield ev({"type": "done"})
+                return
+            if _seo_state["running"]:
+                yield ev({"type": "final", "text": "Đang có báo cáo SEO chạy rồi — chờ xong đã nhé."})
+                yield ev({"type": "done"})
+                return
+            rs, re_ = _pending_range["start"], _pending_range["end"]
+            _pending_range.clear()
+            yield ev({"type": "step", "text": f"▶ Chạy báo cáo SEO khoảng {rs} → {re_}"})
+            log_pos = len(_seo_state["log"])
+            t = threading.Thread(target=_run_seo_range_safe, args=(rs, re_), daemon=True)
+            t.start()
+            while t.is_alive():
+                await asyncio.sleep(1)
+                new = _seo_state["log"][log_pos:]
+                log_pos += len(new)
+                for line in new:
+                    yield ev({"type": "step", "text": line})
+            for line in _seo_state["log"][log_pos:]:
+                yield ev({"type": "step", "text": line})
+            result = _seo_state["last_result"] or ""
+            icon = "✅" if result.startswith("success") else "❌"
+            yield ev({"type": "final", "text": f"{icon} {result}"})
             yield ev({"type": "done"})
             return
 
@@ -909,14 +1183,17 @@ async def agent_chat_stream(req: ChatStreamRequest):
                     yield ev({"type": "done"})
                     return
                 yield ev({"type": "step", "text": f"📚 Đọc {len(sel)} tháng: {', '.join(sel)}"})
+                try:  # đọc tất cả tháng bằng 1 lệnh batchGet
+                    data_map = await asyncio.to_thread(_seo_read_many, sel, 2000)
+                except Exception as e:  # noqa: BLE001
+                    yield ev({"type": "error", "text": f"❌ Không đọc được SEO Sheet: {type(e).__name__}: {e}"})
+                    yield ev({"type": "done"})
+                    return
                 summaries = []
                 for t in sel:
-                    try:
-                        tab, headers, rows = await asyncio.to_thread(_seo_read_results, t, 2000)
-                        summaries.append(_seo_month_summary(tab, headers, rows))
-                        yield ev({"type": "step", "text": f"📊 {tab}: {len(rows)} URL"})
-                    except Exception as e:  # noqa: BLE001
-                        yield ev({"type": "step", "text": f"⚠️ {t}: lỗi đọc — {type(e).__name__}"})
+                    headers, rows = data_map.get(t, ([], []))
+                    summaries.append(_seo_month_summary(t, headers, rows))
+                    yield ev({"type": "step", "text": f"📊 {t}: {len(rows)} URL"})
                 yield ev({"type": "step", "text": f"🧠 Phân tích xu hướng {len(summaries)} tháng ({model})..."})
                 async for chunk in stream_analysis(_seo_trend_prompt(summaries)):
                     yield chunk
@@ -964,14 +1241,14 @@ def decho_ask(req: DechoAskRequest):
         "Bạn là DeCho — mascot trợ thủ của app DeCho Agent (PageSpeed + SEO). "
         "Bạn đang đứng ở góc màn hình, nhìn cùng màn hình với người dùng.\n"
         "# BỐI CẢNH MÀN HÌNH HIỆN TẠI\n" + (req.context or "(không rõ)") +
-        "\n\nTrả lời câu hỏi NGẮN GỌN (tối đa ~80 từ), bám sát bối cảnh trên; "
+        "\n\nTrả lời dựa trên bối cảnh trên: bình thường ngắn gọn (~80 từ), nhưng nếu người dùng hỏi chi tiết/phân tích thì dùng số liệu cụ thể trong bối cảnh, tối đa ~200 từ; "
         "nếu câu hỏi vượt quá dữ liệu đang thấy thì nói thẳng và chỉ người dùng nơi xem "
         "(menu Chat để chạy/phân tích, Dashboard để xem điểm). KHÔNG dùng LaTeX. /no_think"
     ) + _knowledge() + _persona()
     try:
         r = httpx.post(
             f"{MAAS_BASE_URL}/chat/completions",
-            json={"model": model, "temperature": 0.4, "max_tokens": 1024,
+            json={"model": model, "temperature": 0.4, "max_tokens": 2048,
                   "messages": [{"role": "system", "content": system},
                                {"role": "user", "content": req.question}]},
             headers={"Authorization": f"Bearer {MAAS_API_KEY}"}, timeout=90)
@@ -1033,6 +1310,22 @@ def _seo_list_tabs() -> list[str]:
     meta = svc.spreadsheets().get(spreadsheetId=seo_agent.SEO_SHEET_ID).execute()
     return sorted(t for t in (s["properties"]["title"] for s in meta.get("sheets", []))
                   if re.match(r"^\d{4}-\d{2}$", t))
+
+
+def _seo_read_many(tabs: list[str], max_rows: int = 2000) -> dict:
+    """Đọc NHIỀU tab tháng bằng MỘT lệnh batchGet. → {tab: (headers, rows)}"""
+    import seo_agent
+    from googleapiclient.discovery import build
+
+    svc = build("sheets", "v4", credentials=seo_agent.get_creds(), cache_discovery=False)
+    res = svc.spreadsheets().values().batchGet(
+        spreadsheetId=seo_agent.SEO_SHEET_ID,
+        ranges=[f"{t}!A1:K{max_rows}" for t in tabs]).execute()
+    out = {}
+    for t, vr in zip(tabs, res.get("valueRanges", [])):
+        vals = vr.get("values", [])
+        out[t] = (vals[0] if vals else [], vals[1:] if len(vals) > 1 else [])
+    return out
 
 
 def _seo_read_results(month: str | None = None, max_rows: int = 150):
@@ -1201,7 +1494,7 @@ async def seo_chat_stream(req: ChatStreamRequest):
                 data = kw
 
         action = data.get("action", "reply")
-        labels = {"run_report": "Chạy báo cáo SEO", "status": "Xem trạng thái",
+        labels = {"run_report": "Chạy báo cáo SEO", "seo_range": "Xác định khoảng thời gian SEO", "confirm": "Xác nhận & thực thi", "status": "Xem trạng thái",
                   "query_data": "Đọc & phân tích SEO Sheet", "list_months": "Liệt kê các tháng có data",
                   "reply": "Trả lời"}
         yield ev({"type": "step", "text": f"⚙️ Action: {labels.get(action, action)}"})
@@ -1354,14 +1647,17 @@ async def seo_chat_stream(req: ChatStreamRequest):
                     yield ev({"type": "done"})
                     return
                 yield ev({"type": "step", "text": f"📚 Đọc {len(sel)} tháng: {', '.join(sel)}"})
+                try:  # đọc tất cả tháng bằng 1 lệnh batchGet
+                    data_map = await asyncio.to_thread(_seo_read_many, sel, 2000)
+                except Exception as e:  # noqa: BLE001
+                    yield ev({"type": "error", "text": f"❌ Không đọc được SEO Sheet: {type(e).__name__}: {e}"})
+                    yield ev({"type": "done"})
+                    return
                 summaries = []
                 for t in sel:
-                    try:
-                        tab, headers, rows = await asyncio.to_thread(_seo_read_results, t, 2000)
-                        summaries.append(_seo_month_summary(tab, headers, rows))
-                        yield ev({"type": "step", "text": f"📊 {tab}: {len(rows)} URL"})
-                    except Exception as e:  # noqa: BLE001
-                        yield ev({"type": "step", "text": f"⚠️ {t}: lỗi đọc — {type(e).__name__}"})
+                    headers, rows = data_map.get(t, ([], []))
+                    summaries.append(_seo_month_summary(t, headers, rows))
+                    yield ev({"type": "step", "text": f"📊 {t}: {len(rows)} URL"})
                 yield ev({"type": "step", "text": f"🧠 Phân tích xu hướng {len(summaries)} tháng ({model})..."})
                 async for chunk in stream_analysis(_seo_trend_prompt(summaries)):
                     yield chunk
