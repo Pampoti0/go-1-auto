@@ -4,8 +4,6 @@
 
 > "Đệ là DeCho — biết làm thơ, bắt trend, đo web nhanh hơn Đại ca F5."
 
-**Live demo:** https://endpoint-425285e5-b02e-412f-b0ce-63c6bc5c245a.agentbase-runtime.aiplatform.vngcloud.vn
-
 ## Problem
 Team marketing phải nhảy qua 3-4 tool (PageSpeed Insights, Search Console, GA4, Sheets) để trả lời những câu hỏi cơ bản: web có chậm không, traffic tăng hay giảm, trang nào đang tụt — mỗi tháng tốn hàng giờ thao tác tay và dễ bỏ sót bất thường.
 

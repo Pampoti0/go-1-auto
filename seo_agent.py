@@ -14,10 +14,10 @@ import os
 
 log = logging.getLogger("seo_agent")
 
-# ── Config (env-driven, default theo setup hiện tại) ──────────────────────────
+# ── Config (env-driven — KHÔNG hardcode ID vào code, repo là public) ──────────
 SITE_URL = os.getenv("SEO_SITE_URL", "https://greennode.ai/")
-GA4_PROPERTY_ID = os.getenv("GA4_PROPERTY_ID", "417918016")
-SEO_SHEET_ID = os.getenv("SEO_SHEET_ID", "1zsJSh1O0OrB8sJ8jEClkfg4UQF97m3Dw1jntPLz7snA")
+GA4_PROPERTY_ID = os.getenv("GA4_PROPERTY_ID", "")
+SEO_SHEET_ID = os.getenv("SEO_SHEET_ID", "")
 TRACKED_URLS = [u.strip() for u in os.getenv("SEO_TRACKED_URLS", "").split(",") if u.strip()]
 ROW_LIMIT = int(os.getenv("SEO_ROW_LIMIT", "5000"))
 RUN_DAY_OF_MONTH = int(os.getenv("SEO_RUN_DAY_OF_MONTH", "8"))  # 1–28
@@ -210,6 +210,8 @@ def save_to_sheet(df, label: str):
 # ── Main job ──────────────────────────────────────────────────────────────────
 
 def run_for_month(target_year: int, target_month: int):
+    if not (SEO_SHEET_ID and GA4_PROPERTY_ID):
+        raise RuntimeError("Thiếu SEO_SHEET_ID / GA4_PROPERTY_ID trong env — xem .env.example.")
     from datetime import date
 
     from dateutil.relativedelta import relativedelta
