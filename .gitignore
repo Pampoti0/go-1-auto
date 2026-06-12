@@ -1,8 +1,9 @@
 # SECRETS — tuyệt đối không commit
 .env
 service_account.json
-service_account.json.json
-*.json.json
+token.json
+oauth_credentials.json
+decho-sitemap-wireframe.docx
 
 # Skills / tool config
 .claude/
@@ -15,3 +16,6 @@ __pycache__/
 .venv/
 .agentbase/
 .greennode.json
+
+# macOS
+.DS_Store

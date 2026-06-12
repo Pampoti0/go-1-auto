@@ -6,3 +6,10 @@ fastapi
 uvicorn
 httpx
 python-dotenv
+
+# SEO agent
+pandas
+python-dateutil
+gspread
+google-auth-oauthlib
+google-analytics-data

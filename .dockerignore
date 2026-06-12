@@ -1,7 +1,14 @@
 # Secrets — không bake vào Docker image (image sẽ push lên registry)
 .env
 service_account.json
+token.json
+oauth_credentials.json
 *.json.json
+.greennode.json
+
+# Tài liệu nội bộ / tool config
+decho-sitemap-wireframe.docx
+.claude/
 
 # Rác
 __pycache__/
@@ -11,4 +18,4 @@ __pycache__/
 .agentbase/
 runtime_config.json
 .git/
-.greennode.json
+.DS_Store

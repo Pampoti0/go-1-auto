@@ -1,552 +1,1367 @@
 <!DOCTYPE html>
-<html lang="vi" data-theme="light">
+<html lang="vi">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>PageSpeed Checker Agent</title>
+<title>DeCho Agent</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.5/babel.min.js"></script>
+<script src="https://cdn.tailwindcss.com"></script>
+<script src="https://unpkg.com/three@0.128.0/build/three.min.js"></script>
+<script src="https://unpkg.com/three@0.128.0/examples/js/loaders/GLTFLoader.js"></script>
+<script src="https://unpkg.com/three@0.128.0/examples/js/controls/OrbitControls.js"></script>
+<script>
+tailwind.config={darkMode:'class',theme:{extend:{colors:{accent:'#0ea371',accent2:'#0891b2'}}}};
+</script>
 <style>
-:root, [data-theme="light"]{
-  --bg:#f4f6fb; --bg-grad1:rgba(52,211,153,.10); --bg-grad2:rgba(34,211,238,.10);
-  --surface:#ffffff; --border:#e3e8f0; --text:#1a2333; --muted:#64748b;
-  --accent:#0ea371; --accent2:#0891b2; --user:linear-gradient(135deg,#2563eb,#4f46e5);
-  --bubble:#ffffff; --input-bg:#f1f5f9; --shadow:0 1px 3px rgba(16,24,40,.07),0 4px 14px rgba(16,24,40,.05);
-  --side:#ffffff;
-}
-[data-theme="dark"]{
-  --bg:#0b1020; --bg-grad1:rgba(52,211,153,.10); --bg-grad2:rgba(34,211,238,.12);
-  --surface:#121a30; --border:rgba(255,255,255,.1); --text:#e8edf7; --muted:#8b96ad;
-  --accent:#34d399; --accent2:#22d3ee; --user:linear-gradient(135deg,#2563eb,#4f46e5);
-  --bubble:rgba(255,255,255,.05); --input-bg:rgba(255,255,255,.06); --shadow:none;
-  --side:#0e1428;
-}
-*{box-sizing:border-box;margin:0;padding:0}
-html,body{height:100%}
-body{
-  font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Inter,Roboto,sans-serif;
-  color:var(--text);
-  background:radial-gradient(1100px 500px at 90% -10%,var(--bg-grad2),transparent 60%),
-             radial-gradient(900px 500px at -10% 110%,var(--bg-grad1),transparent 55%), var(--bg);
-  background-attachment:fixed; transition:background .25s,color .25s;
-}
-.app{display:flex;height:100vh;overflow:hidden}
-
-/* ── Sidebar ── */
-aside{
-  width:220px;flex:none;display:flex;flex-direction:column;gap:6px;padding:18px 12px;
-  background:var(--side);border-right:1px solid var(--border);
-}
-.brand{display:flex;align-items:center;gap:10px;padding:4px 10px 16px}
-.brand .logo{width:36px;height:36px;border-radius:10px;display:grid;place-items:center;font-size:18px;
-  background:linear-gradient(135deg,rgba(14,163,113,.15),rgba(8,145,178,.15));border:1px solid var(--border)}
-.brand b{font-size:14px;line-height:1.25}
-.navItem{
-  display:flex;align-items:center;gap:10px;padding:11px 14px;border-radius:11px;cursor:pointer;
-  font-size:14px;color:var(--muted);border:1px solid transparent;background:transparent;width:100%;text-align:left;
-  transition:.15s;text-decoration:none;
-}
-.navItem:hover{background:var(--input-bg);color:var(--text)}
-.navItem.active{background:linear-gradient(135deg,rgba(14,163,113,.12),rgba(8,145,178,.12));
-  color:var(--accent);border-color:var(--border);font-weight:600}
-.sideSpace{flex:1}
-.sideFoot{display:flex;flex-direction:column;gap:6px;border-top:1px solid var(--border);padding-top:10px}
-
-/* ── Content ── */
-.content{flex:1;display:flex;flex-direction:column;min-width:0}
-header{
-  display:grid;grid-template-columns:1fr auto 1fr;align-items:center;gap:12px;
-  padding:12px 22px;border-bottom:1px solid var(--border);background:var(--surface);
-}
-.hmeta h1{font-size:15px;font-weight:700}
-.hmeta p{font-size:11.5px;color:var(--muted);margin-top:2px;display:flex;align-items:center;gap:5px}
-.dot{width:7px;height:7px;border-radius:50%;background:var(--accent);box-shadow:0 0 6px var(--accent);flex:none}
-/* model select ở giữa header */
-.modelWrap{display:flex;align-items:center;gap:8px;justify-self:center}
-.modelWrap label{font-size:12px;color:var(--muted)}
-#modelSel{
-  appearance:none;-webkit-appearance:none;padding:8px 30px 8px 14px;font-size:13px;border-radius:10px;cursor:pointer;
-  color:var(--text);border:1px solid var(--border);background:var(--input-bg);outline:0;
-  background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6'%3E%3Cpath d='M1 1l4 4 4-4' stroke='%2364748b' fill='none' stroke-width='1.5'/%3E%3C/svg%3E");
-  background-repeat:no-repeat;background-position:right 11px center;
-}
-#modelSel:focus{border-color:var(--accent2)}
-
-/* ── Views ── */
-.view{flex:1;display:flex;flex-direction:column;min-height:0}
-.hidden{display:none!important}
-
-/* Chat view */
-.chips{display:flex;gap:8px;flex-wrap:wrap;padding:14px 26px 12px;max-width:1150px;width:100%;margin:0 auto;border-bottom:1px solid var(--border)}
-.chip{font-size:12.5px;padding:7px 13px;border-radius:999px;cursor:pointer;color:var(--text);
-  border:1px solid var(--border);background:var(--surface);box-shadow:var(--shadow);transition:.16s;white-space:nowrap}
-.chip:hover{border-color:var(--accent);color:var(--accent);transform:translateY(-1px)}
-.chip:disabled{opacity:.45;cursor:default;pointer-events:none;transform:none}
-#chatScroll{flex:1;min-height:0;overflow-y:auto;scroll-behavior:smooth}
-.chatWrap{max-width:1150px;margin:0 auto;padding:18px 26px;display:flex;flex-direction:column;gap:14px}
-.row{display:flex;gap:10px;align-items:flex-end;animation:up .25s ease}
-.row.me{flex-direction:row-reverse}
+::-webkit-scrollbar{width:8px;height:8px}::-webkit-scrollbar-thumb{background:rgba(120,130,150,.35);border-radius:4px}
+.md b{font-weight:700}
+.md code{background:rgba(120,130,150,.15);border:1px solid rgba(120,130,150,.25);border-radius:5px;padding:1px 5px;font-size:12.5px;font-family:ui-monospace,monospace}
+svg rect.bar{transition:width .6s cubic-bezier(.2,.8,.2,1)}
 @keyframes up{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:none}}
-.ava{width:32px;height:32px;border-radius:50%;flex:none;display:grid;place-items:center;font-size:15px;
-  background:linear-gradient(135deg,rgba(14,163,113,.15),rgba(8,145,178,.15));border:1px solid var(--border)}
-.bubble{max-width:82%;padding:13px 17px;font-size:15px;line-height:1.6;white-space:pre-wrap;word-break:break-word;
-  background:var(--bubble);border:1px solid var(--border);border-radius:18px;border-bottom-left-radius:6px;box-shadow:var(--shadow)}
-.me .bubble{background:var(--user);border:none;color:#fff;border-radius:18px;border-bottom-right-radius:6px}
-details.think{margin-bottom:8px;border:1px dashed var(--border);border-radius:10px;padding:7px 10px;background:var(--input-bg)}
-details.think summary{cursor:pointer;font-size:12px;color:var(--muted);font-weight:600;user-select:none;list-style:none;display:flex;align-items:center;gap:6px}
-details.think summary::before{content:'▸';transition:transform .15s}
-details.think[open] summary::before{transform:rotate(90deg)}
-.thinkText{font-size:12.5px;color:var(--muted);white-space:pre-wrap;word-break:break-word;
-  max-height:320px;overflow-y:auto;margin-top:6px;line-height:1.7;font-family:ui-monospace,monospace}
-.err{color:#ef4444}
-.bubble code{background:var(--input-bg);border:1px solid var(--border);border-radius:5px;padding:1px 5px;font-size:12.5px;font-family:ui-monospace,monospace}
-.bubble b{font-weight:700}
-.dots{display:inline-flex;gap:4px;padding:4px 2px}
-.dots i{width:6px;height:6px;border-radius:50%;background:var(--muted);animation:blink 1.2s infinite}
-.dots i:nth-child(2){animation-delay:.2s}.dots i:nth-child(3){animation-delay:.4s}
+.msg-in{animation:up .25s ease}
 @keyframes blink{0%,80%,100%{opacity:.25}40%{opacity:1}}
-.composerBar{padding:12px 26px 18px}
-.composer{max-width:1150px;margin:0 auto;display:flex;gap:10px;padding:9px;border-radius:16px;
-  background:var(--surface);border:1px solid var(--border);box-shadow:var(--shadow)}
-.composer input{flex:1;background:transparent;border:0;outline:0;color:var(--text);font-size:15px;padding:11px 10px}
-.composer input::placeholder{color:var(--muted)}
-.sendbtn{width:46px;height:46px;border:0;border-radius:12px;cursor:pointer;font-size:18px;color:#fff;
-  background:linear-gradient(135deg,var(--accent),var(--accent2));transition:.18s;flex:none}
-.sendbtn:hover{filter:brightness(1.08)}
-.sendbtn:disabled{opacity:.45;cursor:default}
-.sendbtn.stop{background:#ef4444}
-
-/* Config view — full page */
-#viewConfig{overflow-y:auto;padding:16px 22px}
-.cfgGrid{
-  max-width:1150px;width:100%;margin:0 auto;display:grid;
-  grid-template-columns:minmax(0,1fr) 340px;gap:14px;align-items:start;
-}
-.card{
-  background:var(--surface);border:1px solid var(--border);border-radius:16px;
-  padding:18px;display:flex;flex-direction:column;gap:11px;box-shadow:var(--shadow);
-}
-.card h3{font-size:14px;display:flex;align-items:center;gap:8px}
-.card .desc{font-size:12.5px;color:var(--muted);margin-top:-6px}
-.cfgBar{
-  grid-column:1/-1;display:flex;gap:10px;align-items:center;justify-content:flex-end;
-  background:var(--surface);border:1px solid var(--border);border-radius:14px;padding:10px 16px;box-shadow:var(--shadow);
-  position:sticky;bottom:0;
-}
-.cfgBar .msg{font-size:13px;margin-right:auto;color:var(--muted)}
-label.sec{font-size:11.5px;color:var(--muted);font-weight:700;letter-spacing:.5px;text-transform:uppercase;display:block;margin-bottom:8px}
-/* lưới 2 cột compact — vừa khít, không scroll trong card */
-#urlList{display:grid;grid-template-columns:repeat(auto-fill,minmax(340px,1fr));gap:6px}
-#urlCount{font-size:12px;color:var(--muted);font-weight:400;margin-left:auto}
-.urlRow{display:flex;gap:5px}
-.urlRow input{flex:1;min-width:0;background:var(--input-bg);color:var(--text);border:1px solid var(--border);border-radius:8px;
-  padding:6px 10px;font-size:12px;outline:0;font-family:ui-monospace,monospace}
-.urlRow input:focus{border-color:var(--accent2);background:var(--surface)}
-.urlRow input.bad{border-color:#ef4444}
-.delBtn{width:28px;border:1px solid var(--border);border-radius:8px;background:var(--input-bg);color:var(--muted);
-  cursor:pointer;font-size:13px;flex:none;transition:.15s}
-.delBtn:hover{color:#ef4444;border-color:#ef4444}
-.addUrl{margin-top:4px;padding:6px 13px;font-size:12.5px;border:1px dashed var(--border);border-radius:8px;
-  background:transparent;color:var(--accent);cursor:pointer;font-weight:600;align-self:flex-start}
-.addUrl:hover{border-color:var(--accent)}
-.seg{display:inline-flex;border:1px solid var(--border);border-radius:10px;overflow:hidden;background:var(--input-bg)}
-.seg button{padding:8px 16px;border:0;background:transparent;color:var(--muted);font-size:13px;cursor:pointer;transition:.15s}
-.seg button.on{background:var(--accent);color:#fff;font-weight:600}
-.togglePill{padding:8px 16px;border-radius:10px;border:1px solid var(--border);background:var(--input-bg);
-  color:var(--muted);font-size:13px;cursor:pointer;transition:.15s}
-.togglePill.on{background:var(--accent);border-color:var(--accent);color:#fff;font-weight:600}
-.frow{display:flex;gap:10px;flex-wrap:wrap;align-items:center}
-.frow input[type=time],.frow input[type=number],.frow select{
-  background:var(--input-bg);color:var(--text);border:1px solid var(--border);border-radius:9px;padding:8px 10px;font-size:13.5px;outline:0}
-.frow input:focus,.frow select:focus{border-color:var(--accent2)}
-.hint{font-size:12px;color:var(--muted)}
-.btn{padding:10px 20px;border-radius:10px;border:1px solid var(--border);background:var(--surface);color:var(--text);cursor:pointer;font-size:13.5px}
-.btn.primary{background:linear-gradient(135deg,var(--accent),var(--accent2));color:#fff;border:0;font-weight:700}
-.btn:hover{filter:brightness(1.05)}
-::-webkit-scrollbar{width:8px}::-webkit-scrollbar-thumb{background:var(--border);border-radius:4px}
-
-@media(max-width:980px){.cfgGrid{grid-template-columns:1fr}}
-@media(max-width:720px){
-  .app{flex-direction:column}
-  aside{width:100%;flex-direction:row;align-items:center;padding:8px 12px;gap:8px;border-right:0;border-bottom:1px solid var(--border)}
-  .brand{padding:0;margin-right:4px}.brand b{display:none}
-  .navItem{width:auto;padding:8px 12px}
-  .sideSpace{flex:1}.sideFoot{flex-direction:row;border:0;padding:0}
-  header{grid-template-columns:1fr;gap:8px}
-  .modelWrap{justify-self:start}
-  .bubble{max-width:86%}
-}
+.dot1,.dot2,.dot3{animation:blink 1.2s infinite}.dot2{animation-delay:.2s}.dot3{animation-delay:.4s}
+@keyframes pop{from{opacity:0;transform:translateY(5px) scale(.97)}to{opacity:1;transform:none}}
+.speech{animation:pop .22s ease}
+/* DeCho pose motions */
+@keyframes poseFloat{0%,100%{transform:translateY(0)}50%{transform:translateY(-6px)}}
+.pose-float{animation:poseFloat 3.5s ease-in-out infinite}
+@keyframes poseThink{0%,100%{transform:rotate(-2.5deg)}50%{transform:rotate(2.5deg) translateY(-3px)}}
+.pose-think{animation:poseThink .9s ease-in-out infinite}
+@keyframes poseBounce{0%{transform:translateY(0)}30%{transform:translateY(-16px) scale(1.05)}55%{transform:translateY(0) scale(.96,.93)}75%{transform:translateY(-6px)}100%{transform:translateY(0)}}
+.pose-bounce{animation:poseBounce .9s ease infinite}
+@keyframes poseSad{0%,100%{transform:translateY(3px) rotate(-1.2deg)}50%{transform:translateY(5px) rotate(1.2deg)}}
+.pose-sad{animation:poseSad 2.2s ease-in-out infinite;filter:saturate(.8)}
 </style>
 </head>
-<body>
-<div class="app">
+<body class="bg-slate-100 dark:bg-slate-950 text-slate-800 dark:text-slate-100">
+<div id="root"></div>
 
-  <!-- ── Side nav ── -->
-  <aside>
-    <div class="brand"><div class="logo">⚡</div><b>PageSpeed<br>Checker Agent</b></div>
-    <button class="navItem active" id="navChat" onclick="showView('chat')">💬 Chat</button>
-    <button class="navItem" id="navConfig" onclick="showView('config')">⚙️ Cấu hình</button>
-    <div class="sideSpace"></div>
-    <div class="sideFoot">
-      <a class="navItem" id="sheetLink" href="#" target="_blank">📊 Google Sheet</a>
-      <button class="navItem" id="themeBtn" onclick="toggleTheme()">🌙 Dark mode</button>
-    </div>
-  </aside>
+<script type="text/babel" data-presets="react">
+const {useState,useEffect,useRef,useCallback} = React;
 
-  <!-- ── Content ── -->
-  <div class="content">
-    <header>
-      <div class="hmeta">
-        <h1 id="viewTitle">Chat</h1>
-        <p><span class="dot"></span><span id="metaLine">Đang kết nối...</span></p>
-      </div>
-      <div class="modelWrap">
-        <label for="modelSel">Model</label>
-        <select id="modelSel">
-          <option value="google/gemma-4-31b-it">Gemma 4 31B</option>
-          <option value="qwen/qwen3-5-27b">Qwen3.5 27B</option>
-          <option value="minimax/minimax-m2.5">MiniMax M2.5</option>
-        </select>
-      </div>
-      <div></div>
-    </header>
-
-    <!-- Chat view -->
-    <section class="view" id="viewChat">
-      <div class="chips">
-        <button class="chip" onclick="send('Chạy kiểm tra ngay')">▶ Chạy ngay</button>
-        <button class="chip" onclick="send('Trạng thái thế nào?')">📋 Trạng thái</button>
-        <button class="chip" onclick="send('Danh sách URL')">🔗 URLs</button>
-        <button class="chip" onclick="send('Phân tích kết quả lần chạy gần nhất')">📈 Phân tích kết quả</button>
-        <button class="chip" onclick="clearHist()" title="Xóa lịch sử chat">🗑 Xóa lịch sử</button>
-      </div>
-      <div id="chatScroll"><div class="chatWrap" id="chat"></div></div>
-      <div class="composerBar">
-        <form class="composer" id="f">
-          <input id="i" placeholder="Nhắn với agent... (vd: thêm https://example.com)" autocomplete="off">
-          <button class="sendbtn" id="sendBtn" title="Gửi">➤</button>
-        </form>
-      </div>
-    </section>
-
-    <!-- Config view — full page -->
-    <section class="view hidden" id="viewConfig">
-      <div class="cfgGrid">
-
-        <div class="card">
-          <h3>🔗 URLs theo dõi <span id="urlCount"></span></h3>
-          <p class="desc">Mỗi URL sẽ được kiểm tra theo các strategy đã chọn và ghi một dòng kết quả vào Google Sheet.</p>
-          <div id="urlList"></div>
-          <button class="addUrl" onclick="addUrlRow('')">＋ Thêm URL</button>
-        </div>
-
-        <div style="display:flex;flex-direction:column;gap:18px;min-width:0">
-          <div class="card">
-            <h3>🖥️ Strategy</h3>
-            <p class="desc">Thiết bị giả lập khi đo Core Web Vitals.</p>
-            <div class="frow">
-              <button class="togglePill" id="pMobile" onclick="this.classList.toggle('on')">📱 Mobile</button>
-              <button class="togglePill" id="pDesktop" onclick="this.classList.toggle('on')">🖥️ Desktop</button>
-            </div>
-          </div>
-
-          <div class="card">
-            <h3>🕐 Lịch chạy tự động</h3>
-            <p class="desc">Agent tự chạy theo lịch, không cần thao tác.</p>
-            <div class="seg" id="modeSeg" style="align-self:flex-start">
-              <button data-v="daily">Hàng ngày</button>
-              <button data-v="weekly">Hàng tuần</button>
-              <button data-v="monthly">Hàng tháng</button>
-            </div>
-            <div class="frow">
-              <span class="hint">lúc</span>
-              <input type="time" id="cfgTime">
-              <span id="dayWrap" class="frow" style="gap:6px">
-                <span class="hint">ngày</span>
-                <input type="number" id="cfgDay" min="1" max="28" style="width:64px">
-                <span class="hint">hàng tháng</span>
-              </span>
-              <span id="weekWrap" class="frow" style="gap:6px;display:none">
-                <select id="cfgWeekday">
-                  <option value="monday">Thứ 2</option><option value="tuesday">Thứ 3</option>
-                  <option value="wednesday">Thứ 4</option><option value="thursday">Thứ 5</option>
-                  <option value="friday">Thứ 6</option><option value="saturday">Thứ 7</option>
-                  <option value="sunday">Chủ nhật</option>
-                </select>
-              </span>
-            </div>
-          </div>
-        </div>
-
-        <div class="cfgBar">
-          <span class="msg" id="cfgMsg"></span>
-          <button class="btn" onclick="loadCfg()">↺ Hoàn tác</button>
-          <button class="btn primary" onclick="saveCfg()">💾 Lưu cấu hình</button>
-        </div>
-
-      </div>
-    </section>
-  </div>
-</div>
-
-<script>
-const chat=document.getElementById('chat'),chatScroll=document.getElementById('chatScroll'),
-      f=document.getElementById('f'),inp=document.getElementById('i'),sendBtn=document.getElementById('sendBtn');
-
-/* ── Theme (mặc định light) ── */
-function applyTheme(t){
-  document.documentElement.dataset.theme=t;
-  document.getElementById('themeBtn').textContent=t==='light'?'🌙 Dark mode':'☀️ Light mode';
-  try{localStorage.setItem('psi-theme',t)}catch(e){}
+/* ───────────────────────── utils ───────────────────────── */
+function useLS(key,init){
+  const [v,setV]=useState(()=>{try{return localStorage.getItem(key)??init}catch(e){return init}});
+  useEffect(()=>{try{localStorage.setItem(key,v)}catch(e){}},[key,v]);
+  return [v,setV];
 }
-function toggleTheme(){applyTheme(document.documentElement.dataset.theme==='light'?'dark':'light')}
-try{applyTheme(localStorage.getItem('psi-theme')||'light')}catch(e){applyTheme('light')}
-
-/* ── View switching ── */
-function showView(v){
-  document.getElementById('viewChat').classList.toggle('hidden',v!=='chat');
-  document.getElementById('viewConfig').classList.toggle('hidden',v!=='config');
-  document.getElementById('navChat').classList.toggle('active',v==='chat');
-  document.getElementById('navConfig').classList.toggle('active',v==='config');
-  document.getElementById('viewTitle').textContent=v==='chat'?'Chat':'Cấu hình';
-  if(v==='config')loadCfg();
-  if(v==='chat')scrollBottom();
-}
-
-/* ── Scroll helper (fix: luôn cuộn đúng container) ── */
-function scrollBottom(){requestAnimationFrame(()=>{chatScroll.scrollTop=chatScroll.scrollHeight})}
-
-/* ── Model select (mặc định qwen) ── */
-const modelSel=document.getElementById('modelSel');
-try{modelSel.value=localStorage.getItem('psi-model')||'google/gemma-4-31b-it'}catch(e){}
-if(!modelSel.value)modelSel.value='google/gemma-4-31b-it';
-modelSel.addEventListener('change',()=>{try{localStorage.setItem('psi-model',modelSel.value)}catch(e){}});
-
-/* ── Markdown nhẹ: escape HTML rồi render đậm/code/bullet, giữ pre-wrap ── */
+const esc=s=>s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
 function md(s){
-  /* LaTeX lẻ tẻ từ model → ký tự unicode */
   s=s.replace(/\$?\\(rightarrow|to)\$?/g,'→').replace(/\$?\\leftarrow\$?/g,'←')
-     .replace(/\$?\\(uparrow)\$?/g,'↑').replace(/\$?\\(downarrow)\$?/g,'↓')
      .replace(/\$?\\times\$?/g,'×').replace(/\$?\\(le|leq)\$?/g,'≤')
      .replace(/\$?\\(ge|geq)\$?/g,'≥').replace(/\$?\\approx\$?/g,'≈')
      .replace(/\$(\d[\d.,]*)\$/g,'$1');
-  s=s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+  s=esc(s);
   s=s.replace(/```[a-z]*\n?([\s\S]*?)```/g,(m,c)=>'<code>'+c.trim()+'</code>');
   s=s.replace(/`([^`\n]+)`/g,'<code>$1</code>');
   s=s.replace(/\*\*([^*\n]+)\*\*/g,'<b>$1</b>');
   s=s.replace(/(^|\n)#{1,4} (.*)/g,'$1<b>$2</b>');
-  s=s.replace(/(^|\n)[ \t]*[-*] /g,'$1• ');          /* bullet */
-  s=s.replace(/(^|\n)[ \t]*(\d+)\. /g,'$1$2. ');      /* numbered giữ nguyên, bỏ indent */
-  s=s.replace(/\n{3,}/g,'\n\n');                       /* gọn dòng trống */
+  s=s.replace(/(^|\n)[ \t]*[-*] /g,'$1• ');
+  s=s.replace(/\n{3,}/g,'\n\n');
   return s;
 }
-function setAnswer(el,text){
-  if(text.startsWith('❌')){el.innerHTML='';const s=document.createElement('span');s.className='err';s.textContent=text;el.appendChild(s)}
-  else el.innerHTML=md(text);
-  el.dataset.raw=text;
+const scoreColor=n=>n>=90?'#0ea371':(n>=50?'#d97706':'#dc2626');
+const pathOf=u=>{try{const x=new URL(u);return x.pathname==='/'?x.hostname:x.pathname}catch(e){return u}};
+const MODELS=[['google/gemma-4-31b-it','Gemma 4 31B'],['qwen/qwen3-5-27b','Qwen3.5 27B'],['minimax/minimax-m2.5','MiniMax M2.5']];
+
+/* ───────────────────────── shared bits ───────────────────────── */
+const Dots=()=> <span className="inline-flex gap-1"><i className="dot1 w-1.5 h-1.5 rounded-full bg-slate-400 inline-block"/><i className="dot2 w-1.5 h-1.5 rounded-full bg-slate-400 inline-block"/><i className="dot3 w-1.5 h-1.5 rounded-full bg-slate-400 inline-block"/></span>;
+
+const card="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-2xl shadow-sm";
+const input="bg-slate-100 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-lg px-3 py-2 text-sm outline-none focus:border-accent2";
+const chipCls="text-xs px-3.5 py-1.5 rounded-full border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 shadow-sm hover:border-accent hover:text-accent transition disabled:opacity-40 disabled:pointer-events-none";
+
+/* ───────────────────────── DeCho event bus ─────────────────────────
+   Mọi nơi trong app đều nói chuyện được với DeCho:
+   dechoBus.say(text)  — DeCho nói (speech bubble cạnh dock)
+   dechoBus.busy(bool) — DeCho rung lắc khi hệ thống đang chạy việc
+   dechoBus.act('jump'|'nod') — animation                                 */
+const dechoBus={
+  listeners:new Set(),
+  emit(e){this.listeners.forEach(f=>f(e))},
+  on(f){this.listeners.add(f);return()=>this.listeners.delete(f)},
+  say(text,ms=7000){this.emit({type:'say',text,ms})},
+  busy(b){this.emit({type:'busy',b})},
+  act(a){this.emit({type:'act',a})},
+};
+/* Bối cảnh màn hình hiện tại — các view tự cập nhật, DeCho dùng khi được hỏi */
+const dechoCtx={view:'',info:'',model:''};
+
+/* ───────────────────────── Decho 3D stage ───────────────────────── */
+const QUIPS=[
+  'Vibe check ✅ Hệ thống xanh, deadline chưa cháy. Đại ca cứ yên tâm.',
+  'Lục bát nè Đại ca:\nWeb nhanh thì khách mới vui,\nLCP chậm chạp thì lui khách liền 🫡',
+  'Đại ca hỏi gì hỏi đi, Đệ đứng đây mãi cũng mỏi chân á.',
+  'No cap, Đại ca qua tab 📊 Dashboard xem điểm đi, đẹp lắm.',
+  'Đệ là DeCho — biết làm thơ, bắt trend, đo web nhanh hơn Đại ca F5.',
+  'Haiku tặng Đại ca:\nĐiểm xanh trên bảng,\nclicks về như lá mùa thu —\nSEO thắng lớn 🍂',
+  'Đại ca kéo Đệ xoay thử đi, góc nào Đệ cũng đẹp. Lowkey tự tin đấy.',
+  'Cần gì cứ gọi Đệ: PageSpeed, SEO, phân tích số liệu — chill thôi, nhưng output thì xịn.',
+];
+function useDechoSpeech(){
+  const [bubble,setBubble]=useState(null);
+  const [busy,setBusy]=useState(false);
+  const timer=useRef(null);
+  useEffect(()=>dechoBus.on(e=>{
+    if(e.type==='say'){
+      clearTimeout(timer.current);
+      if(!e.text){setBubble(null);return}
+      setBubble({text:e.text});
+      timer.current=setTimeout(()=>setBubble(null),e.ms);
+    }else if(e.type==='busy')setBusy(e.b);
+  }),[]);
+  return {bubble,busy};
 }
 
-/* ── Chat ── */
-function row(me,content){
-  const r=document.createElement('div');r.className='row'+(me?' me':'');
-  const a=document.createElement('div');a.className='ava';a.textContent=me?'🧑':'🤖';
-  const b=document.createElement('div');b.className='bubble';
-  if(typeof content==='string')b.textContent=content;else b.appendChild(content);
-  r.append(a,b);chat.appendChild(r);scrollBottom();return b;
+function SpeechBubble({bubble,busy,fallback,className}){
+  if(!bubble&&!busy&&!fallback)return null;
+  return (
+    <div className={"speech px-4 py-3 rounded-2xl text-[13px] leading-relaxed bg-white/95 dark:bg-slate-800/95 backdrop-blur border border-slate-200 dark:border-slate-700 shadow-xl whitespace-pre-wrap overflow-y-auto "+(className||'')}>
+      {busy
+        ?<span className="text-slate-400">Đệ xem qua cái này cho Đại ca nhé <Dots/></span>
+        :<span className="md" dangerouslySetInnerHTML={{__html:md(bubble?bubble.text:fallback)}}/>}
+    </div>
+  );
 }
-function typing(){
-  const d=document.createElement('span');d.className='dots';d.innerHTML='<i></i><i></i><i></i>';
-  return row(false,d);
-}
-/* ── Lịch sử chat (localStorage — sống qua redeploy vì nằm phía trình duyệt) ── */
-const GREETING='Xin chào! Mình là AI agent kiểm tra PageSpeed 🤖\nMình tự động quét Core Web Vitals theo lịch và ghi kết quả vào Google Sheet.\n\nBạn có thể: bấm "▶ Chạy ngay", hỏi "trạng thái?", hoặc nhắn "thêm https://..." để quản lý URL.';
-let hist=[];
-function saveHist(me,text,steps){
-  hist.push(steps?{me,text,steps}:{me,text});
-  if(hist.length>100)hist=hist.slice(-100);
-  try{localStorage.setItem('psi-chat',JSON.stringify(hist))}catch(e){}
-}
-function renderBot(text,steps){
-  const b=row(false,'');b.textContent='';
-  if(steps){
-    const d=document.createElement('details');d.className='think';
-    d.innerHTML='<summary>⚙️ Actions</summary>';
-    const t=document.createElement('div');t.className='thinkText';t.textContent=steps;
-    d.appendChild(t);b.appendChild(d);
-  }
-  const a=document.createElement('div');
-  setAnswer(a,text);
-  b.appendChild(a);
-}
-function clearHist(){
-  hist=[];try{localStorage.removeItem('psi-chat')}catch(e){}
-  chat.innerHTML='';row(false,GREETING);
-}
-row(false,GREETING);
-try{
-  hist=JSON.parse(localStorage.getItem('psi-chat')||'[]');
-  for(const m of hist){if(m.me)row(true,m.text);else renderBot(m.text,m.steps)}
-}catch(e){hist=[]}
 
-let busy=false,aborter=null;
-function setBusy(b){
-  busy=b;
-  document.querySelectorAll('.chips .chip').forEach(c=>c.disabled=b);
-  sendBtn.textContent=b?'⏹':'➤';
-  sendBtn.title=b?'Dừng':'Gửi';
-  sendBtn.classList.toggle('stop',b);
-}
-async function send(text){
-  if(busy)return; // đang có request chạy
-  row(true,text);
-  saveHist(true,text);
-  const bubble=typing();
-  setBusy(true);
-  aborter=new AbortController();
+function DechoScene3D({className}){
+  const mountRef=useRef(null);
+  const animRef=useRef({busy:false,action:null});
+  useEffect(()=>dechoBus.on(e=>{
+    if(e.type==='busy')animRef.current.busy=e.b;
+    else if(e.type==='act')animRef.current.action={type:e.a,start:performance.now()};
+  }),[]);
+  useEffect(()=>{
+    const el=mountRef.current;
+    if(!el||!window.THREE)return;
+    const W=()=>el.clientWidth,H=()=>el.clientHeight;
 
-  let think=null,thinkText=null,ans=null,stepCount=0,ansRaw='';
-  function ensureParts(){
-    if(ans)return;
-    bubble.textContent='';
-    think=document.createElement('details');think.className='think';think.open=true;
-    think.innerHTML='<summary>⚙️ Actions</summary>';
-    thinkText=document.createElement('div');thinkText.className='thinkText';
-    think.appendChild(thinkText);
-    ans=document.createElement('div');
-    bubble.append(think,ans);
-    think.style.display='none';
-  }
+    const scene=new THREE.Scene();
+    const camera=new THREE.PerspectiveCamera(40,W()/Math.max(H(),1),0.1,100);
+    camera.position.set(0,1.05,3.4);
+    const renderer=new THREE.WebGLRenderer({alpha:true,antialias:true});
+    renderer.setPixelRatio(Math.min(devicePixelRatio,2));
+    renderer.setSize(W(),H());
+    renderer.outputEncoding=THREE.sRGBEncoding;
+    el.appendChild(renderer.domElement);
 
-  try{
-    const r=await fetch('/api/chat/stream',{
-      method:'POST',headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({message:text,model:modelSel.value}),
-      signal:aborter.signal
+    scene.add(new THREE.HemisphereLight(0xffffff,0x335544,1.15));
+    const dir=new THREE.DirectionalLight(0xffffff,0.9);
+    dir.position.set(2,4,3);scene.add(dir);
+
+    const controls=new THREE.OrbitControls(camera,renderer.domElement);
+    controls.enablePan=false;controls.enableZoom=false;
+    controls.target.set(0,1,0);controls.update();
+
+    const group=new THREE.Group();scene.add(group);
+    let model=null;
+    new THREE.GLTFLoader().load('/static/decho.glb',g=>{
+      model=g.scene;
+      const box=new THREE.Box3().setFromObject(model);
+      const size=box.getSize(new THREE.Vector3()),center=box.getCenter(new THREE.Vector3());
+      const s=2.1/Math.max(size.y,0.001);
+      model.scale.setScalar(s);
+      box.setFromObject(model);box.getCenter(center);
+      model.position.sub(center).add(new THREE.Vector3(0,1,0));
+      group.add(model);
     });
-    if(!r.ok||!r.body)throw new Error('HTTP '+r.status);
-    const reader=r.body.getReader(),dec=new TextDecoder();
-    let buf='';
-    while(true){
-      const{done,value}=await reader.read();
-      if(done)break;
-      buf+=dec.decode(value,{stream:true});
-      const events=buf.split('\n\n');buf=events.pop();
-      for(const e of events){
-        const line=e.split('\n').find(l=>l.startsWith('data:'));
-        if(!line)continue;
-        let msg;try{msg=JSON.parse(line.slice(5))}catch(_){continue}
-        ensureParts();
-        if(msg.type==='step'){
-          think.style.display='';
-          stepCount++;
-          thinkText.textContent+=(thinkText.textContent?'\n':'')+msg.text;
-          thinkText.scrollTop=thinkText.scrollHeight;
-          if(!ans.textContent)ans.innerHTML='<span class="dots"><i></i><i></i><i></i></span>';
-        }else if(msg.type==='delta'){
-          ansRaw+=msg.delta;
-          setAnswer(ans,ansRaw);
-        }else if(msg.type==='final'){
-          setAnswer(ans,msg.text);
-          if(think.style.display!=='none'&&stepCount<=3)think.open=false;
-        }else if(msg.type==='error'){
-          ans.innerHTML='';
-          const s=document.createElement('span');s.className='err';s.textContent=msg.text;
-          ans.appendChild(s);ans.dataset.raw=msg.text;
+
+    const clock=new THREE.Clock();
+    let raf;
+    const tick=()=>{
+      raf=requestAnimationFrame(tick);
+      const dt=clock.getDelta(),t=clock.elapsedTime;
+      const st=animRef.current;
+      /* idle: lơ lửng + thở (không tự xoay — kéo chuột mới xoay) */
+      group.position.y=Math.sin(t*1.8)*0.06;
+      const br=1+Math.sin(t*2.3)*0.012;
+      group.scale.set(1,br,1);
+      /* busy: rung lắc nhẹ kiểu đang gõ phím */
+      group.rotation.z=st.busy?Math.sin(t*9)*0.035:group.rotation.z*0.9;
+      /* action: jump (click) / nod (trả lời xong) */
+      if(st.action){
+        const p=(performance.now()-st.action.start)/(st.action.type==='jump'?900:1100);
+        if(p>=1){st.action=null;group.rotation.x=0}
+        else if(st.action.type==='jump'){
+          group.position.y+=Math.sin(p*Math.PI)*0.55;
+        }else{ /* nod */
+          group.rotation.x=Math.sin(p*Math.PI*3)*0.09*(1-p);
         }
-        scrollBottom();
       }
-    }
-    if(ans&&!ans.textContent.trim())setAnswer(ans,'❌ Không nhận được phản hồi từ model.');
-    saveHist(false,ans?(ans.dataset.raw||ans.textContent):'',thinkText&&thinkText.textContent?thinkText.textContent:undefined);
-  }catch(e){
-    if(e.name==='AbortError'){
-      const note='⏹ Đã dừng theo yêu cầu.';
-      if(ans){const cur=ans.dataset.raw||'';setAnswer(ans,cur?cur+'\n\n'+note:note)}
-      else{bubble.textContent=note}
-      saveHist(false,(ans&&ans.dataset.raw)||note,thinkText&&thinkText.textContent?thinkText.textContent:undefined);
-    }else{
-      bubble.innerHTML='';
-      const s=document.createElement('span');s.className='err';
-      s.textContent='❌ Lỗi kết nối server: '+e.message;
-      bubble.appendChild(s);
-      saveHist(false,s.textContent);
-    }
-  }
-  finally{aborter=null;setBusy(false);scrollBottom();inp.focus()}
-}
-f.addEventListener('submit',e=>{
-  e.preventDefault();
-  if(busy){if(aborter)aborter.abort();return} /* nút đang là ⏹ Stop */
-  const v=inp.value.trim();if(!v)return;inp.value='';send(v);
-});
+      controls.update();
+      renderer.render(scene,camera);
+    };
+    tick();
 
-/* ── Header meta ── */
-function setMeta(n,sched,configured){
-  document.getElementById('metaLine').innerHTML=
-    `Online · ${n} URL · lịch ${sched}${configured===false?' · ⚠️ chưa có API key':''}`;
-}
-(async()=>{
-  try{
-    const h=await(await fetch('/healthz')).json();
-    setMeta(h.urls,h.schedule,h.configured);
-    if(h.sheet_url)document.getElementById('sheetLink').href=h.sheet_url;
-  }catch(e){document.getElementById('metaLine').textContent='Không kết nối được server'}
-})();
+    const ro=new ResizeObserver(()=>{
+      camera.aspect=W()/Math.max(H(),1);camera.updateProjectionMatrix();
+      renderer.setSize(W(),H());
+    });
+    ro.observe(el);
 
-/* ── Config view ── */
-const urlList=document.getElementById('urlList');
-let mode='monthly';
+    return()=>{cancelAnimationFrame(raf);ro.disconnect();controls.dispose();
+      renderer.dispose();el.contains(renderer.domElement)&&el.removeChild(renderer.domElement)};
+  },[]);
 
-function updateUrlCount(){
-  const n=urlList.querySelectorAll('input').length;
-  document.getElementById('urlCount').textContent=n+' URL';
-}
-function addUrlRow(val){
-  const r=document.createElement('div');r.className='urlRow';
-  const i=document.createElement('input');i.value=val;i.placeholder='https://...';i.spellcheck=false;
-  i.addEventListener('input',()=>i.classList.toggle('bad',i.value.trim()&&!/^https?:\/\/\S+$/.test(i.value.trim())));
-  const d=document.createElement('button');d.type='button';d.className='delBtn';d.textContent='✕';d.title='Xóa URL';
-  d.onclick=()=>{r.remove();updateUrlCount()};
-  r.append(i,d);urlList.appendChild(r);
-  updateUrlCount();
-  if(!val)i.focus();
-}
-function setMode(v){
-  mode=v;
-  document.querySelectorAll('#modeSeg button').forEach(b=>b.classList.toggle('on',b.dataset.v===v));
-  document.getElementById('dayWrap').style.display=v==='monthly'?'':'none';
-  document.getElementById('weekWrap').style.display=v==='weekly'?'':'none';
-}
-document.querySelectorAll('#modeSeg button').forEach(b=>b.onclick=()=>setMode(b.dataset.v));
-
-async function loadCfg(){
-  const c=await(await fetch('/api/config')).json();
-  urlList.innerHTML='';
-  c.urls.forEach(u=>addUrlRow(u));
-  document.getElementById('pMobile').classList.toggle('on',c.strategies.includes('mobile'));
-  document.getElementById('pDesktop').classList.toggle('on',c.strategies.includes('desktop'));
-  setMode(c.schedule_mode);
-  document.getElementById('cfgTime').value=c.schedule_time;
-  document.getElementById('cfgDay').value=c.schedule_day_of_month;
-  document.getElementById('cfgWeekday').value=c.schedule_weekday;
-  document.getElementById('cfgMsg').textContent='';
-}
-async function saveCfg(){
-  const urls=[...urlList.querySelectorAll('input')].map(i=>i.value.trim()).filter(Boolean);
-  const strategies=[];
-  if(document.getElementById('pMobile').classList.contains('on'))strategies.push('mobile');
-  if(document.getElementById('pDesktop').classList.contains('on'))strategies.push('desktop');
-  const body={
-    urls,strategies,schedule_mode:mode,
-    schedule_time:document.getElementById('cfgTime').value,
-    schedule_day_of_month:parseInt(document.getElementById('cfgDay').value)||4,
-    schedule_weekday:document.getElementById('cfgWeekday').value
+  const poke=()=>{
+    dechoBus.act('jump');
+    dechoBus.say(QUIPS[Math.floor(Math.random()*QUIPS.length)]);
   };
-  const msg=document.getElementById('cfgMsg');
-  const r=await(await fetch('/api/config',{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)})).json();
-  if(r.ok){
-    msg.textContent='✅ Đã lưu cấu hình';
-    setMeta(r.config.urls.length,`${r.config.schedule_mode} ${r.config.schedule_time}`);
-  }else msg.textContent='❌ '+r.error;
+  return <div ref={mountRef} onClick={poke} className={"cursor-pointer "+(className||'')} title="Click Đệ đi Đại ca"/>;
 }
+
+/* ───────────── DeCho sprite engine (thay 3D khi có spritesheet) ─────────────
+   Đặt 4 file PNG NỀN TRONG SUỐT vào static/sprites/: idle.png, happy.png,
+   think.png, sad.png — mỗi file 12 frame xếp lưới cols×rows (chỉnh bên dưới). */
+const SPRITE_CFG={
+  base:'/static/sprites/',
+  fps:12, cols:2, rows:6, frames:12,
+  states:{idle:'idle.png',happy:'happy.png',think:'think.png',sad:'sad.png'},
+};
+
+function DechoSprite({className}){
+  const canvasRef=useRef(null);
+  const stRef=useRef({mood:'idle',until:0,busy:false});
+
+  useEffect(()=>dechoBus.on(e=>{
+    const st=stRef.current,now=performance.now();
+    if(e.type==='busy'){st.busy=e.b;if(!st.until)st.mood=e.b?'think':'idle'}
+    else if(e.type==='act'){
+      if(e.a==='sad'){st.mood='sad';st.until=now+2600}
+      else{st.mood='happy';st.until=now+1800} /* jump/nod → happy loop */
+    }
+  }),[]);
+
+  useEffect(()=>{
+    const cv=canvasRef.current,ctx=cv.getContext('2d');
+    const imgs={};
+    Object.entries(SPRITE_CFG.states).forEach(([k,f])=>{
+      const im=new Image();im.src=SPRITE_CFG.base+f;imgs[k]=im;
+    });
+    const parent=cv.parentElement;
+    const fit=()=>{cv.width=parent.clientWidth*devicePixelRatio;cv.height=parent.clientHeight*devicePixelRatio};
+    fit();
+    const ro=new ResizeObserver(fit);ro.observe(parent);
+    let raf;
+    const tick=()=>{
+      raf=requestAnimationFrame(tick);
+      const st=stRef.current,now=performance.now();
+      if(st.until&&now>st.until){st.until=0;st.mood=st.busy?'think':'idle'}
+      const img=imgs[st.mood]&&imgs[st.mood].complete&&imgs[st.mood].naturalWidth?imgs[st.mood]:imgs.idle;
+      if(!img||!img.complete||!img.naturalWidth)return;
+      const {cols,rows,frames,fps}=SPRITE_CFG;
+      const i=Math.floor(now/1000*fps)%frames;
+      const fw=img.naturalWidth/cols,fh=img.naturalHeight/rows;
+      const sx=(i%cols)*fw,sy=Math.floor(i/cols)*fh;
+      ctx.clearRect(0,0,cv.width,cv.height);
+      const sc=Math.min(cv.width/fw,cv.height/fh)*0.92;
+      const dw=fw*sc,dh=fh*sc;
+      ctx.drawImage(img,sx,sy,fw,fh,(cv.width-dw)/2,cv.height-dh,dw,dh);
+    };
+    tick();
+    return()=>{cancelAnimationFrame(raf);ro.disconnect()};
+  },[]);
+
+  const poke=()=>{
+    dechoBus.act('jump');
+    dechoBus.say(QUIPS[Math.floor(Math.random()*QUIPS.length)]);
+  };
+  return (
+    <div onClick={poke} className={"cursor-pointer relative "+(className||'')} title="Click Đệ đi Đại ca">
+      <canvas ref={canvasRef} className="w-full h-full"/>
+    </div>
+  );
+}
+
+/* ───────── DeCho pose engine: 1 ảnh PNG / cảm xúc + CSS animation ─────────
+   Đặt 4 file PNG NỀN TRONG SUỐT vào static/poses/:
+   idle.png (nằm lê/đứng thường) · think.png (hoang mang/suy nghĩ)
+   happy.png (hào hứng/yeahhh) · sad.png (buồn/mệt mỏi)                     */
+const POSE_CFG={base:'/static/poses/',states:{idle:'idle.png',think:'think.png',happy:'happy.png',sad:'sad.png'}};
+
+function DechoPose({className}){
+  const [mood,setMood]=useState('idle');
+  const stRef=useRef({busy:false,timer:null});
+  useEffect(()=>{ /* preload */
+    Object.values(POSE_CFG.states).forEach(f=>{const im=new Image();im.src=POSE_CFG.base+f});
+  },[]);
+  useEffect(()=>dechoBus.on(e=>{
+    const st=stRef.current;
+    if(e.type==='busy'){st.busy=e.b;if(!st.timer)setMood(e.b?'think':'idle')}
+    else if(e.type==='act'){
+      const m=e.a==='sad'?'sad':'happy',ms=m==='sad'?2600:1800;
+      setMood(m);
+      clearTimeout(st.timer);
+      st.timer=setTimeout(()=>{st.timer=null;setMood(st.busy?'think':'idle')},ms);
+    }
+  }),[]);
+  const poke=()=>{
+    dechoBus.act('jump');
+    dechoBus.say(QUIPS[Math.floor(Math.random()*QUIPS.length)]);
+  };
+  const motion={idle:'pose-float',think:'pose-think',happy:'pose-bounce',sad:'pose-sad'}[mood];
+  return (
+    <div onClick={poke} className={"cursor-pointer flex items-end justify-center "+(className||'')} title="Click Đệ đi Đại ca">
+      <img src={POSE_CFG.base+POSE_CFG.states[mood]} alt="DeCho"
+           className={"max-h-[92%] max-w-[88%] object-contain "+motion} draggable={false}/>
+    </div>
+  );
+}
+
+/* Wrapper: có spritesheet → dùng 2D animation, chưa có → fallback 3D */
+function DechoScene(props){
+  const [mode,setMode]=useState('probe');
+  useEffect(()=>{
+    const test=u=>new Promise(res=>{const im=new Image();im.onload=()=>res(true);im.onerror=()=>res(false);im.src=u});
+    (async()=>{
+      if(await test(POSE_CFG.base+POSE_CFG.states.idle))setMode('pose');
+      else if(await test(SPRITE_CFG.base+SPRITE_CFG.states.idle))setMode('sprite');
+      else setMode('3d');
+    })();
+  },[]);
+  if(mode==='pose')return <DechoPose {...props}/>;
+  if(mode==='sprite')return <DechoSprite {...props}/>;
+  if(mode==='3d')return <DechoScene3D {...props}/>;
+  return <div className={props.className}/>;
+}
+
+/* DeCho dock — góc sidebar, kèm ô hỏi đáp có bối cảnh màn hình */
+function DechoDock({showAsk}){
+  const {bubble,busy}=useDechoSpeech();
+  const [q,setQ]=useState('');
+  const [asking,setAsking]=useState(false);
+
+  async function ask(e){
+    e.preventDefault();
+    const question=q.trim();
+    if(!question||asking)return;
+    setQ('');setAsking(true);dechoBus.busy(true);
+    try{
+      const r=await(await fetch('/api/decho/ask',{
+        method:'POST',headers:{'Content-Type':'application/json'},
+        body:JSON.stringify({question,model:dechoCtx.model||undefined,
+          context:`Người dùng đang mở màn hình: ${dechoCtx.view}\n${dechoCtx.info||''}`})
+      })).json();
+      if(r.reply){dechoBus.act('nod');dechoBus.say(r.reply,15000)}
+      else{dechoBus.act('sad');dechoBus.say('❌ '+(r.error||'Đệ hỏi không được'),8000)}
+    }catch(err){dechoBus.act('sad');dechoBus.say('❌ Lỗi: '+err.message,8000)}
+    finally{setAsking(false);dechoBus.busy(false)}
+  }
+
+  return (
+    <div className="relative flex-none">
+      {(bubble||busy)&&(
+        <div className="absolute bottom-full left-0.5 right-0.5 mb-2 z-50" onClick={()=>dechoBus.say(null)} title="Click để đóng">
+          <SpeechBubble bubble={bubble} busy={busy} className="max-h-[55vh] cursor-pointer text-[12.5px]"/>
+        </div>
+      )}
+      <div className="rounded-2xl mx-0.5 mb-1 overflow-hidden border border-slate-200 dark:border-slate-800 bg-gradient-to-b from-emerald-50 via-cyan-50/40 to-transparent dark:from-emerald-950/40 dark:via-cyan-950/20">
+        <div className="relative">
+          <div className="absolute bottom-2 left-1/2 -translate-x-1/2 w-28 h-5 rounded-full blur-xl opacity-40" style={{background:'radial-gradient(ellipse,#0ea371,transparent 70%)'}}/>
+          <DechoScene className="h-40"/>
+        </div>
+        {showAsk&&<form onSubmit={ask} className="flex gap-1 px-2 pb-1.5">
+          <input value={q} onChange={e=>setQ(e.target.value)} placeholder="Hỏi Đệ về màn hình này…"
+            className="flex-1 min-w-0 text-[11.5px] px-2 py-1.5 rounded-lg bg-white/80 dark:bg-slate-900/60 border border-slate-200 dark:border-slate-700 outline-none focus:border-accent2"/>
+          <button disabled={asking} className="text-[11px] px-2.5 rounded-lg bg-gradient-to-br from-accent to-accent2 text-white font-bold disabled:opacity-50">{asking?'…':'➤'}</button>
+        </form>}
+        <div className="pb-1.5 text-center text-[10px] text-slate-400 select-none">
+          {busy?'⚙️ Đệ đang chạy việc':(showAsk?'🟢 Đệ đang rảnh · hỏi Đệ bên trên':'🟢 Đệ đang rảnh · nhắn Đệ ở khung chat')}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+
+/* ───────────────────────── Chat ───────────────────────── */
+function Bubble({m}){
+  return (
+    <div className={"msg-in flex gap-2.5 items-end "+(m.me?"flex-row-reverse":"")}>
+      {m.me
+        ?<div className="w-8 h-8 rounded-full flex-none grid place-items-center text-[15px] bg-gradient-to-br from-blue-100 to-indigo-100 dark:from-blue-900 dark:to-indigo-900 border border-slate-200 dark:border-slate-700">🧑</div>
+        :<div className="w-8 h-8 rounded-full flex-none grid place-items-center text-[12px] font-extrabold text-white bg-gradient-to-br from-accent to-accent2 border border-slate-200 dark:border-slate-700" title="DeCho">Đệ</div>}
+      <div className={"max-w-[82%] px-4 py-3 text-[14.5px] leading-relaxed whitespace-pre-wrap break-words rounded-2xl "+(m.me?"bg-gradient-to-br from-blue-600 to-indigo-600 text-white rounded-br-md":"bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 shadow-sm rounded-bl-md")}>
+        {!m.me&&m.steps&&(
+          <details open={m.streaming||m.stepsOpen} className="mb-2 border border-dashed border-slate-300 dark:border-slate-600 rounded-lg px-2.5 py-1.5 bg-slate-50 dark:bg-slate-800">
+            <summary className="cursor-pointer text-[11.5px] font-semibold text-slate-500 select-none">⚙️ Actions</summary>
+            <div className="mt-1.5 text-[12px] leading-relaxed text-slate-500 font-mono whitespace-pre-wrap max-h-72 overflow-y-auto"
+                 ref={el=>{if(el&&m.streaming)el.scrollTop=el.scrollHeight}}>{m.steps}</div>
+          </details>
+        )}
+        {m.me
+          ? m.text
+          : m.error
+            ? <span className="text-red-500">{m.text}</span>
+            : m.text
+              ? <span className="md" dangerouslySetInnerHTML={{__html:md(m.text)}}/>
+              : <Dots/>}
+      </div>
+    </div>
+  );
+}
+
+function ChatView({cfg,model}){
+  const [msgs,setMsgs]=useState([]);
+  const [busy,setBusy]=useState(false);
+  const [inp,setInp]=useState('');
+  const scrollRef=useRef(null), aborterRef=useRef(null), histRef=useRef([]);
+
+  useEffect(()=>{ /* load history */
+    let h=[];try{h=JSON.parse(localStorage.getItem(cfg.storageKey)||'[]')}catch(e){}
+    histRef.current=h;
+    setMsgs([{me:false,text:cfg.greeting,stepsOpen:false},...h.map(x=>({me:x.me,text:x.text,steps:x.steps,error:(x.text||'').startsWith('❌')}))]);
+  },[cfg.storageKey]);
+
+  useEffect(()=>{const el=scrollRef.current;if(el)el.scrollTop=el.scrollHeight},[msgs]);
+
+  useEffect(()=>{ /* khai báo bối cảnh cho DeCho */
+    const name='Chat với DeCho (đa năng PSI + SEO)';
+    dechoCtx.info=`Khung ${name}. Các tin gần nhất:\n`+msgs.slice(-6)
+      .map(m=>(m.me?'User: ':'Agent: ')+(m.text||'').slice(0,250)).join('\n');
+  },[msgs,cfg.storageKey]);
+
+  const saveHist=(me,text,steps)=>{
+    histRef.current.push(steps?{me,text,steps}:{me,text});
+    histRef.current=histRef.current.slice(-100);
+    try{localStorage.setItem(cfg.storageKey,JSON.stringify(histRef.current))}catch(e){}
+  };
+  const clearHist=()=>{
+    histRef.current=[];try{localStorage.removeItem(cfg.storageKey)}catch(e){}
+    setMsgs([{me:false,text:cfg.greeting}]);
+  };
+
+  async function send(text){
+    if(busy)return;
+    saveHist(true,text);
+    setMsgs(m=>[...m,{me:true,text},{me:false,text:'',steps:'',streaming:true}]);
+    setBusy(true);
+    dechoBus.busy(true);
+    const aborter=new AbortController();aborterRef.current=aborter;
+    const upd=patch=>setMsgs(m=>{const n=[...m];n[n.length-1]={...n[n.length-1],...patch};return n});
+    let steps='',ansRaw='',finalText='',isErr=false;
+    try{
+      const history=histRef.current.slice(0,-1).slice(-10)
+        .map(x=>({role:x.me?'user':'assistant',content:x.text}))
+        .filter(x=>x.content&&!x.content.startsWith('❌'));
+      const r=await fetch(cfg.endpoint,{method:'POST',headers:{'Content-Type':'application/json'},
+        body:JSON.stringify({message:text,model,history}),signal:aborter.signal});
+      if(!r.ok||!r.body)throw new Error('HTTP '+r.status);
+      const reader=r.body.getReader(),dec=new TextDecoder();
+      let buf='';
+      while(true){
+        const{done,value}=await reader.read();
+        if(done)break;
+        buf+=dec.decode(value,{stream:true});
+        const events=buf.split('\n\n');buf=events.pop();
+        for(const e of events){
+          const line=e.split('\n').find(l=>l.startsWith('data:'));
+          if(!line)continue;
+          let msg;try{msg=JSON.parse(line.slice(5))}catch(_){continue}
+          if(msg.type==='step'){steps+=(steps?'\n':'')+msg.text;upd({steps})}
+          else if(msg.type==='delta'){ansRaw+=msg.delta;finalText=ansRaw;upd({text:ansRaw})}
+          else if(msg.type==='final'){finalText=msg.text;upd({text:msg.text})}
+          else if(msg.type==='error'){finalText=msg.text;isErr=true;upd({text:msg.text,error:true})}
+        }
+      }
+      if(!finalText){finalText='❌ Không nhận được phản hồi.';isErr=true;upd({text:finalText,error:true})}
+      upd({streaming:false,stepsOpen:steps.split('\n').length>3});
+      saveHist(false,finalText,steps||undefined);
+      dechoBus.act(isErr?'sad':'nod'); /* câu trả lời đã nằm trong chat — dock chỉ diễn cảm xúc */
+    }catch(e){
+      if(e.name==='AbortError'){
+        const note='⏹ Đã dừng theo yêu cầu.';
+        finalText=finalText?finalText+'\n\n'+note:note;
+        upd({text:finalText,streaming:false});
+        saveHist(false,finalText,steps||undefined);
+      }else{
+        upd({text:'❌ Lỗi kết nối server: '+e.message,error:true,streaming:false});
+        saveHist(false,'❌ Lỗi kết nối server: '+e.message);
+      }
+    }finally{aborterRef.current=null;setBusy(false);dechoBus.busy(false)}
+  }
+
+  const submit=e=>{
+    e.preventDefault();
+    if(busy){aborterRef.current&&aborterRef.current.abort();return}
+    const v=inp.trim();if(!v)return;setInp('');send(v);
+  };
+
+  return (
+    <div className="flex-1 flex flex-col min-h-0">
+      <div className="flex gap-2 flex-wrap items-center px-6 pt-3.5 pb-3 border-b border-slate-200 dark:border-slate-800 max-w-[1150px] w-full mx-auto">
+        {cfg.chips.map(([label,m])=>
+          <button key={label} disabled={busy} className={chipCls} onClick={()=>send(m)}>{label}</button>)}
+        <button disabled={busy} className={chipCls} onClick={clearHist}>🗑 Xóa lịch sử</button>
+        {cfg.meta&&<span className="ml-auto text-xs text-slate-400">{cfg.meta}</span>}
+      </div>
+      <div ref={scrollRef} className="flex-1 min-h-0 overflow-y-auto scroll-smooth">
+        <div className="max-w-[1150px] mx-auto px-6 py-4 flex flex-col gap-3.5">
+          {msgs.map((m,i)=><Bubble key={i} m={m}/>)}
+        </div>
+      </div>
+      <div className="px-6 pb-4 pt-2">
+        <form onSubmit={submit} className={"max-w-[1150px] mx-auto flex gap-2.5 p-2 rounded-2xl "+card}>
+          <input value={inp} onChange={e=>setInp(e.target.value)} placeholder={cfg.placeholder}
+                 className="flex-1 bg-transparent outline-none px-2.5 text-[14.5px]"/>
+          <button className={"w-11 h-11 rounded-xl text-white text-lg font-bold transition "+(busy?"bg-red-500 hover:bg-red-600":"bg-gradient-to-br from-accent to-accent2 hover:brightness-110")}
+                  title={busy?'Dừng':'Gửi'}>{busy?'⏹':'➤'}</button>
+        </form>
+      </div>
+    </div>
+  );
+}
+
+/* ───────────────────────── Dashboard (Mosaic style) ───────────────────────── */
+const TH={3:[90,50,'hi'],4:[1800,3000,'lo'],5:[2500,4000,'lo'],6:[0.1,0.25,'lo'],7:[200,600,'lo'],8:[200,500,'lo'],9:[800,1800,'lo'],10:[3400,5800,'lo']};
+function cellCls(i,v){
+  if(!(i in TH)||v===''||v==null)return'';
+  const n=parseFloat(v);if(isNaN(n))return'';
+  const[good,mid,dir]=TH[i];
+  const ok=dir==='hi'?n>=good:n<=good, soso=dir==='hi'?n>=mid:n<=mid;
+  return ok?'bg-emerald-100 dark:bg-emerald-900/40':(soso?'bg-amber-100 dark:bg-amber-900/40':'bg-red-100 dark:bg-red-900/40');
+}
+const VIOLET='#8b5cf6',SKY='#0ea5e9';
+const mosaicCard="bg-white dark:bg-slate-900 shadow-xs rounded-xl border border-slate-200 dark:border-slate-800";
+
+function Sparkline({points,color}){
+  if(!points||points.length<2)return <div className="h-9"/>;
+  const w=128,h=36,min=Math.min(...points),max=Math.max(...points),rg=(max-min)||1;
+  const pts=points.map((v,i)=>[(i/(points.length-1))*w,h-3-((v-min)/rg)*(h-8)]);
+  const line=pts.map(p=>p.join(',')).join(' ');
+  const id='sg'+color.slice(1);
+  return (
+    <svg viewBox={`0 0 ${w} ${h}`} className="w-32 h-9">
+      <defs><linearGradient id={id} x1="0" y1="0" x2="0" y2="1">
+        <stop offset="0%" stopColor={color} stopOpacity=".25"/><stop offset="100%" stopColor={color} stopOpacity="0"/>
+      </linearGradient></defs>
+      <polygon points={`0,${h} ${line} ${w},${h}`} fill={`url(#${id})`}/>
+      <polyline points={line} fill="none" stroke={color} strokeWidth="2"/>
+      <circle cx={pts[pts.length-1][0]} cy={pts[pts.length-1][1]} r="2.5" fill={color}/>
+    </svg>
+  );
+}
+
+function StatCard({label,value,sub,pill,pillColor,spark,sparkColor}){
+  return (
+    <div className={mosaicCard+" p-5"}>
+      <div className="text-xs font-semibold text-slate-400 uppercase tracking-wide mb-1">{label}</div>
+      <div className="flex items-end justify-between gap-2">
+        <div>
+          <div className="flex items-center gap-2">
+            <span className="text-3xl font-bold text-slate-800 dark:text-slate-100">{value??'—'}</span>
+            {pill!=null&&<span className={"text-xs font-semibold px-1.5 py-0.5 rounded-full "+pillColor}>{pill}</span>}
+          </div>
+          {sub&&<div className="text-[11.5px] text-slate-400 mt-1 truncate max-w-[180px]">{sub}</div>}
+        </div>
+        {spark&&<Sparkline points={spark} color={sparkColor||VIOLET}/>}
+      </div>
+    </div>
+  );
+}
+
+/* Grouped bar — Mosaic palette: violet = Mobile, sky = Desktop */
+function ScoreChart({groups}){
+  const labelW=230,chartW=820,rowH=34,padTop=24;
+  const H=groups.length*rowH+padTop+6, W=labelW+chartW+20;
+  const x=v=>labelW+(v/100)*chartW;
+  return (
+    <div className="overflow-x-auto">
+      <svg viewBox={`0 0 ${W} ${H}`} className="w-full min-w-[680px]">
+        {[0,25,50,75,100].map(t=>(
+          <g key={t}>
+            <line x1={x(t)} y1={padTop-6} x2={x(t)} y2={H-2} stroke="currentColor" strokeOpacity=".08"/>
+            <text x={x(t)} y={padTop-10} textAnchor="middle" fontSize="10" fill="currentColor" opacity=".4">{t}</text>
+          </g>
+        ))}
+        {groups.map((g,i)=>{
+          const y=padTop+i*rowH;
+          const bars=[['MOBILE',VIOLET],['DESKTOP',SKY]].filter(([s])=>g[s]!==undefined);
+          return (
+            <g key={g.url}>
+              <title>{g.url}</title>
+              <text x={labelW-10} y={y+rowH/2+3} textAnchor="end" fontSize="11" fill="currentColor" opacity=".55">
+                {pathOf(g.url).length>32?'…'+pathOf(g.url).slice(-31):pathOf(g.url)}
+              </text>
+              {bars.map(([s,color],j)=>{
+                const v=g[s],by=y+4+j*13,err=v===null;
+                const w=err?34:Math.max((v/100)*chartW,12);
+                const inside=w>46;
+                return (
+                  <g key={s}>
+                    <rect x={labelW} y={by} width={chartW} height="10" rx="5" fill="currentColor" opacity=".05"/>
+                    <rect className="bar" x={labelW} y={by} width={w} height="10" rx="5" fill={err?'#94a3b8':color}/>
+                    <text x={inside?labelW+w-6:labelW+w+6} y={by+8.5}
+                          textAnchor={inside?'end':'start'} fontSize="9.5" fontWeight="700"
+                          fill={inside?'#fff':(err?'#94a3b8':scoreColor(v))}>{err?'lỗi':v}</text>
+                  </g>
+                );
+              })}
+            </g>
+          );
+        })}
+      </svg>
+    </div>
+  );
+}
+
+/* Line chart điểm TB qua các lần chạy trong tháng — kiểu Mosaic gradient area */
+function TrendChart({labels,mobile,desktop}){
+  const W=1100,H=185,padL=36,padR=16,padT=14,padB=26;
+  const iw=W-padL-padR,ih=H-padT-padB;
+  const x=i=>padL+(labels.length<2?iw/2:(i/(labels.length-1))*iw);
+  const y=v=>padT+ih-(v/100)*ih;
+  const path=a=>a.map((v,i)=>(i?'L':'M')+x(i).toFixed(1)+','+y(v).toFixed(1)).join(' ');
+  const area=a=>path(a)+` L${x(a.length-1).toFixed(1)},${padT+ih} L${x(0).toFixed(1)},${padT+ih} Z`;
+  return (
+    <svg viewBox={`0 0 ${W} ${H}`} className="w-full">
+      <defs>
+        <linearGradient id="gv" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stopColor={VIOLET} stopOpacity=".22"/><stop offset="100%" stopColor={VIOLET} stopOpacity="0"/></linearGradient>
+        <linearGradient id="gs" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stopColor={SKY} stopOpacity=".18"/><stop offset="100%" stopColor={SKY} stopOpacity="0"/></linearGradient>
+      </defs>
+      {[0,25,50,75,100].map(t=>(
+        <g key={t}>
+          <line x1={padL} y1={y(t)} x2={W-padR} y2={y(t)} stroke="currentColor" strokeOpacity=".07"/>
+          <text x={padL-6} y={y(t)+3.5} textAnchor="end" fontSize="9.5" fill="currentColor" opacity=".4">{t}</text>
+        </g>
+      ))}
+      {labels.map((lb,i)=>(
+        <text key={i} x={x(i)} y={H-8} textAnchor="middle" fontSize="9.5" fill="currentColor" opacity=".45">{lb}</text>
+      ))}
+      {mobile.length>0&&<><path d={area(mobile)} fill="url(#gv)"/><path d={path(mobile)} fill="none" stroke={VIOLET} strokeWidth="2.2"/></>}
+      {desktop.length>0&&<><path d={area(desktop)} fill="url(#gs)"/><path d={path(desktop)} fill="none" stroke={SKY} strokeWidth="2.2"/></>}
+      {mobile.map((v,i)=><circle key={'m'+i} cx={x(i)} cy={y(v)} r="2.6" fill={VIOLET}/>)}
+      {desktop.map((v,i)=><circle key={'d'+i} cx={x(i)} cy={y(v)} r="2.6" fill={SKY}/>)}
+    </svg>
+  );
+}
+
+function Dashboard(){
+  const [data,setData]=useState(null);
+  const [month,setMonth]=useState('');
+  const [run,setRun]=useState('');
+  const [err,setErr]=useState('');
+
+  const load=useCallback(async m=>{
+    setErr('');
+    try{
+      const r=await(await fetch('/api/results'+(m?'?month='+m:''))).json();
+      if(r.error){setErr(r.error);dechoBus.act('sad');dechoBus.say('❌ Đệ đọc PSI Sheet không được, Đại ca xem lỗi trên màn hình nhé.');return}
+      setData(r);setMonth(r.tab||'');
+      const runs=[...new Set(r.rows.map(x=>x[0]))].sort();
+      const latest=runs[runs.length-1]||'';
+      setRun(latest);
+      if(latest){
+        const rows=r.rows.filter(x=>x[0]===latest);
+        const sc=s=>rows.filter(x=>x[2]===s).map(x=>parseFloat(x[3])).filter(n=>!isNaN(n));
+        const avg=a=>a.length?Math.round(a.reduce((p,c)=>p+c,0)/a.length):null;
+        const am=avg(sc('MOBILE')),ad=avg(sc('DESKTOP'));
+        const all=rows.map(x=>({u:x[1],v:parseFloat(x[3])})).filter(x=>!isNaN(x.v));
+        const worst=all.length?all.reduce((p,c)=>c.v<p.v?c:p):null;
+        let cmt=`📊 Tháng ${r.tab}: mobile TB **${am??'—'}**, desktop TB **${ad??'—'}**.`;
+        if(worst)cmt+=`\nĐuối nhất là **${pathOf(worst.u)}** (${worst.v}đ)${worst.v<50?' — Đại ca cho team xem gấp nha 🔴':''}`;
+        dechoBus.say(cmt,9000);
+      }else dechoBus.say('Dashboard chưa có dữ liệu — Đại ca qua Chat nói "chạy kiểm tra ngay" là có liền.');
+    }catch(e){setErr(e.message)}
+  },[]);
+  useEffect(()=>{load('')},[load]);
+
+  useEffect(()=>{ /* bối cảnh cho DeCho */
+    if(!data||!run)return;
+    const rows=data.rows.filter(x=>x[0]===run);
+    const sc=s=>rows.filter(x=>x[2]===s).map(x=>parseFloat(x[3])).filter(n=>!isNaN(n));
+    const avg=a=>a.length?Math.round(a.reduce((p,c)=>p+c,0)/a.length):'—';
+    const lines=rows.slice(0,40).map(x=>`${pathOf(x[1])} ${x[2]}: score=${x[3]}, LCP=${x[5]||'?'}ms, CLS=${x[6]||'?'}`);
+    dechoCtx.info=`Dashboard PSI tháng ${data.tab}, lần chạy ${run}. Điểm TB mobile ${avg(sc('MOBILE'))}, desktop ${avg(sc('DESKTOP'))}. Chi tiết từng dòng:\n`+lines.join('\n');
+  },[data,run]);
+
+  if(err)return <div className="p-8 text-red-500 text-sm">❌ {err}</div>;
+  if(!data)return <div className="p-8 text-slate-400 text-sm">Đang tải...</div>;
+
+  const runs=[...new Set(data.rows.map(x=>x[0]))].sort();
+  const rows=data.rows.filter(x=>x[0]===run);
+  const nums=(rs,s)=>rs.filter(x=>x[2]===s).map(x=>parseFloat(x[3])).filter(n=>!isNaN(n));
+  const avg=a=>a.length?Math.round(a.reduce((p,c)=>p+c,0)/a.length):null;
+  const am=avg(nums(rows,'MOBILE')),ad=avg(nums(rows,'DESKTOP'));
+  const all=rows.map(x=>({u:x[1],s:x[2],v:parseFloat(x[3])})).filter(x=>!isNaN(x.v));
+  const best=all.length?all.reduce((p,c)=>c.v>p.v?c:p):null;
+  const worst=all.length?all.reduce((p,c)=>c.v<p.v?c:p):null;
+  const errsN=rows.filter(x=>x[3]==='ERROR').length;
+  /* chuỗi điểm TB theo từng lần chạy (sparkline + trend) */
+  const seriesM=runs.map(rn=>avg(nums(data.rows.filter(x=>x[0]===rn),'MOBILE'))).filter(v=>v!=null);
+  const seriesD=runs.map(rn=>avg(nums(data.rows.filter(x=>x[0]===rn),'DESKTOP'))).filter(v=>v!=null);
+  const trendLb=runs.map(rn=>rn.slice(5,16).replace(' ','\u00a0'));
+  const byUrl={};
+  rows.forEach(x=>{const n=parseFloat(x[3]);(byUrl[x[1]]=byUrl[x[1]]||{url:x[1]})[x[2]]=isNaN(n)?null:n});
+  const groups=Object.values(byUrl).sort((a,b)=>{
+    const mn=g=>Math.min(...[g.MOBILE,g.DESKTOP].filter(v=>v!=null).concat([101]));
+    return mn(a)-mn(b); /* trang tệ nhất lên đầu */
+  });
+  const h=data.headers;
+  const pillOf=v=>v==null?null:(v>=90?'bg-emerald-500/20 text-emerald-700 dark:text-emerald-400':v>=50?'bg-amber-500/20 text-amber-700 dark:text-amber-400':'bg-red-500/20 text-red-700 dark:text-red-400');
+  const delta=s=>s.length>1?s[s.length-1]-s[s.length-2]:null;
+  const fmtD=d=>d==null?null:(d>0?'+':'')+d;
+
+  return (
+    <div className="flex-1 min-h-0 overflow-y-auto px-6 py-5 bg-slate-50 dark:bg-slate-950">
+      <div className="max-w-[1180px] mx-auto flex flex-col gap-5">
+        {/* Header — kiểu Mosaic */}
+        <div className="flex gap-3 items-center flex-wrap">
+          <div>
+            <h2 className="text-xl font-bold text-slate-800 dark:text-slate-100">PageSpeed Dashboard</h2>
+            <p className="text-xs text-slate-400 mt-0.5">{data.rows.length} dòng · {runs.length} lần chạy trong tháng</p>
+          </div>
+          <div className="ml-auto flex gap-2 items-center">
+            <select className={input+" shadow-xs"} value={month} onChange={e=>load(e.target.value)}>
+              {data.tabs.slice().reverse().map(t=><option key={t}>{t}</option>)}
+            </select>
+            <select className={input+" shadow-xs max-w-[200px]"} value={run} onChange={e=>setRun(e.target.value)}>
+              {runs.slice().reverse().map((t,i)=><option key={t} value={t}>{t}{i===0?' (mới nhất)':''}</option>)}
+            </select>
+            <button onClick={()=>load(month)}
+              className="px-3.5 py-2 rounded-lg text-sm font-medium text-white bg-violet-500 hover:bg-violet-600 shadow-xs">↻ Tải lại</button>
+          </div>
+        </div>
+
+        {/* Stat cards */}
+        <div className="grid grid-cols-12 gap-5">
+          <div className="col-span-12 sm:col-span-6 xl:col-span-3">
+            <StatCard label="Điểm TB Mobile" value={am} pill={fmtD(delta(seriesM))} pillColor={pillOf(am)} spark={seriesM} sparkColor={VIOLET}/>
+          </div>
+          <div className="col-span-12 sm:col-span-6 xl:col-span-3">
+            <StatCard label="Điểm TB Desktop" value={ad} pill={fmtD(delta(seriesD))} pillColor={pillOf(ad)} spark={seriesD} sparkColor={SKY}/>
+          </div>
+          <div className="col-span-12 sm:col-span-6 xl:col-span-3">
+            <StatCard label="Tốt nhất" value={best?.v} pill={best?best.s[0]:null} pillColor={pillOf(best?.v)} sub={best?pathOf(best.u):''}/>
+          </div>
+          <div className="col-span-12 sm:col-span-6 xl:col-span-3">
+            <StatCard label="Tệ nhất / Lỗi" value={worst?.v} pill={errsN?errsN+' lỗi':null}
+              pillColor="bg-red-500/20 text-red-700 dark:text-red-400" sub={worst?pathOf(worst.u):''}/>
+          </div>
+        </div>
+
+        {/* Trend — full width, thấp */}
+        <div className={mosaicCard}>
+          <div className="px-5 pt-4 pb-1 flex items-center gap-3 border-b border-slate-100 dark:border-slate-800">
+            <h3 className="font-semibold text-slate-800 dark:text-slate-100 text-[15px]">Xu hướng trong tháng</h3>
+            <span className="text-[11px] text-slate-400">điểm TB mỗi lần chạy</span>
+            <span className="ml-auto flex gap-3 text-[11px] text-slate-400">
+              <span><i className="inline-block w-2.5 h-2.5 rounded-full mr-1" style={{background:VIOLET}}/>Mobile</span>
+              <span><i className="inline-block w-2.5 h-2.5 rounded-full mr-1" style={{background:SKY}}/>Desktop</span>
+            </span>
+          </div>
+          <div className="px-4 py-2">
+            {seriesM.length>1||seriesD.length>1
+              ?<TrendChart labels={trendLb} mobile={seriesM} desktop={seriesD}/>
+              :<div className="text-sm text-slate-400 py-8 text-center">Cần ≥2 lần chạy trong tháng để vẽ xu hướng</div>}
+          </div>
+        </div>
+
+        {/* Bars per URL — full width, không cuộn trong card, trang tệ lên đầu */}
+        <div className={mosaicCard}>
+          <div className="px-5 pt-4 pb-1 flex items-center gap-3 border-b border-slate-100 dark:border-slate-800">
+            <h3 className="font-semibold text-slate-800 dark:text-slate-100 text-[15px]">Performance Score theo URL</h3>
+            <span className="text-[11px] text-slate-400">sắp theo trang tệ nhất</span>
+            <span className="ml-auto flex gap-3 text-[11px] text-slate-400">
+              <span><i className="inline-block w-2.5 h-2.5 rounded-full mr-1" style={{background:VIOLET}}/>Mobile</span>
+              <span><i className="inline-block w-2.5 h-2.5 rounded-full mr-1" style={{background:SKY}}/>Desktop</span>
+            </span>
+          </div>
+          <div className="p-4">
+            {groups.length?<ScoreChart groups={groups}/>:<div className="text-sm text-slate-400">Chưa có dữ liệu</div>}
+          </div>
+        </div>
+
+        {/* Table — Mosaic style */}
+        <div className={mosaicCard}>
+          <div className="px-5 pt-4 pb-3 border-b border-slate-100 dark:border-slate-800">
+            <h3 className="font-semibold text-slate-800 dark:text-slate-100 text-[15px]">Chi tiết <span className="text-slate-400 font-normal">({rows.length} dòng)</span></h3>
+          </div>
+          <div className="overflow-x-auto">
+            <table className="w-full text-[12.5px]">
+              <thead>
+                <tr className="text-[10.5px] uppercase tracking-wide text-slate-400 bg-slate-50 dark:bg-slate-800/60">
+                  {h.slice(1).map(x=><th key={x} className="px-3 py-2.5 text-right first:text-left font-semibold whitespace-nowrap">{x}</th>)}
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
+                {rows.map((x,ri)=><tr key={ri} className="hover:bg-slate-50 dark:hover:bg-slate-800/40">
+                  {h.slice(1).map((_,j)=>{
+                    const i=j+1,v=x[i]??'';
+                    return <td key={j} title={i===1?v:undefined}
+                      className={"px-3 py-1.5 text-right whitespace-nowrap first:text-left first:max-w-[280px] first:truncate "+(v==='ERROR'?'bg-red-100 dark:bg-red-900/40':cellCls(i,v))}>
+                      {i===1?pathOf(v):v}
+                    </td>;
+                  })}
+                </tr>)}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/* ──────────────── Overview / Alerts / URL Intelligence (wireframe phase 1) ──────────────── */
+const _agentCache={t:0,data:null,promise:null};
+function useAgentData(){
+  const [d,setD]=useState(_agentCache.data||{psi:null,seo:null,sum:null});
+  useEffect(()=>{
+    const fresh=_agentCache.data&&Date.now()-_agentCache.t<60000;
+    if(fresh){setD(_agentCache.data);return}
+    if(!_agentCache.promise){
+      const get=async u=>{try{return await(await fetch(u)).json()}catch(e){return null}};
+      _agentCache.promise=Promise.all([get('/api/results'),get('/api/seo/results'),get('/api/seo/summary')])
+        .then(([psi,seo,sum])=>{
+          _agentCache.data={psi,seo,sum};_agentCache.t=Date.now();_agentCache.promise=null;
+          return _agentCache.data;
+        });
+    }
+    let on=true;
+    _agentCache.promise.then(data=>{if(on)setD(data)});
+    return()=>{on=false};
+  },[]);
+  return d;
+}
+const lastRun=psi=>{if(!psi||!psi.rows||!psi.rows.length)return null;const runs=[...new Set(psi.rows.map(x=>x[0]))].sort();return runs[runs.length-1]};
+const avgOf=a=>a.length?Math.round(a.reduce((p,c)=>p+c,0)/a.length):null;
+const psiRunRows=(psi,run)=>psi.rows.filter(x=>x[0]===run);
+
+function computeAlerts(psi,seo){
+  const alerts=[];
+  if(psi&&psi.rows&&psi.rows.length){
+    const runs=[...new Set(psi.rows.map(x=>x[0]))].sort();
+    const cur=psiRunRows(psi,runs[runs.length-1]);
+    const prev=runs.length>1?psiRunRows(psi,runs[runs.length-2]):[];
+    const prevMap={};prev.forEach(x=>{prevMap[x[1]+x[2]]=parseFloat(x[3])});
+    cur.forEach(x=>{
+      const v=parseFloat(x[3]);
+      if(x[3]==='ERROR')alerts.push({lv:'high',icon:'🔴',text:`${pathOf(x[1])} (${x[2].toLowerCase()}): check PSI lỗi`,go:'dash'});
+      else if(!isNaN(v)&&v<50)alerts.push({lv:'high',icon:'⚡',text:`${pathOf(x[1])} (${x[2].toLowerCase()}): score ${v} — dưới ngưỡng 50`,go:'dash'});
+      const pv=prevMap[x[1]+x[2]];
+      if(!isNaN(v)&&pv!=null&&pv-v>=10)alerts.push({lv:'med',icon:'📉',text:`${pathOf(x[1])} (${x[2].toLowerCase()}): score tụt ${Math.round(pv-v)} điểm (${pv}→${v})`,go:'dash'});
+    });
+  }
+  if(seo&&seo.rows&&seo.rows.length&&seo.headers){
+    const h=seo.headers,iu=h.indexOf('url'),ic=h.indexOf('clicks'),icc=h.indexOf('clicks_change_%');
+    seo.rows.forEach(r=>{
+      const ch=parseFloat(r[icc]),clicks=parseFloat(r[ic]);
+      if(!isNaN(ch)&&ch<=-20&&clicks>=20)
+        alerts.push({lv:ch<=-40?'high':'med',icon:'🔻',text:`${pathOf(r[iu]||'')}: clicks giảm ${ch}% so với tháng trước (${seo.tab})`,go:'urls'});
+    });
+  }
+  alerts.sort((a,b)=>(a.lv==='high'?0:1)-(b.lv==='high'?0:1));
+  return alerts;
+}
+
+function MiniLine({labels,series}){
+  const W=1100,H=180,padL=52,padR=16,padT=12,padB=24;
+  const iw=W-padL-padR,ih=H-padT-padB;
+  const all=series.flatMap(s=>s.data);
+  const max=Math.max(...all,1);
+  const x=i=>padL+(labels.length<2?iw/2:(i/(labels.length-1))*iw);
+  const y=v=>padT+ih-(v/max)*ih;
+  const path=a=>a.map((v,i)=>(i?'L':'M')+x(i).toFixed(1)+','+y(v).toFixed(1)).join(' ');
+  const fmt=v=>v>=1e6?(v/1e6).toFixed(1)+'M':v>=1e3?(v/1e3).toFixed(0)+'k':v;
+  return (
+    <svg viewBox={`0 0 ${W} ${H}`} className="w-full">
+      {[0,.5,1].map(t=>(
+        <g key={t}>
+          <line x1={padL} y1={y(max*t)} x2={W-padR} y2={y(max*t)} stroke="currentColor" strokeOpacity=".07"/>
+          <text x={padL-6} y={y(max*t)+3.5} textAnchor="end" fontSize="9.5" fill="currentColor" opacity=".4">{fmt(Math.round(max*t))}</text>
+        </g>
+      ))}
+      {labels.map((lb,i)=><text key={i} x={x(i)} y={H-7} textAnchor="middle" fontSize="9.5" fill="currentColor" opacity=".45">{lb}</text>)}
+      {series.map(s=>(
+        <g key={s.name}>
+          <path d={path(s.data)} fill="none" stroke={s.color} strokeWidth="2.2"/>
+          {s.data.map((v,i)=><circle key={i} cx={x(i)} cy={y(v)} r="2.6" fill={s.color}/>)}
+        </g>
+      ))}
+    </svg>
+  );
+}
+
+function Overview({go}){
+  const {psi,seo,sum}=useAgentData();
+  const [cfg,setCfg]=useState(null);
+  useEffect(()=>{(async()=>{try{setCfg(await(await fetch('/api/config')).json())}catch(e){}})()},[]);
+  useEffect(()=>{if(psi)dechoCtx.info='Màn hình Tổng quan: sức khỏe website (PSI + SEO), alerts, lịch chạy.'},[psi]);
+  if(!psi||!seo||!sum)return <div className="p-8 text-slate-400 text-sm">Đang tải...</div>;
+
+  const run=lastRun(psi);
+  const rows=run?psiRunRows(psi,run):[];
+  const health=avgOf(rows.map(x=>parseFloat(x[3])).filter(n=>!isNaN(n)));
+  const months=sum.months||[];
+  const curM=months[months.length-1],prevM=months[months.length-2];
+  const clicksPct=curM&&prevM&&prevM.clicks?Math.round((curM.clicks-prevM.clicks)/prevM.clicks*100):null;
+  const alerts=computeAlerts(psi,seo);
+  const high=alerts.filter(a=>a.lv==='high').length;
+  const runs=[...new Set((psi.rows||[]).map(x=>x[0]))].sort();
+  const sAvg=rn=>avgOf(psiRunRows(psi,rn).map(x=>parseFloat(x[3])).filter(n=>!isNaN(n)));
+  const psiSeries=runs.map(sAvg).filter(v=>v!=null);
+
+  return (
+    <div className="flex-1 min-h-0 overflow-y-auto px-6 py-5 bg-slate-50 dark:bg-slate-950">
+      <div className="max-w-[1180px] mx-auto flex flex-col gap-5">
+        <div className="flex items-center gap-3">
+          <div>
+            <h2 className="text-xl font-bold text-slate-800 dark:text-slate-100">Tổng quan</h2>
+            <p className="text-xs text-slate-400 mt-0.5">DeCho đang theo dõi PageSpeed + GSC + GA4</p>
+          </div>
+          <div className="ml-auto flex gap-2">
+            <button onClick={()=>go('chat')} className="px-3.5 py-2 rounded-lg text-sm font-medium text-white bg-violet-500 hover:bg-violet-600 shadow-xs">💬 Hỏi DeCho</button>
+            <button onClick={()=>go('dash')} className={chipCls+" !text-sm !px-3.5 !py-2 !rounded-lg"}>📊 PageSpeed</button>
+          </div>
+        </div>
+
+        <div className="grid gap-4" style={{gridTemplateColumns:'repeat(auto-fit,minmax(170px,1fr))'}}>
+          <StatCard label="Website health" value={health} pill={run?'PSI':null} pillColor={health!=null?(health>=90?'bg-emerald-500/20 text-emerald-700':'bg-amber-500/20 text-amber-700 dark:text-amber-400'):''} sub={run?('lần chạy '+run.slice(5,16)):'chưa chạy'}/>
+          <StatCard label="Organic clicks" value={curM?curM.clicks.toLocaleString():null} pill={clicksPct!=null?(clicksPct>0?'+':'')+clicksPct+'%':null}
+            pillColor={clicksPct>=0?'bg-emerald-500/20 text-emerald-700 dark:text-emerald-400':'bg-red-500/20 text-red-700 dark:text-red-400'} sub={curM?('tháng '+curM.month):''}/>
+          <StatCard label="URLs theo dõi" value={cfg?cfg.urls.length:null} sub="PageSpeed checker"/>
+          <StatCard label="Alerts" value={alerts.length} pill={high?high+' high':null} pillColor="bg-red-500/20 text-red-700 dark:text-red-400" sub={alerts.length?'cần xem':'mọi thứ ổn ✅'}/>
+        </div>
+
+        <div className="grid grid-cols-12 gap-5">
+          <div className={"col-span-12 xl:col-span-6 "+mosaicCard}>
+            <div className="px-5 pt-4 pb-1 border-b border-slate-100 dark:border-slate-800 flex items-center gap-2">
+              <h3 className="font-semibold text-[15px]">SEO trend theo tháng</h3>
+              <span className="ml-auto flex gap-3 text-[11px] text-slate-400">
+                <span><i className="inline-block w-2.5 h-2.5 rounded-full mr-1" style={{background:VIOLET}}/>Clicks</span>
+                <span><i className="inline-block w-2.5 h-2.5 rounded-full mr-1" style={{background:SKY}}/>Views</span>
+              </span>
+            </div>
+            <div className="px-3 py-2">
+              {months.length>1
+                ?<MiniLine labels={months.map(m=>m.month)} series={[{name:'clicks',color:VIOLET,data:months.map(m=>m.clicks||0)},{name:'views',color:SKY,data:months.map(m=>m.views||0)}]}/>
+                :<div className="text-sm text-slate-400 py-8 text-center">Cần ≥2 tháng báo cáo SEO</div>}
+            </div>
+          </div>
+          <div className={"col-span-12 xl:col-span-6 "+mosaicCard}>
+            <div className="px-5 pt-4 pb-1 border-b border-slate-100 dark:border-slate-800 flex items-center gap-2">
+              <h3 className="font-semibold text-[15px]">PageSpeed trend ({psi.tab||'—'})</h3>
+              <span className="ml-auto text-[11px] text-slate-400">điểm TB mỗi lần chạy</span>
+            </div>
+            <div className="px-3 py-2">
+              {psiSeries.length>1
+                ?<MiniLine labels={runs.map(r=>r.slice(5,16))} series={[{name:'avg',color:VIOLET,data:psiSeries}]}/>
+                :<div className="text-sm text-slate-400 py-8 text-center">Cần ≥2 lần chạy PSI trong tháng</div>}
+            </div>
+          </div>
+        </div>
+
+        <div className="grid grid-cols-12 gap-5">
+          <div className={"col-span-12 xl:col-span-7 "+mosaicCard}>
+            <div className="px-5 pt-4 pb-2 border-b border-slate-100 dark:border-slate-800 flex items-center">
+              <h3 className="font-semibold text-[15px]">🚨 Alerts cần xử lý</h3>
+              {alerts.length>5&&<button onClick={()=>go('alerts')} className="ml-auto text-xs text-violet-500 hover:underline">Xem tất cả ({alerts.length})</button>}
+            </div>
+            <div className="p-4 flex flex-col gap-2">
+              {alerts.length?alerts.slice(0,5).map((a,i)=>(
+                <button key={i} onClick={()=>go(a.go)} className="flex items-start gap-2.5 text-left text-[13px] px-3 py-2 rounded-lg hover:bg-slate-50 dark:hover:bg-slate-800/50">
+                  <span>{a.icon}</span>
+                  <span className={a.lv==='high'?'text-red-600 dark:text-red-400':'text-slate-600 dark:text-slate-300'}>{a.text}</span>
+                </button>
+              )):<div className="text-sm text-slate-400 py-6 text-center">Không có alert nào — Đệ canh kỹ rồi, chill đi Đại ca 🟢</div>}
+            </div>
+          </div>
+          <div className={"col-span-12 xl:col-span-5 "+mosaicCard}>
+            <div className="px-5 pt-4 pb-2 border-b border-slate-100 dark:border-slate-800">
+              <h3 className="font-semibold text-[15px]">🗓 Việc sắp diễn ra</h3>
+            </div>
+            <div className="p-4 flex flex-col gap-2.5 text-[13px] text-slate-600 dark:text-slate-300">
+              {cfg&&<React.Fragment>
+                <div className="flex gap-2"><span>⚡</span><span>PageSpeed check: <b>{cfg.schedule_mode}</b> lúc <b>{cfg.schedule_time}</b>{cfg.schedule_mode==='monthly'?` (ngày ${cfg.schedule_day_of_month})`:''}</span></div>
+                <div className="flex gap-2"><span>📈</span><span>Báo cáo SEO: ngày <b>{cfg.seo_run_day_of_month}</b> hàng tháng lúc <b>{cfg.seo_run_time}</b></span></div>
+              </React.Fragment>}
+              <div className="flex gap-2"><span>💾</span><span>Kết quả tự ghi vào Google Sheet (PSI + SEO + log)</span></div>
+              <button onClick={()=>go('config')} className="self-start mt-1 text-xs text-violet-500 hover:underline">Chỉnh lịch →</button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function AlertsView({go}){
+  const {psi,seo}=useAgentData();
+  useEffect(()=>{
+    if(psi&&seo){
+      const a=computeAlerts(psi,seo);
+      dechoCtx.info=`Màn hình Alerts: ${a.length} cảnh báo.\n`+a.map(x=>`[${x.lv}] ${x.text}`).join('\n');
+      if(a.filter(x=>x.lv==='high').length)dechoBus.say(`🚨 Có ${a.filter(x=>x.lv==='high').length} alert ưu tiên cao đó Đại ca, xử sớm nha.`,7000);
+    }
+  },[psi,seo]);
+  if(!psi||!seo)return <div className="p-8 text-slate-400 text-sm">Đang tải...</div>;
+  const alerts=computeAlerts(psi,seo);
+  const groups=[['high','🔥 High priority'],['med','⚠️ Medium priority']];
+  return (
+    <div className="flex-1 min-h-0 overflow-y-auto px-6 py-5 bg-slate-50 dark:bg-slate-950">
+      <div className="max-w-[900px] mx-auto flex flex-col gap-5">
+        <div>
+          <h2 className="text-xl font-bold">Alerts</h2>
+          <p className="text-xs text-slate-400 mt-0.5">Phát hiện tự động từ PSI + SEO (score&lt;50, tụt ≥10 điểm, clicks giảm ≥20%)</p>
+        </div>
+        {alerts.length===0&&(
+          <div className={mosaicCard+" p-10 text-center text-slate-400 text-sm"}>Không có bất thường nào — hệ thống xanh, Đệ vẫn canh đều 🟢</div>
+        )}
+        {groups.map(([lv,title])=>{
+          const list=alerts.filter(a=>a.lv===lv);
+          if(!list.length)return null;
+          return (
+            <div key={lv} className={mosaicCard}>
+              <div className="px-5 pt-4 pb-2 border-b border-slate-100 dark:border-slate-800">
+                <h3 className="font-semibold text-[15px]">{title} <span className="text-slate-400 font-normal">({list.length})</span></h3>
+              </div>
+              <div className="p-4 flex flex-col gap-1.5">
+                {list.map((a,i)=>(
+                  <button key={i} onClick={()=>go(a.go)} className="flex items-start gap-2.5 text-left text-[13.5px] px-3 py-2.5 rounded-lg hover:bg-slate-50 dark:hover:bg-slate-800/50">
+                    <span>{a.icon}</span>
+                    <span className={lv==='high'?'text-red-600 dark:text-red-400':''}>{a.text}</span>
+                    <span className="ml-auto text-[11px] text-slate-400 flex-none">{a.go==='dash'?'PageSpeed →':'URL Intel →'}</span>
+                  </button>
+                ))}
+              </div>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+function UrlIntel(){
+  const {psi,seo}=useAgentData();
+  const [q,setQ]=useState('');
+  const [sel,setSel]=useState(null);
+  useEffect(()=>{dechoCtx.info='Màn hình URL Intelligence: hợp nhất PSI score + traffic GSC/GA4 theo từng URL.'},[]);
+  if(!psi||!seo)return <div className="p-8 text-slate-400 text-sm">Đang tải...</div>;
+
+  const run=lastRun(psi);
+  const psiMap={};
+  if(run)psiRunRows(psi,run).forEach(x=>{
+    const k=pathOf(x[1]);
+    (psiMap[k]=psiMap[k]||{})[x[2]]=parseFloat(x[3]);
+  });
+  const h=seo.headers||[],idx={};h.forEach((c,i)=>idx[c]=i);
+  const g=(r,c)=>r[idx[c]];
+  const items=(seo.rows||[]).map(r=>{
+    const path=pathOf(g(r,'url')||'');
+    return {path,url:g(r,'url'),views:+g(r,'views')||0,users:+g(r,'users')||0,clicks:+g(r,'clicks')||0,
+            impr:+g(r,'impressions')||0,clicksCh:g(r,'clicks_change_%'),viewsCh:g(r,'views_change_%'),
+            psiM:psiMap[path]?psiMap[path].MOBILE:null,psiD:psiMap[path]?psiMap[path].DESKTOP:null};
+  }).filter(it=>!q||it.path.toLowerCase().includes(q.toLowerCase()))
+    .sort((a,b)=>b.views-a.views);
+  const runsAll=[...new Set((psi.rows||[]).map(x=>x[0]))].sort();
+  const hist=sel?runsAll.map(rn=>{
+    const row=psiRunRows(psi,rn).find(x=>pathOf(x[1])===sel.path&&x[2]==='MOBILE');
+    return row?parseFloat(row[3]):null;
+  }).filter(v=>v!=null&&!isNaN(v)):[];
+  const chPill=v=>{const n=parseFloat(v);if(isNaN(n))return <span className="text-slate-400">—</span>;
+    return <span className={"px-1.5 py-0.5 rounded-full text-[11px] font-semibold "+(n>=0?'bg-emerald-500/20 text-emerald-700 dark:text-emerald-400':'bg-red-500/20 text-red-700 dark:text-red-400')}>{n>0?'+':''}{n}%</span>};
+  const scoreTxt=v=>v==null||isNaN(v)?<span className="text-slate-400">—</span>:<b style={{color:scoreColor(v)}}>{v}</b>;
+
+  return (
+    <div className="flex-1 min-h-0 overflow-y-auto px-6 py-5 bg-slate-50 dark:bg-slate-950">
+      <div className="max-w-[1180px] mx-auto flex flex-col gap-4">
+        <div className="flex items-center gap-3 flex-wrap">
+          <div>
+            <h2 className="text-xl font-bold">URL Intelligence</h2>
+            <p className="text-xs text-slate-400 mt-0.5">Traffic (GSC/GA4 tháng {seo.tab||'—'}) + PageSpeed (lần chạy mới nhất) theo từng URL</p>
+          </div>
+          <input value={q} onChange={e=>setQ(e.target.value)} placeholder="Tìm URL..." className={input+" ml-auto w-64"}/>
+        </div>
+
+        <div className={mosaicCard}>
+          <div className="overflow-x-auto">
+            <table className="w-full text-[12.5px]">
+              <thead><tr className="text-[10.5px] uppercase tracking-wide text-slate-400 bg-slate-50 dark:bg-slate-800/60">
+                {['URL','Views','Δ Views','Users','Clicks','Δ Clicks','Impressions','PSI M','PSI D'].map(c=>
+                  <th key={c} className="px-3 py-2.5 text-right first:text-left font-semibold whitespace-nowrap">{c}</th>)}
+              </tr></thead>
+              <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
+                {items.map((it,i)=>(
+                  <tr key={i} onClick={()=>setSel(it)} className={"cursor-pointer hover:bg-slate-50 dark:hover:bg-slate-800/40 "+(sel&&sel.path===it.path?'bg-violet-50 dark:bg-violet-900/20':'')}>
+                    <td className="px-3 py-1.5 max-w-[280px] truncate" title={it.url}>{it.path}</td>
+                    <td className="px-3 py-1.5 text-right">{it.views.toLocaleString()}</td>
+                    <td className="px-3 py-1.5 text-right">{chPill(it.viewsCh)}</td>
+                    <td className="px-3 py-1.5 text-right">{it.users.toLocaleString()}</td>
+                    <td className="px-3 py-1.5 text-right">{it.clicks.toLocaleString()}</td>
+                    <td className="px-3 py-1.5 text-right">{chPill(it.clicksCh)}</td>
+                    <td className="px-3 py-1.5 text-right">{it.impr.toLocaleString()}</td>
+                    <td className="px-3 py-1.5 text-right">{scoreTxt(it.psiM)}</td>
+                    <td className="px-3 py-1.5 text-right">{scoreTxt(it.psiD)}</td>
+                  </tr>
+                ))}
+                {!items.length&&<tr><td colSpan="9" className="px-3 py-8 text-center text-slate-400">Không có URL khớp</td></tr>}
+              </tbody>
+            </table>
+          </div>
+        </div>
+
+        {sel&&(
+          <div className={mosaicCard+" p-5"}>
+            <div className="flex items-center gap-3 mb-3">
+              <h3 className="font-semibold text-[15px]">{sel.path}</h3>
+              <a href={sel.url} target="_blank" className="text-xs text-violet-500 hover:underline">mở trang ↗</a>
+              <button onClick={()=>setSel(null)} className="ml-auto text-slate-400 hover:text-slate-600">✕</button>
+            </div>
+            <div className="grid gap-4" style={{gridTemplateColumns:'repeat(auto-fit,minmax(150px,1fr))'}}>
+              <div><div className="text-[11px] uppercase text-slate-400 font-semibold">PSI Mobile</div><div className="text-2xl font-bold" style={{color:sel.psiM!=null?scoreColor(sel.psiM):undefined}}>{sel.psiM??'—'}</div></div>
+              <div><div className="text-[11px] uppercase text-slate-400 font-semibold">PSI Desktop</div><div className="text-2xl font-bold" style={{color:sel.psiD!=null?scoreColor(sel.psiD):undefined}}>{sel.psiD??'—'}</div></div>
+              <div><div className="text-[11px] uppercase text-slate-400 font-semibold">Views / Users</div><div className="text-2xl font-bold">{sel.views.toLocaleString()}<span className="text-sm text-slate-400"> / {sel.users.toLocaleString()}</span></div></div>
+              <div><div className="text-[11px] uppercase text-slate-400 font-semibold">Clicks / Impr.</div><div className="text-2xl font-bold">{sel.clicks.toLocaleString()}<span className="text-sm text-slate-400"> / {sel.impr.toLocaleString()}</span></div></div>
+            </div>
+            {hist.length>1&&(
+              <div className="mt-4">
+                <div className="text-[11px] uppercase text-slate-400 font-semibold mb-1">PSI Mobile qua các lần chạy ({psi.tab})</div>
+                <div className="max-w-md"><Sparkline points={hist} color={VIOLET}/></div>
+              </div>
+            )}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+/* ───────────────────────── Config ───────────────────────── */
+function ConfigView(){
+  const [cfg,setCfg]=useState(null);
+  const [msg,setMsg]=useState('');
+  const load=useCallback(async()=>{
+    const c=await(await fetch('/api/config')).json();
+    setCfg({urls:c.urls,strategies:c.strategies,mode:c.schedule_mode,time:c.schedule_time,
+            day:c.schedule_day_of_month,weekday:c.schedule_weekday,
+            seoDay:c.seo_run_day_of_month??8,seoTime:c.seo_run_time||'08:00',
+            seoTracked:(c.seo_tracked_urls||[]).join('\n')});
+    setMsg('');
+  },[]);
+  useEffect(()=>{load()},[load]);
+  useEffect(()=>{
+    if(cfg)dechoCtx.info=`Màn hình cấu hình. PageSpeed: ${cfg.urls.filter(u=>u.trim()).length} URL, strategy ${cfg.strategies.join('+')||'chưa chọn'}, lịch ${cfg.mode} lúc ${cfg.time}${cfg.mode==='monthly'?' ngày '+cfg.day:''}. SEO: chạy ngày ${cfg.seoDay} hàng tháng lúc ${cfg.seoTime}, theo dõi ${cfg.seoTracked.trim()?cfg.seoTracked.split('\n').filter(s=>s.trim()).length+' path':'tất cả URL'}.`;
+  },[cfg]);
+
+  if(!cfg)return <div className="p-8 text-slate-400 text-sm">Đang tải...</div>;
+
+  const set=p=>setCfg(c=>({...c,...p}));
+  const setUrl=(i,v)=>set({urls:cfg.urls.map((u,j)=>j===i?v:u)});
+  const toggleStrat=s=>set({strategies:cfg.strategies.includes(s)?cfg.strategies.filter(x=>x!==s):[...cfg.strategies,s]});
+  async function save(){
+    const body={urls:cfg.urls.map(u=>u.trim()).filter(Boolean),strategies:cfg.strategies,
+                schedule_mode:cfg.mode,schedule_time:cfg.time,
+                schedule_day_of_month:parseInt(cfg.day)||4,schedule_weekday:cfg.weekday,
+                seo_run_day_of_month:parseInt(cfg.seoDay)||8,seo_run_time:cfg.seoTime,
+                seo_tracked_urls:cfg.seoTracked.split('\n').map(s=>s.trim()).filter(Boolean)};
+    const r=await(await fetch('/api/config',{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)})).json();
+    setMsg(r.ok?'✅ Đã lưu cấu hình':'❌ '+r.error);
+    if(r.ok){
+      dechoBus.act('nod');
+      dechoBus.say(`✅ Đệ lưu rồi: **${body.urls.length} URL**, lịch ${body.schedule_mode} lúc ${body.schedule_time}. Đệ đồng bộ lên Sheet luôn cho chắc.`);
+    }else dechoBus.say('❌ Lưu không được: '+r.error);
+  }
+  const pill=on=>"px-4 py-2 rounded-lg text-[13px] border transition "+(on
+    ?"bg-accent border-accent text-white font-semibold"
+    :"bg-slate-100 dark:bg-slate-800 border-slate-200 dark:border-slate-700 text-slate-500");
+
+  return (
+    <div className="flex-1 min-h-0 overflow-y-auto px-6 py-4">
+      <div className="max-w-[1150px] mx-auto grid gap-4 items-start" style={{gridTemplateColumns:'minmax(0,1fr) 340px'}}>
+        <div className={card+" p-5 flex flex-col gap-3"}>
+          <h3 className="text-sm font-bold flex items-center gap-2">🔗 URLs theo dõi
+            <span className="text-[11.5px] font-normal text-slate-400 ml-auto">{cfg.urls.filter(u=>u.trim()).length} URL</span></h3>
+          <p className="text-xs text-slate-400 -mt-1">Mỗi URL được kiểm tra theo strategy đã chọn, ghi 1 dòng kết quả vào Google Sheet.</p>
+          <div className="grid gap-1.5" style={{gridTemplateColumns:'repeat(auto-fill,minmax(340px,1fr))'}}>
+            {cfg.urls.map((u,i)=>(
+              <div key={i} className="flex gap-1.5">
+                <input value={u} onChange={e=>setUrl(i,e.target.value)} spellCheck={false}
+                  className={"flex-1 min-w-0 font-mono text-xs px-2.5 py-1.5 rounded-lg border outline-none bg-slate-100 dark:bg-slate-800 focus:bg-white dark:focus:bg-slate-900 "+
+                    (u.trim()&&!/^https?:\/\/\S+$/.test(u.trim())?"border-red-400":"border-slate-200 dark:border-slate-700 focus:border-accent2")}/>
+                <button onClick={()=>set({urls:cfg.urls.filter((_,j)=>j!==i)})} title="Xóa URL"
+                  className="w-7 rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-100 dark:bg-slate-800 text-slate-400 hover:text-red-500 hover:border-red-400 text-sm">✕</button>
+              </div>
+            ))}
+          </div>
+          <button onClick={()=>set({urls:[...cfg.urls,'']})}
+            className="self-start mt-1 px-3.5 py-1.5 text-xs font-semibold text-accent border border-dashed border-slate-300 dark:border-slate-600 rounded-lg hover:border-accent">＋ Thêm URL</button>
+        </div>
+
+        <div className="flex flex-col gap-4 min-w-0">
+          <div className={card+" p-5 flex flex-col gap-3"}>
+            <h3 className="text-sm font-bold">🖥️ Strategy</h3>
+            <div className="flex gap-2.5">
+              <button className={pill(cfg.strategies.includes('mobile'))} onClick={()=>toggleStrat('mobile')}>📱 Mobile</button>
+              <button className={pill(cfg.strategies.includes('desktop'))} onClick={()=>toggleStrat('desktop')}>🖥️ Desktop</button>
+            </div>
+          </div>
+          <div className={card+" p-5 flex flex-col gap-3"}>
+            <h3 className="text-sm font-bold">🕐 Lịch chạy tự động</h3>
+            <div className="inline-flex rounded-lg overflow-hidden border border-slate-200 dark:border-slate-700 self-start">
+              {[['daily','Hàng ngày'],['weekly','Hàng tuần'],['monthly','Hàng tháng']].map(([v,lb])=>(
+                <button key={v} onClick={()=>set({mode:v})}
+                  className={"px-4 py-2 text-[13px] transition "+(cfg.mode===v?"bg-accent text-white font-semibold":"bg-slate-100 dark:bg-slate-800 text-slate-500")}>{lb}</button>
+              ))}
+            </div>
+            <div className="flex gap-2.5 items-center flex-wrap text-xs text-slate-400">
+              lúc <input type="time" className={input} value={cfg.time} onChange={e=>set({time:e.target.value})}/>
+              {cfg.mode==='monthly'&&<span className="flex gap-1.5 items-center">ngày
+                <input type="number" min="1" max="28" className={input+" w-16"} value={cfg.day} onChange={e=>set({day:e.target.value})}/> hàng tháng</span>}
+              {cfg.mode==='weekly'&&
+                <select className={input} value={cfg.weekday} onChange={e=>set({weekday:e.target.value})}>
+                  {[['monday','Thứ 2'],['tuesday','Thứ 3'],['wednesday','Thứ 4'],['thursday','Thứ 5'],['friday','Thứ 6'],['saturday','Thứ 7'],['sunday','Chủ nhật']].map(([v,lb])=><option key={v} value={v}>{lb}</option>)}
+                </select>}
+            </div>
+          </div>
+
+          <div className={card+" p-5 flex flex-col gap-3"}>
+            <h3 className="text-sm font-bold">📈 SEO Agent</h3>
+            <p className="text-xs text-slate-400 -mt-1">Báo cáo GSC + GA4 tự chạy hàng tháng.</p>
+            <div className="flex gap-2.5 items-center flex-wrap text-xs text-slate-400">
+              ngày <input type="number" min="1" max="28" className={input+" w-16"} value={cfg.seoDay} onChange={e=>set({seoDay:e.target.value})}/>
+              lúc <input type="time" className={input} value={cfg.seoTime} onChange={e=>set({seoTime:e.target.value})}/>
+            </div>
+            <div>
+              <label className="text-xs text-slate-400 block mb-1.5">URLs theo dõi — mỗi dòng 1 path (vd <code className="text-[11px]">/product/vks</code>), để trống = tất cả</label>
+              <textarea rows="4" spellCheck={false} value={cfg.seoTracked} onChange={e=>set({seoTracked:e.target.value})}
+                className="w-full font-mono text-xs px-2.5 py-2 rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-100 dark:bg-slate-800 outline-none focus:border-accent2 focus:bg-white dark:focus:bg-slate-900 resize-y"
+                placeholder="(đang theo dõi tất cả URL từ GSC & GA4)"/>
+            </div>
+          </div>
+        </div>
+
+        <div className={card+" p-3.5 px-5 flex gap-2.5 items-center sticky bottom-0"} style={{gridColumn:'1/-1'}}>
+          <span className="text-xs text-slate-400 mr-auto">{msg}</span>
+          <button className={chipCls+" !text-sm !px-4 !py-2 !rounded-lg"} onClick={load}>↺ Hoàn tác</button>
+          <button onClick={save} className="px-5 py-2 rounded-lg text-sm font-bold text-white bg-gradient-to-br from-accent to-accent2 hover:brightness-110">💾 Lưu cấu hình</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/* ───────────────────────── Shell ───────────────────────── */
+const NAV=[
+  {sec:'Core'},
+  {id:'home',icon:'🏠',label:'Tổng quan'},
+  {id:'chat',icon:'💬',label:'Chat với DeCho'},
+  {sec:'Analysis'},
+  {id:'urls',icon:'🔎',label:'URL Intelligence'},
+  {id:'dash',icon:'📊',label:'PageSpeed'},
+  {sec:'Monitoring'},
+  {id:'alerts',icon:'🚨',label:'Alerts'},
+  {sec:'System'},
+  {id:'config',icon:'⚙️',label:'Cấu hình'},
+  {id:'psiSheet',icon:'🔗',label:'PSI Sheet',link:true},
+];
+const TITLES={home:'Tổng quan',chat:'Chat với DeCho',urls:'URL Intelligence',dash:'PageSpeed · Dashboard',alerts:'Alerts',config:'Cấu hình'};
+
+function App(){
+  const [view,setView]=useState('home');
+  const [theme,setTheme]=useLS('psi-theme','light');
+  const [model,setModel]=useLS('psi-model','google/gemma-4-31b-it');
+  const [meta,setMeta]=useState('Đang kết nối...');
+  const [psiSheet,setPsiSheet]=useState('#');
+  const [seoMeta,setSeoMeta]=useState('');
+
+  useEffect(()=>{document.documentElement.classList.toggle('dark',theme==='dark')},[theme]);
+  useEffect(()=>{(async()=>{
+    try{
+      const h=await(await fetch('/healthz')).json();
+      setMeta(`Online · ${h.urls} URL · lịch ${h.schedule}${h.configured?'':' · ⚠️ chưa có API key'}`);
+      if(h.sheet_url)setPsiSheet(h.sheet_url);
+    }catch(e){setMeta('Không kết nối được server')}
+    try{
+      const c=await(await fetch('/api/seo/config')).json();
+      setSeoMeta(`${c.site} · GA4 ${c.ga4_property} · lịch ${c.schedule}${c.token_configured?'':' · ⚠️ thiếu token'}`);
+    }catch(e){}
+  })()},[]);
+
+  const DECHO_CHAT={
+    endpoint:'/api/agent/chat/stream',storageKey:'decho-chat',
+    greeting:'Yo Đại ca! Đệ là DeCho 🤖 — all-in-one luôn:\n• "chạy kiểm tra ngay" → đo Core Web Vitals 19 URL\n• "chạy báo cáo SEO tháng vừa rồi" → kéo GSC + GA4\n• "trang nào chậm nhất?", "traffic tháng này sao?" → Đệ đọc Sheet phân tích liền\n• "thêm https://...", "đổi lịch sang daily 8h" → chỉnh cấu hình bằng mồm\n\nChill thôi, nhưng output thì xịn. No cap.',
+    chips:[['▶ Chạy PageSpeed','Chạy kiểm tra ngay'],['📰 Báo cáo SEO','Chạy báo cáo SEO tháng vừa rồi'],['📈 Phân tích PSI','Phân tích kết quả PageSpeed lần chạy gần nhất'],['📊 Phân tích SEO','Phân tích số liệu SEO tháng gần nhất'],['📋 Trạng thái','Trạng thái hệ thống thế nào?']],
+    placeholder:'Nhắn Đệ bất cứ gì: chạy check, báo cáo SEO, phân tích, thêm URL…',
+    meta:seoMeta,
+  };
+
+  useEffect(()=>{
+    dechoCtx.view={home:'Tổng quan',chat:'Chat với DeCho (PSI + SEO)',urls:'URL Intelligence',dash:'Dashboard PSI',alerts:'Alerts',config:'Cấu hình (PSI + SEO)'}[view]||view;
+  },[view]);
+  useEffect(()=>{dechoCtx.model=model},[model]);
+
+  /* DeCho dẫn chuyện khi chuyển view (mỗi view chỉ nhắc 1 lần mỗi phiên) */
+  const seenTips=useRef(new Set());
+  useEffect(()=>{
+    const TIPS={
+      urls:'URL Intelligence: traffic + PageSpeed gộp theo từng trang. Click 1 dòng để xem chi tiết nha Đại ca.',
+      alerts:'Đây là chỗ Đệ báo bất thường: score tụt, clicks giảm. Click alert để nhảy tới nơi xử lý.',
+      dash:'Đây là Dashboard — số liệu thật từ PSI Sheet, Đệ vừa đọc xong sẽ bình luận cho Đại ca.',
+      config:'Chỉnh URLs với lịch ở đây nha Đại ca. Bấm Lưu là Đệ nhớ ngay, đồng bộ cả lên Sheet.',
+    };
+    if(TIPS[view]&&!seenTips.current.has(view)){
+      seenTips.current.add(view);
+      dechoBus.say(TIPS[view],6000);
+    }
+  },[view]);
+
+  return (
+    <div className="flex h-screen overflow-hidden">
+      {/* Sidebar */}
+      <aside className="w-60 flex-none flex flex-col gap-1 p-3 bg-white dark:bg-slate-900 border-r border-slate-200 dark:border-slate-800">
+        <div className="flex items-center gap-2.5 px-2.5 pb-3">
+          <div className="w-9 h-9 rounded-xl grid place-items-center text-lg bg-gradient-to-br from-emerald-100 to-cyan-100 dark:from-emerald-900 dark:to-cyan-900 border border-slate-200 dark:border-slate-700">⚡</div>
+          <b className="text-[14.5px]">DeCho Agent</b>
+        </div>
+        {NAV.map((n,i)=>n.sec
+          ?<div key={i} className="text-[10.5px] font-bold tracking-widest uppercase text-slate-400 px-3.5 pt-3 pb-1">{n.sec}</div>
+          :n.link
+            ?<a key={n.id} href={psiSheet} target="_blank" className="flex items-center gap-2.5 px-3.5 py-2.5 rounded-xl text-sm text-slate-500 hover:bg-slate-100 dark:hover:bg-slate-800 hover:text-inherit transition">{n.icon} {n.label}</a>
+            :<button key={n.id} onClick={()=>setView(n.id)}
+               className={"flex items-center gap-2.5 px-3.5 py-2.5 rounded-xl text-sm text-left transition "+(view===n.id
+                 ?"bg-gradient-to-r from-emerald-50 to-cyan-50 dark:from-emerald-900/40 dark:to-cyan-900/40 text-accent font-semibold border border-slate-200 dark:border-slate-700"
+                 :"text-slate-500 hover:bg-slate-100 dark:hover:bg-slate-800 hover:text-inherit")}>{n.icon} {n.label}</button>)}
+        <div className="flex-1"/>
+        <DechoDock showAsk={view!=='chat'}/>
+        <button onClick={()=>setTheme(theme==='light'?'dark':'light')}
+          className="flex items-center gap-2.5 px-3.5 py-2 rounded-xl text-[13px] text-slate-500 hover:bg-slate-100 dark:hover:bg-slate-800 transition">
+          {theme==='light'?'🌙 Dark mode':'☀️ Light mode'}
+        </button>
+      </aside>
+
+      {/* Content */}
+      <div className="flex-1 flex flex-col min-w-0">
+        <header className="grid items-center gap-3 px-6 py-3 bg-white dark:bg-slate-900 border-b border-slate-200 dark:border-slate-800" style={{gridTemplateColumns:'1fr auto 1fr'}}>
+          <div>
+            <h1 className="text-[15px] font-bold">{TITLES[view]}</h1>
+            <p className="text-[11.5px] text-slate-400 flex items-center gap-1.5 mt-0.5">
+              <span className="w-1.5 h-1.5 rounded-full bg-accent shadow-[0_0_6px_#0ea371]"/>{meta}</p>
+          </div>
+          <div className="flex items-center gap-2 justify-self-center">
+            <label className="text-xs text-slate-400">Model</label>
+            <select value={model} onChange={e=>setModel(e.target.value)} className={input+" cursor-pointer"}>
+              {MODELS.map(([v,lb])=><option key={v} value={v}>{lb}</option>)}
+            </select>
+          </div>
+          <div/>
+        </header>
+        {view==='home'&&<Overview go={setView}/>}
+        {view==='chat'&&<ChatView cfg={DECHO_CHAT} model={model}/>}
+        {view==='urls'&&<UrlIntel/>}
+        {view==='alerts'&&<AlertsView go={setView}/>}
+        {view==='dash'&&<Dashboard/>}
+        {view==='config'&&<ConfigView/>}
+      </div>
+    </div>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById('root')).render(<App/>);
 </script>
 </body>
 </html>

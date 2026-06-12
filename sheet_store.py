@@ -70,6 +70,25 @@ def read_results(max_rows: int = 150) -> tuple[str | None, list, list]:
         return None, [], []
 
 
+def read_results_data(month: str | None = None, max_rows: int = 2000) -> dict:
+    """Đọc dữ liệu cho dashboard: tabs tháng + toàn bộ rows của 1 tab (11 cột metric)."""
+    import re
+
+    svc = psi_checker.get_sheets_service()
+    meta = svc.spreadsheets().get(spreadsheetId=config.SHEET_ID).execute()
+    tabs = sorted(t for t in (s["properties"]["title"] for s in meta.get("sheets", []))
+                  if re.match(r"^\d{4}-\d{2}$", t))
+    if not tabs:
+        return {"tabs": [], "tab": None, "headers": [], "rows": []}
+    tab = month if month in tabs else tabs[-1]
+    res = svc.spreadsheets().values().get(
+        spreadsheetId=config.SHEET_ID, range=f"{tab}!A1:K{max_rows}").execute()
+    vals = res.get("values", [])
+    return {"tabs": tabs, "tab": tab,
+            "headers": vals[0] if vals else [],
+            "rows": vals[1:] if len(vals) > 1 else []}
+
+
 def append_run_log(source: str, total: int, ok: int, errors: int, duration_s: float) -> None:
     """Ghi 1 dòng lịch sử chạy vào tab _logs."""
     try:

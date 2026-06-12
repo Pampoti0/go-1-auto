@@ -2,64 +2,57 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
-## What this project does
+## What this project is
 
-Automated Google PageSpeed Insights (PSI) checker that runs on a schedule, tests a list of URLs for performance metrics, and writes results to a Google Sheet with conditional color formatting (green/yellow/red).
+**DeCho Agent** — an all-in-one AI marketing operations agent (Claw-a-thon 2026 entry). One FastAPI server + one no-build React UI. Two data modules (PageSpeed Insights, SEO via GSC+GA4) write to Google Sheets; a chat agent (GreenNode MaaS LLM) routes natural-language requests to actions and analyzes sheet data. A mascot character (DeCho) reacts to app state and answers screen-context questions.
 
 ## Commands
 
-```powershell
-# Install dependencies
-python -m pip install -r requirements.txt
-
-# Run a one-off check immediately (all URLs in config.py)
-python psi_checker.py --once
-
-# Run the scheduler (keeps running, fires on SCHEDULE_DAY_OF_MONTH each month)
-python psi_checker.py
-
-# Create / refresh the Knowledge Hub reference tab in the Google Sheet
-python create_knowledge_hub.py
+```bash
+source .venv/bin/activate
+pip install -r requirements.txt
+python server.py                      # serve UI + API on :8000 (PORT env to change)
+python psi_checker.py --once          # one-off PSI run (CLI)
+python seo_agent.py --month 2026-05   # one-off SEO report (CLI)
+docker build --platform linux/amd64 -t decho-agent .   # AgentBase runs amd64!
 ```
+
+No JS build step: `static/index.html` contains JSX compiled in-browser by Babel standalone. To syntax-check it: extract the `<script type="text/babel">` body and run `npx esbuild --loader:.jsx=jsx`.
 
 ## Architecture
 
-Two files do all the work:
+| File | Role |
+|---|---|
+| `server.py` | FastAPI. All endpoints, SSE chat streams, intent routing, scheduler, sheet-read cache, SEO log capture. ~1200 lines, the heart of the app. |
+| `psi_checker.py` | PSI checks: `run_check_iter()` generator yields progress events (used for real-time SSE); 3 parallel workers (`PSI_WORKERS`), 3 retries w/ backoff; writes monthly tab + conditional formatting via service account. |
+| `seo_agent.py` | GSC + GA4 monthly report → SEO Sheet (separate sheet, OAuth user token). `run_for_month(y,m)`. Env-driven config with runtime overrides via `runtime_val()`. |
+| `runtime_config.py` | Dynamic config overlay (PSI urls/schedule + SEO schedule/tracked) persisted to `runtime_config.json` (gitignored) and synced to PSI Sheet tab `_config` via `on_change` hook → survives container recreate. |
+| `sheet_store.py` | PSI Sheet I/O: `_config` tab (config persist), `_logs` tab (run history), `read_results`/`read_results_data` (dashboard data). |
+| `static/index.html` | Entire UI: React 18 + Tailwind (CDN). Views: home (Tổng quan), chat, urls (URL Intelligence), dash (PageSpeed Dashboard), alerts, config. DeCho components + `dechoBus` event bus + `dechoCtx` screen context. |
+| `SOUL.md` / `AGENT.md` | Agent personality / domain knowledge. Hot-reloaded by mtime (`_persona()` / `_knowledge()` in server.py). Persona goes in every prompt; knowledge only in analysis prompts. |
 
-**`config.py`** — single source of truth for every tunable value:
-- `PSI_API_KEY`, `SHEET_ID`, `SERVICE_ACCOUNT_FILE` — credentials
-- `URLS` — list of URLs to check
-- `STRATEGIES` — `["mobile", "desktop"]`
-- `SCHEDULE_MODE` / `SCHEDULE_TIME` / `SCHEDULE_DAY_OF_MONTH` / `SCHEDULE_WEEKDAY`
-- `REQUEST_DELAY` — seconds between API calls (avoids rate limiting)
+## Key flows
 
-**`psi_checker.py`** — all logic:
-- `get_sheets_service()` — builds Google Sheets API client from service account file
-- `get_or_create_tab(service, tab_name)` — creates a new sheet tab if it doesn't exist
-- `ensure_header(service, tab_name)` — writes header row if tab is empty
-- `append_rows(service, rows, tab_name)` — appends result rows
-- `apply_conditional_formatting(service, tab_name)` — applies green/yellow/red rules to columns D–K based on Core Web Vitals thresholds
-- `fetch_psi(url, strategy)` — calls the PSI API, returns raw JSON or `None` on error
-- `parse_result(data, url, strategy, timestamp)` — extracts a flat row from PSI JSON
-- `run_check()` — orchestrates a full run: determines tab name as `YYYY-MM`, creates tab, writes all rows, applies formatting
-- `start_scheduler()` — wraps `schedule` library; for `monthly` mode it fires `run_check()` daily but guards with a day-of-month check
+**Chat (all-in-one)**: UI → `POST /api/agent/chat/stream` (SSE). Server: (1) LLM intent classification (`_unified_prompt`, strict JSON, `/no_think`, 4096 tokens) with `_all_keyword_intent` fallback; (2) dispatch: PSI run (streams per-URL progress from `run_check_iter`), SEO run (streams captured log lines, supports multi-month batch), PSI/SEO analysis (reads sheet → second LLM call streamed as `delta` events), config actions. Event protocol: `{type: step|delta|final|error|done}`.
 
-## Google Sheet structure
+**Reasoning models**: Qwen may emit `<think>` blocks or put everything in `reasoning_content`. All parsing accumulates the full stream then strips think tags (handles tags split across chunks by holding back 12 chars); falls back to reasoning content when content is empty. Never show chain-of-thought to users.
 
-Each monthly run writes to a tab named `YYYY-MM` (e.g. `2026-07`). The first run ever wrote to `PSI Results` (legacy tab). Column layout (A–Q):
+**DeCho character**: `DechoScene` wrapper probes assets: `static/poses/idle.png` (2D pose + CSS anims) → `static/sprites/idle.png` (12-frame canvas) → `static/decho.glb` (three.js, procedural anims). All driven by `dechoBus` events: `busy(bool)`, `say(text)`, `act('jump'|'nod'|'sad')`. `dechoCtx={view,info,model}` is updated by each view; `POST /api/decho/ask` answers questions with that context.
 
-`Timestamp | URL | Strategy | Performance Score | FCP | LCP | CLS | TBT | INP | TTFB | Speed Index | FCP Label | LCP Label | CLS Label | TBT Label | INP Label | TTFB Label`
+**Quota protection**: Sheets API = 60 reads/min/user. Server caches reads (`_cached`, TTLs 60s–600s; invalidated after any run completes). Client caches the 3 dashboard fetches 60s (`_agentCache`). Don't add per-request sheet reads without caching.
 
-Conditional formatting covers columns D–K (indices 3–10). Thresholds follow Google's published Core Web Vitals guidelines.
+## Credentials & env
 
-## Credentials
+- `.env` (gitignored): `PSI_API_KEY`, `SHEET_ID`, `MAAS_BASE_URL/_API_KEY/_MODEL`, SEO vars.
+- PSI Sheet: service account — `service_account.json` file or `SERVICE_ACCOUNT_JSON` env (deploy).
+- SEO (GSC/GA4/SEO Sheet): OAuth user token — `token.json` file or `SEO_TOKEN_JSON` env (deploy). No browser flow on server; token must be created locally first.
+- Never commit: `.env`, `service_account.json`, `token.json`, `runtime_config.json` (all gitignored; `.dockerignore` keeps them out of images too).
 
-- **PSI API key** — stored in `config.py` as `PSI_API_KEY`
-- **Google Service Account** — file `service_account.json` (path set via env `SERVICE_ACCOUNT_FILE`), or paste full JSON content into env `SERVICE_ACCOUNT_JSON` (used for cloud deploy).
-- The service account must have Editor access to the target Google Sheet.
+## Gotchas
 
-## Known issues / quirks
-
-- PSI API occasionally returns 500 or times out (~60 s timeout). Errors are written as `ERROR` cells in the sheet and do not abort the run.
-- `file_cache is only supported with oauth2client<4.0.0` warning on startup is harmless — Google's discovery cache falls back to memory.
-- Run `python psi_checker.py` on a machine that stays on, or schedule it via Task Scheduler / cron. There is no cloud deployment; the scheduler lives in-process.
+- AgentBase runtime is **linux/amd64** — always build with `--platform linux/amd64` on Apple Silicon.
+- `asyncio.to_thread(next, it)` needs a sentinel default — StopIteration can't cross a Future.
+- Gemma sometimes outputs LaTeX (`$\rightarrow$`); UI `md()` converts to unicode, prompts forbid it.
+- Schedule changes apply via `_build_schedule()` (called on config save) — scheduler ticks every 30s.
+- The two legacy chat endpoints (`/api/chat/stream`, `/api/seo/chat/stream`) still work but the UI only uses `/api/agent/chat/stream`.
+- UI chat history lives in browser localStorage (`decho-chat`), capped 100 messages, sent as last-10 history for conversation memory.

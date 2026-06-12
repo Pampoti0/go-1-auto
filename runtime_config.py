@@ -31,6 +31,10 @@ def _defaults() -> dict:
         "schedule_weekday": base.SCHEDULE_WEEKDAY,
         "schedule_day_of_month": base.SCHEDULE_DAY_OF_MONTH,
         "request_delay": base.REQUEST_DELAY,
+        # SEO agent
+        "seo_run_day_of_month": int(os.getenv("SEO_RUN_DAY_OF_MONTH", "8")),
+        "seo_run_time": os.getenv("SEO_RUN_TIME", "08:00"),
+        "seo_tracked_urls": [u.strip() for u in os.getenv("SEO_TRACKED_URLS", "").split(",") if u.strip()],
     }
 
 
@@ -76,6 +80,17 @@ def validate(partial: dict) -> str | None:
             return "request_delay phải là số giây >= 0."
         if d < 0:
             return "request_delay phải >= 0."
+    if "seo_run_day_of_month" in partial:
+        try:
+            d = int(partial["seo_run_day_of_month"])
+        except (TypeError, ValueError):
+            return "seo_run_day_of_month phải là số 1–28."
+        if not 1 <= d <= 28:
+            return "seo_run_day_of_month phải trong khoảng 1–28."
+    if "seo_run_time" in partial and not re.match(r"^([01]\d|2[0-3]):[0-5]\d$", str(partial["seo_run_time"])):
+        return "seo_run_time phải dạng HH:MM."
+    if "seo_tracked_urls" in partial and not isinstance(partial["seo_tracked_urls"], list):
+        return "seo_tracked_urls phải là danh sách (rỗng = theo dõi tất cả)."
     return None
 
 
@@ -90,6 +105,10 @@ def update(partial: dict, notify: bool = True) -> dict:
         partial["schedule_day_of_month"] = int(partial["schedule_day_of_month"])
     if "request_delay" in partial:
         partial["request_delay"] = int(partial["request_delay"])
+    if "seo_run_day_of_month" in partial:
+        partial["seo_run_day_of_month"] = int(partial["seo_run_day_of_month"])
+    if "seo_tracked_urls" in partial:
+        partial["seo_tracked_urls"] = [str(u).strip() for u in partial["seo_tracked_urls"] if str(u).strip()]
     if "urls" in partial:
         partial["urls"] = [u.strip() for u in partial["urls"]]
     with _lock:
