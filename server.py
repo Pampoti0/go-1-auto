@@ -262,11 +262,25 @@ def api_seo_summary(limit: int = 6):
 
 
 def _seo_summary_fetch(limit: int = 6):
+    """Đọc N tháng bằng MỘT lệnh batchGet thay vì 2 lệnh/tháng — nhanh hơn ~5 lần."""
     try:
+        import seo_agent
+        from googleapiclient.discovery import build
+
         tabs = _seo_list_tabs()[-max(1, min(limit, 12)):]
+        if not tabs:
+            return {"months": []}
+        svc = build("sheets", "v4", credentials=seo_agent.get_creds(), cache_discovery=False)
+        res = svc.spreadsheets().values().batchGet(
+            spreadsheetId=seo_agent.SEO_SHEET_ID,
+            ranges=[f"{t}!A1:K2000" for t in tabs]).execute()
         out = []
-        for t in tabs:
-            tab, h, rows = _seo_read_results(t, 2000)
+        for t, vr in zip(tabs, res.get("valueRanges", [])):
+            vals = vr.get("values", [])
+            if len(vals) < 2:
+                out.append({"month": t})
+                continue
+            h, rows = vals[0], vals[1:]
             idx = {k: i for i, k in enumerate(h)}
 
             def num(r, c):
