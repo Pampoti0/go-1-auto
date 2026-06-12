@@ -63,12 +63,36 @@ def warmup():
         log.warning(f"Ads warmup lỗi (bỏ qua): {e}")
 
 
+def _reset():
+    """Bỏ client đang cache — gRPC channel idle lâu có thể bị server ngắt."""
+    global _svc_cache
+    _svc_cache = None
+
+
+_TRANSIENT = ("unavailable", "timed out", "timeout", "stream removed",
+              "deadline", "goaway", "connection reset", "socket closed")
+
+
+def _search(query: str) -> list:
+    """svc.search với retry: lỗi kết nối transient → làm mới channel, thử lại 1 lần."""
+    for attempt in (1, 2):
+        try:
+            svc = _service()
+            return list(svc.search(customer_id=CUSTOMER_ID, query=query))
+        except Exception as e:  # noqa: BLE001
+            if attempt == 1 and any(k in str(e).lower() for k in _TRANSIENT):
+                log.warning(f"Ads kết nối hỏng ({type(e).__name__}) — làm mới client, thử lại...")
+                _reset()
+                continue
+            raise
+    return []  # không tới được
+
+
 def list_campaigns() -> list[dict]:
-    svc = _service()
     q = ("SELECT campaign.id, campaign.name, campaign.status, "
          "campaign.advertising_channel_type FROM campaign ORDER BY campaign.name")
     out = []
-    for r in svc.search(customer_id=CUSTOMER_ID, query=q):
+    for r in _search(q):
         c = r.campaign
         out.append({"id": c.id, "name": c.name, "status": c.status.name,
                     "channel": c.advertising_channel_type.name})
@@ -76,14 +100,28 @@ def list_campaigns() -> list[dict]:
     return out
 
 
-def campaign_perf(days: int = 7) -> dict:
-    """Metrics theo từng campaign × từng ngày trong N ngày gần nhất (trừ hôm nay)."""
-    from datetime import date, timedelta
+def campaign_perf(days: int = 7, start: str | None = None, end: str | None = None) -> dict:
+    """Metrics theo từng campaign × từng ngày.
 
-    svc = _service()
-    days = max(1, min(int(days or 7), 90))
-    start = (date.today() - timedelta(days=days)).strftime("%Y-%m-%d")
-    end = (date.today() - timedelta(days=1)).strftime("%Y-%m-%d")
+    Mặc định N ngày gần nhất (trừ hôm nay); truyền start/end (YYYY-MM-DD) để lọc
+    khoảng bất kỳ — validate bằng strptime (chặn injection), tối đa 366 ngày.
+    """
+    from datetime import date, datetime, timedelta
+
+    if start and end:
+        d0 = datetime.strptime(start, "%Y-%m-%d").date()
+        d1 = datetime.strptime(end, "%Y-%m-%d").date()
+        if d0 > d1:
+            d0, d1 = d1, d0
+        if d1 > date.today():
+            d1 = date.today()
+        if (d1 - d0).days + 1 > 366:
+            raise RuntimeError(f"Khoảng quá dài ({(d1 - d0).days + 1} ngày) — tối đa 366 ngày.")
+        start, end = d0.isoformat(), d1.isoformat()
+    else:
+        days = max(1, min(int(days or 7), 90))
+        start = (date.today() - timedelta(days=days)).strftime("%Y-%m-%d")
+        end = (date.today() - timedelta(days=1)).strftime("%Y-%m-%d")
     q = f"""
         SELECT campaign.id, campaign.name, campaign.status, segments.date,
                metrics.impressions, metrics.clicks, metrics.ctr,
@@ -93,7 +131,7 @@ def campaign_perf(days: int = 7) -> dict:
         ORDER BY segments.date
     """
     rows = []
-    for r in svc.search(customer_id=CUSTOMER_ID, query=q):
+    for r in _search(q):
         m = r.metrics
         cost = m.cost_micros / 1_000_000
         rows.append({

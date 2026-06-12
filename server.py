@@ -26,6 +26,7 @@ from fastapi.responses import HTMLResponse, StreamingResponse
 from pydantic import BaseModel
 
 import config
+import memory_agent
 import psi_checker
 import runtime_config
 import sheet_store
@@ -352,14 +353,19 @@ def api_ads_campaigns():
 
 
 @app.get("/api/ads/perf")
-def api_ads_perf(days: int = 7):
-    """Hiệu suất campaign N ngày gần nhất (cache 5 phút)."""
+def api_ads_perf(days: int = 7, start: str | None = None, end: str | None = None):
+    """Hiệu suất campaign: N ngày gần nhất, hoặc khoảng start/end YYYY-MM-DD (cache 5 phút)."""
+    import re
+
     import ads_agent
 
     if not ads_agent.configured():
         return {"error": "Chưa cấu hình Google Ads (GOOGLE_ADS_* trong env).", "rows": []}
+    if not (start and end and re.match(r"^\d{4}-\d{2}-\d{2}$", start) and re.match(r"^\d{4}-\d{2}-\d{2}$", end)):
+        start = end = None
     try:
-        return _cached(f"ads:perf:{days}", 300, lambda: ads_agent.campaign_perf(days))
+        key = f"ads:perf:{start}:{end}" if start else f"ads:perf:{days}"
+        return _cached(key, 300, lambda: ads_agent.campaign_perf(days, start, end))
     except Exception as e:  # noqa: BLE001
         return {"error": f"{type(e).__name__}: {e}", "rows": []}
 
@@ -676,6 +682,8 @@ class ChatStreamRequest(BaseModel):
     message: str
     model: str | None = None
     history: list[dict] | None = None  # [{"role":"user"|"assistant","content":"..."}]
+    user_id: str | None = None     # AgentBase Memory: actorId (UUID phía client)
+    session_id: str | None = None  # AgentBase Memory: sessionId (đổi khi xóa lịch sử)
 
 
 def _sanitize_history(history: list[dict] | None, limit: int = 10) -> list[dict]:
@@ -706,7 +714,12 @@ def _unified_prompt() -> str:
         "C. PAID CAMPAIGNS: theo dõi Google Ads (read-only).\n"
         "Trả về DUY NHẤT một JSON theo intent:\n"
         '- Chạy kiểm tra PageSpeed ngay: {"action":"run_check"}\n'
-        '- Phân tích KẾT QUẢ PageSpeed (điểm, score, LCP/CLS, trang nhanh/chậm): {"action":"query_results"}\n'
+        "QUY TẮC THỜI GIAN PAGESPEED — PageSpeed là phép đo REAL-TIME tại thời điểm chạy, KHÔNG thể chạy cho quá khứ hay tương lai:\n"
+        '  + "chạy pagespeed tháng <quá khứ>" → hiểu là muốn XEM data đã đo tháng đó: {"action":"query_results","month":"YYYY-MM"}\n'
+        '  + tháng TƯƠNG LAI → {"action":"reply","text":"<từ chối dí dỏm đúng tính cách: tháng đó chưa tới, Đệ chưa biết du hành thời gian; mời chạy ngay hoặc xem data tháng đã có>"}\n'
+        '  + tháng hiện tại hoặc không nêu tháng → {"action":"run_check"}\n'
+        '  + KHÔNG RÕ tháng nào/năm nào (vd nói "tháng 12" khi chưa rõ năm) → {"action":"reply","text":"<hỏi lại cho rõ tháng/năm>"} — đừng đoán.\n'
+        '- Phân tích KẾT QUẢ PageSpeed (điểm, score, LCP/CLS, trang nhanh/chậm): {"action":"query_results"} — thêm "month":"YYYY-MM" nếu người dùng chỉ định tháng\n'
         '- Danh sách URL theo dõi: {"action":"list_urls"}\n'
         '- Thêm URL: {"action":"add_url","url":"<url>"}\n'
         '- Xóa URL: {"action":"remove_url","url":"<url hoặc từ khóa>"}\n'
@@ -723,7 +736,9 @@ def _unified_prompt() -> str:
         'Nếu input mơ hồ không tính được ngày → đừng đoán, dùng {"action":"reply"} hỏi lại.\n'
         '- Người dùng XÁC NHẬN đề xuất ngay trước đó ("ok", "đồng ý", "chạy đi"): {"action":"confirm"}\n'
         '- Danh sách campaign Google Ads: {"action":"ads_list"}\n'
-        '- Hiệu suất/chi tiêu/CPA Google Ads: {"action":"ads_perf","days":<số ngày, mặc định 7>}\n'
+        '- Hiệu suất/chi tiêu/CPA Google Ads: {"action":"ads_perf","days":<số ngày, mặc định 7>} '
+        'hoặc khoảng thời gian tự nhiên ("ads tháng 5", "chi tiêu từ 01/05 đến 31/05", "quảng cáo quý 1"): '
+        '{"action":"ads_perf","start":"YYYY-MM-DD","end":"YYYY-MM-DD"} — tự tính ngày như seo_range\n'
         '- Trạng thái hệ thống: {"action":"status"}\n'
         '- Còn lại: {"action":"reply","text":"<trả lời ngắn>"}\n'
         "Phân biệt: kiểm tra/điểm/score/LCP/CLS/pagespeed → PageSpeed; báo cáo/traffic/clicks/GSC/GA4/SEO → SEO."
@@ -794,6 +809,18 @@ def _all_keyword_intent(message: str) -> dict | None:
     if any(k in m for k in ("ads", "campaign", "quảng cáo", "cpa", "chi tiêu", "spend", "ngân sách")):
         if any(k in m for k in ("danh sách", "list", "những campaign", "campaign nào đang")):
             return {"action": "ads_list"}
+        if rng:  # khoảng thời gian tự nhiên ("tháng 5", "quý 1", "từ đầu năm"...) → lọc ads theo range
+            return {"action": "ads_perf", "start": rng["start"], "end": rng["end"]}
+        tm = _re2.search(r"tháng\s*(\d{1,2})(?:\s*[/\-]?\s*(?:năm\s*)?(20\d{2}))?", m)
+        if tm:
+            from datetime import date, timedelta
+
+            from dateutil.relativedelta import relativedelta
+            mo, yr = int(tm.group(1)), int(tm.group(2) or datetime.now().year)
+            if 1 <= mo <= 12:
+                s = date(yr, mo, 1)
+                return {"action": "ads_perf", "start": s.isoformat(),
+                        "end": (s + relativedelta(months=1) - timedelta(days=1)).isoformat()}
         dm = _re2.search(r"(\d{1,2})\s*ngày", m)
         return {"action": "ads_perf", "days": int(dm.group(1)) if dm else 7}
     psiish = any(k in m for k in ("lcp", "cls", "fcp", "tbt", "inp", "ttfb", "score", "điểm",
@@ -805,6 +832,23 @@ def _all_keyword_intent(message: str) -> dict | None:
         kw_seo = {**kw_seo, "action": "seo_query"}
     kw_psi = _keyword_intent(message)
     if psiish and not seoish:
+        # "pagespeed tháng N (năm Y)" → phân nhánh quá khứ / tương lai / mơ hồ
+        tm = _re2.search(r"tháng\s*(\d{1,2})(?:\s*[/\-]?\s*(?:năm\s*)?(20\d{2}))?", m)
+        if tm:
+            from datetime import date
+            mo, yr = int(tm.group(1)), tm.group(2) and int(tm.group(2))
+            today = date.today()
+            if 1 <= mo <= 12:
+                if yr is None and mo > today.month:  # không rõ năm mà tháng chưa tới → hỏi lại
+                    return {"action": "reply",
+                            "text": f"Tháng {mo} mà chưa rõ năm nào đó Đại ca — ý Đại ca là {mo:02d}/{today.year - 1} (đã qua) hay {mo:02d}/{today.year} (chưa tới)? Nói rõ giúp Đệ nha."}
+                yr = yr or today.year
+                if (yr, mo) > (today.year, today.month):
+                    return {"action": "reply",
+                            "text": f"Tháng {mo:02d}/{yr} còn chưa tới mà Đại ca 😅 Đệ đo PageSpeed real-time chứ chưa biết du hành thời gian. Muốn thì Đệ chạy kiểm tra NGAY bây giờ, hoặc xem lại data các tháng đã đo nha."}
+                if (yr, mo) < (today.year, today.month):
+                    return {"action": "query_results", "month": f"{yr}-{mo:02d}"}
+                return {"action": "run_check"}  # đúng tháng hiện tại
         # câu hỏi metric PSI nhưng _keyword_intent không bắt được → ép query_results
         return kw_psi if kw_psi and kw_psi.get("action") != "run_check" or "chạy" in m or "kiểm tra" in m \
             else {"action": "query_results"}
@@ -823,8 +867,12 @@ async def agent_chat_stream(req: ChatStreamRequest):
 
     model = req.model if req.model in ALLOWED_MODELS else MAAS_MODEL
 
+    final_parts: list[str] = []  # gom câu trả lời để ghi AgentBase Memory
+
     async def gen():
         def ev(obj):
+            if obj.get("type") == "final" and obj.get("text"):
+                final_parts.append(str(obj["text"]))
             return f"data: {json.dumps(obj, ensure_ascii=False)}\n\n"
 
         if not (MAAS_API_KEY and MAAS_BASE_URL):
@@ -833,9 +881,15 @@ async def agent_chat_stream(req: ChatStreamRequest):
             return
 
         history = _sanitize_history(req.history)
+        # ── AgentBase Memory: recall fact dài hạn về người dùng ──
+        mem_block = ""
+        if memory_agent.configured() and req.user_id:
+            mem_block = await asyncio.to_thread(memory_agent.memory_block, req.user_id, req.message)
+            if mem_block:
+                yield ev({"type": "step", "text": "🧠 Đệ nhớ ra vài điều liên quan về Đại ca"})
         yield ev({"type": "step", "text": f"🧠 Phân tích yêu cầu ({model})..."})
         try:
-            data = await _call_llm_stream(model, req.message, history, system=_unified_prompt())
+            data = await _call_llm_stream(model, req.message, history, system=_unified_prompt() + mem_block)
         except Exception as e:  # noqa: BLE001
             yield ev({"type": "error", "text": f"❌ Lỗi gọi model: {e}"})
             yield ev({"type": "done"})
@@ -868,7 +922,7 @@ async def agent_chat_stream(req: ChatStreamRequest):
 
         async def stream_analysis(system_prompt: str):
             payload = {"model": model, "stream": True, "temperature": 0.2, "max_tokens": 4096,
-                       "messages": [{"role": "system", "content": system_prompt},
+                       "messages": [{"role": "system", "content": system_prompt + mem_block},
                                     *history, {"role": "user", "content": req.message}]}
             think_re = _re.compile(r"<think>.*?(?:</think>|$)", _re.S)
             raw_acc, sent, reasoning_acc = "", 0, []
@@ -927,14 +981,27 @@ async def agent_chat_stream(req: ChatStreamRequest):
 
         # ── PSI: phân tích kết quả ──
         if action == "query_results":
-            tab, headers, rows = await asyncio.to_thread(sheet_store.read_results)
+            month = str(data.get("month") or "").strip() or None
+            if month:
+                d = await asyncio.to_thread(sheet_store.read_results_data, month, 2000)
+                if month not in (d.get("tabs") or []):
+                    have = ", ".join(d.get("tabs") or []) or "chưa có tháng nào"
+                    yield ev({"type": "final", "text": f"Tháng {month} Đệ chưa có dữ liệu PageSpeed (lúc đó chưa đo mà Đại ca). Hiện có data các tháng: {have}. Muốn số mới nhất thì nói 'chạy kiểm tra ngay', Đệ đo liền."})
+                    yield ev({"type": "done"})
+                    return
+                tab, headers, rows = month, d["headers"], d["rows"]
+            else:
+                tab, headers, rows = await asyncio.to_thread(sheet_store.read_results)
             if not rows:
                 yield ev({"type": "final", "text": "Chưa có dữ liệu PageSpeed nào — nói 'chạy kiểm tra ngay' trước nhé."})
                 yield ev({"type": "done"})
                 return
             yield ev({"type": "step", "text": f"📊 Đọc {len(rows)} dòng từ PSI Sheet tab {tab}"})
             yield ev({"type": "step", "text": f"🧠 Phân tích dữ liệu ({model})..."})
-            async for chunk in stream_analysis(_results_prompt(tab, headers, rows)):
+            extra = ("\nLƯU Ý: đây là dữ liệu ĐÃ ĐO trong tháng " + tab +
+                     " (PageSpeed không đo lại quá khứ được). Kết thúc câu trả lời bằng đúng 1 câu mời theo tính cách: "
+                     "nếu Đại ca muốn số liệu mới nhất thì nói 'chạy kiểm tra ngay' để Đệ đo liền.") if month else ""
+            async for chunk in stream_analysis(_results_prompt(tab, headers, rows) + extra):
                 yield chunk
             yield ev({"type": "done"})
             return
@@ -1018,15 +1085,23 @@ async def agent_chat_stream(req: ChatStreamRequest):
                 yield ev({"type": "done"})
                 return
             days = int(data.get("days") or 7)
-            yield ev({"type": "step", "text": f"💰 Đọc hiệu suất Google Ads {days} ngày gần nhất..."})
+            a_start, a_end = str(data.get("start") or ""), str(data.get("end") or "")
+            if not (_re.match(r"^\d{4}-\d{2}-\d{2}$", a_start) and _re.match(r"^\d{4}-\d{2}-\d{2}$", a_end)):
+                a_start = a_end = ""
+            if a_start:
+                yield ev({"type": "step", "text": f"💰 Đọc hiệu suất Google Ads {a_start} → {a_end}..."})
+            else:
+                yield ev({"type": "step", "text": f"💰 Đọc hiệu suất Google Ads {days} ngày gần nhất..."})
             try:
-                perf = await asyncio.to_thread(lambda: _cached(f"ads:perf:{days}", 300, lambda: ads_agent.campaign_perf(days)))
+                key = f"ads:perf:{a_start}:{a_end}" if a_start else f"ads:perf:{days}"
+                perf = await asyncio.to_thread(lambda: _cached(key, 300, lambda: ads_agent.campaign_perf(days, a_start or None, a_end or None)))
             except Exception as e:  # noqa: BLE001
                 yield ev({"type": "error", "text": f"❌ Lỗi Google Ads: {type(e).__name__}: {e}"})
                 yield ev({"type": "done"})
                 return
             if not perf.get("rows"):
-                yield ev({"type": "final", "text": f"Không có dữ liệu Ads trong {days} ngày gần nhất."})
+                rng_txt = f"khoảng {a_start} → {a_end}" if a_start else f"{days} ngày gần nhất"
+                yield ev({"type": "final", "text": f"Không có dữ liệu Ads trong {rng_txt} — Đại ca thử khoảng khác xem."})
                 yield ev({"type": "done"})
                 return
             yield ev({"type": "step", "text": f"📊 {len(perf['rows'])} dòng ({perf['start']} → {perf['end']})"})
@@ -1219,7 +1294,19 @@ async def agent_chat_stream(req: ChatStreamRequest):
         yield ev({"type": "final", "text": data.get("text") or "Đại ca nói rõ hơn xíu nha — Đệ lo được cả PageSpeed lẫn SEO."})
         yield ev({"type": "done"})
 
-    return StreamingResponse(gen(), media_type="text/event-stream",
+    async def gen_with_memory():
+        try:
+            async for chunk in gen():
+                yield chunk
+        finally:
+            # Ghi lượt chat vào AgentBase Memory ở thread nền — không chặn response
+            if memory_agent.configured() and req.user_id and req.session_id:
+                ans = "\n\n".join(final_parts).strip()
+                turns = [("user", req.message)] + ([("assistant", ans)] if ans else [])
+                threading.Thread(target=memory_agent.add_turns_safe,
+                                 args=(req.user_id, req.session_id, turns), daemon=True).start()
+
+    return StreamingResponse(gen_with_memory(), media_type="text/event-stream",
                              headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
 
@@ -1227,6 +1314,43 @@ class DechoAskRequest(BaseModel):
     question: str
     context: str | None = None
     model: str | None = None
+    user_id: str | None = None
+    session_id: str | None = None
+
+
+def _range_from_text(text: str) -> dict | None:
+    """Parse khoảng ngày từ câu tự nhiên: 'từ 1/5 đến 31/5', 'tháng 5', 'quý 1', '30 ngày gần nhất'..."""
+    import re
+    from datetime import date, datetime as _dt, timedelta
+
+    from dateutil.relativedelta import relativedelta
+
+    m = text.lower()
+    today = date.today()
+    # "từ d/m(/y) đến d/m(/y)"
+    dm = re.search(r"từ\s*(\d{1,2})[/\-](\d{1,2})(?:[/\-](\d{4}))?\s*(?:đến|tới|->|→)\s*(\d{1,2})[/\-](\d{1,2})(?:[/\-](\d{4}))?", m)
+    if dm:
+        try:
+            y1 = int(dm.group(3) or today.year); y2 = int(dm.group(6) or y1)
+            d0 = date(y1, int(dm.group(2)), int(dm.group(1)))
+            d1 = date(y2, int(dm.group(5)), int(dm.group(4)))
+            if d0 > d1:
+                d0, d1 = d1, d0
+            return {"start": d0.isoformat(), "end": min(d1, today).isoformat()}
+        except ValueError:
+            return None
+    rng = _parse_range_vi(m)
+    if rng:
+        return {"start": rng["start"], "end": rng["end"]}
+    tm = re.search(r"tháng\s*(\d{1,2})(?:\s*[/\-]?\s*(?:năm\s*)?(20\d{2}))?", m)
+    if tm and 1 <= int(tm.group(1)) <= 12:
+        mo, yr = int(tm.group(1)), int(tm.group(2) or today.year)
+        s = date(yr, mo, 1)
+        e = s + relativedelta(months=1) - timedelta(days=1)
+        if s > today:
+            return None
+        return {"start": s.isoformat(), "end": min(e, today).isoformat()}
+    return None
 
 
 @app.post("/api/decho/ask")
@@ -1235,8 +1359,28 @@ def decho_ask(req: DechoAskRequest):
     if not (MAAS_API_KEY and MAAS_BASE_URL):
         return {"error": "Chưa cấu hình MAAS_API_KEY / MAAS_BASE_URL."}
     import httpx
+    import re as _re5
 
     model = req.model if req.model in ALLOWED_MODELS else MAAS_MODEL
+
+    # ── Trang Ads: nếu câu hỏi nêu khoảng thời gian khác → DeCho tự chỉnh filter, UI load data mới ──
+    mv = _re5.search(r"màn hình:\s*([a-zA-Z_]+)", req.context or "")
+    if mv and mv.group(1).lower() == "ads":
+        rng = _range_from_text(req.question)
+        if rng:
+            def _fmt(s):
+                y, mo, d = s.split("-")
+                return f"{d}/{mo}/{y}"
+            reply = (f"Dạ để Đệ chỉnh filter liền: **{_fmt(rng['start'])} → {_fmt(rng['end'])}**. "
+                     "Số liệu đang lên màn hình đó Đại ca — xem xong cần Đệ phân tích thì hỏi tiếp nha!")
+            if memory_agent.configured() and req.user_id and req.session_id:
+                threading.Thread(target=memory_agent.add_turns_safe,
+                                 args=(req.user_id, req.session_id,
+                                       [("user", req.question), ("assistant", reply)]), daemon=True).start()
+            return {"reply": reply, "action": {"type": "ads_range", **rng}}
+    mem_block = ""
+    if memory_agent.configured() and req.user_id:
+        mem_block = memory_agent.memory_block(req.user_id, req.question)
     system = (
         "Bạn là DeCho — mascot trợ thủ của app DeCho Agent (PageSpeed + SEO). "
         "Bạn đang đứng ở góc màn hình, nhìn cùng màn hình với người dùng.\n"
@@ -1244,7 +1388,7 @@ def decho_ask(req: DechoAskRequest):
         "\n\nTrả lời dựa trên bối cảnh trên: bình thường ngắn gọn (~80 từ), nhưng nếu người dùng hỏi chi tiết/phân tích thì dùng số liệu cụ thể trong bối cảnh, tối đa ~200 từ; "
         "nếu câu hỏi vượt quá dữ liệu đang thấy thì nói thẳng và chỉ người dùng nơi xem "
         "(menu Chat để chạy/phân tích, Dashboard để xem điểm). KHÔNG dùng LaTeX. /no_think"
-    ) + _knowledge() + _persona()
+    ) + mem_block + _knowledge() + _persona()
     try:
         r = httpx.post(
             f"{MAAS_BASE_URL}/chat/completions",
@@ -1255,9 +1399,42 @@ def decho_ask(req: DechoAskRequest):
         r.raise_for_status()
         msg = r.json()["choices"][0]["message"]
         reply = _strip_think(msg.get("content") or "") or _strip_think(msg.get("reasoning_content") or "")
-        return {"reply": reply or "Đệ bí câu này rồi Đại ca 😅"}
+        reply = reply or "Đệ bí câu này rồi Đại ca 😅"
+        if memory_agent.configured() and req.user_id and req.session_id:
+            threading.Thread(target=memory_agent.add_turns_safe,
+                             args=(req.user_id, req.session_id,
+                                   [("user", req.question), ("assistant", reply)]), daemon=True).start()
+        return {"reply": reply}
     except Exception as e:  # noqa: BLE001
         return {"error": f"{type(e).__name__}: {e}"}
+
+
+# ── AgentBase Memory endpoints ────────────────────────────────────────────────
+
+@app.get("/api/memory/status")
+def memory_status():
+    return {"configured": memory_agent.configured()}
+
+
+@app.get("/api/memory/history")
+def memory_history(user_id: str, session_id: str, limit: int = 40):
+    """Lịch sử hội thoại từ AgentBase Memory (events) — theo thứ tự thời gian."""
+    if not memory_agent.configured():
+        return {"configured": False, "messages": []}
+    msgs = memory_agent.get_events_safe(user_id, session_id, min(int(limit), 100))
+    return {"configured": True,
+            "messages": [{"me": m["role"] == "user", "text": m["message"]} for m in msgs]}
+
+
+@app.get("/api/memory/records")
+def memory_records(user_id: str):
+    """Fact dài hạn DeCho đã nhớ về người dùng (memory records)."""
+    if not memory_agent.configured():
+        return {"configured": False, "facts": []}
+    try:
+        return {"configured": True, "facts": memory_agent.list_records(user_id)}
+    except Exception as e:  # noqa: BLE001
+        return {"configured": True, "facts": [], "error": f"{type(e).__name__}: {e}"}
 
 
 # ── SEO endpoints ─────────────────────────────────────────────────────────────
