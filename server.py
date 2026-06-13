@@ -30,6 +30,7 @@ import memory_agent
 import psi_checker
 import runtime_config
 import sheet_store
+import web_search
 
 MAAS_BASE_URL = os.getenv("MAAS_BASE_URL", "")
 MAAS_API_KEY = os.getenv("MAAS_API_KEY", "")
@@ -548,8 +549,16 @@ def _status_text() -> str:
     if _state["running"]:
         return "🔄 Đang chạy kiểm tra... Kết quả sẽ ghi vào Google Sheet khi xong."
     if _state["last_run"]:
-        return f"Lần chạy gần nhất: {_state['last_run']} — kết quả: {_state['last_result']}."
-    return "Chưa có lần chạy nào kể từ khi khởi động. Nói 'chạy kiểm tra' để bắt đầu."
+        return f"Lần chạy gần nhất (phiên này): {_state['last_run']} — {_state['last_result']}."
+    # Chưa chạy trong phiên này → soi Sheet xem đã có data lịch sử chưa (sống sót qua restart)
+    try:
+        tab, _, rows = sheet_store.read_results(1)
+        if tab and rows:
+            return (f"Phiên server này chưa tự chạy, nhưng Sheet đã có dữ liệu (tab {tab}). "
+                    "Hỏi 'phân tích PageSpeed' để xem điểm, hoặc 'chạy kiểm tra' để đo mới.")
+    except Exception:  # noqa: BLE001
+        pass
+    return "Chưa có lần chạy nào. Nói 'chạy kiểm tra' để bắt đầu."
 
 
 def _system_prompt() -> str:
@@ -734,15 +743,16 @@ def _unified_prompt() -> str:
         '  + tháng TƯƠNG LAI → {"action":"reply","text":"<từ chối dí dỏm đúng tính cách: tháng đó chưa tới, Đệ chưa biết du hành thời gian; mời chạy ngay hoặc xem data tháng đã có>"}\n'
         '  + tháng hiện tại hoặc không nêu tháng → {"action":"run_check"}\n'
         '  + KHÔNG RÕ tháng nào/năm nào (vd nói "tháng 12" khi chưa rõ năm) → {"action":"reply","text":"<hỏi lại cho rõ tháng/năm>"} — đừng đoán.\n'
-        '- Phân tích KẾT QUẢ PageSpeed (điểm, score, LCP/CLS, trang nhanh/chậm): {"action":"query_results"} — thêm "month":"YYYY-MM" nếu người dùng chỉ định tháng\n'
+        '- Phân tích KẾT QUẢ PageSpeed (điểm, score, LCP/CLS, trang nhanh/chậm, "pagespeed/web có ỔN/TỐT không", "tình hình/sức khoẻ web thế nào"): {"action":"query_results"} — thêm "month":"YYYY-MM" nếu người dùng chỉ định tháng. "ổn/tốt/khoẻ không" = đánh giá ĐIỂM thực tế → query_results, KHÔNG phải status.\n'
         '- Danh sách URL theo dõi: {"action":"list_urls"}\n'
         '- Thêm URL: {"action":"add_url","url":"<url>"}\n'
         '- Xóa URL: {"action":"remove_url","url":"<url hoặc từ khóa>"}\n'
         '- Đổi lịch PageSpeed: {"action":"set_schedule","schedule_mode":"daily|weekly|monthly","schedule_time":"HH:MM","schedule_day_of_month":<1-28>,"schedule_weekday":"<thứ>"} (chỉ kèm field người dùng nêu)\n'
         '- Chạy báo cáo SEO 1 tháng: {"action":"run_report","year":<năm>,"month":<1-12>} (bỏ year/month → tháng vừa rồi)\n'
         '- Chạy báo cáo SEO NHIỀU tháng TÁCH RIÊNG TỪNG THÁNG, mỗi tháng tự so với THÁNG LIỀN TRƯỚC (dùng khi user nói "so sánh từng tháng"/"tháng sau so tháng trước"/"backfill theo tháng"): {"action":"run_report","months":[{"year":2026,"month":3},{"year":2026,"month":4},...]}. KHÁC với seo_range (chỉ 1 kỳ + so với kỳ liền trước).\n'
-        '- Phân tích số liệu SEO (traffic, views, users, clicks, impressions): {"action":"seo_query","month":"YYYY-MM hoặc bỏ"} '
-        'hoặc nhiều tháng/xu hướng: {"action":"seo_query","months":["2026-01",...]} (tất cả: "months":"all")\n'
+        '- Phân tích số liệu SEO (traffic, views, users, clicks, impressions, "tình hình/sức khoẻ SEO", "SEO/traffic có ỔN/TỐT không", "SEO thế nào/ra sao"): {"action":"seo_query","month":"YYYY-MM hoặc bỏ"} '
+        'hoặc nhiều tháng/xu hướng: {"action":"seo_query","months":["2026-01",...]} (tất cả: "months":"all"). '
+        '"tình hình/ổn không/tốt không" về SEO = phân tích số liệu đã có → seo_query, KHÔNG phải status. Bỏ "month" thì Đệ lấy tháng mới nhất đã có.\n'
         '- Các tháng có báo cáo SEO: {"action":"list_months"}\n'
         '- Báo cáo SEO theo KHOẢNG THỜI GIAN tự nhiên ("3 tháng gần nhất", "tuần trước", "quý 1 2026", "từ 01/05 đến 12/06", "từ đầu năm đến nay", "cả năm 2025", "năm ngoái", "6 tháng đầu năm"...): '
         '{"action":"seo_range","start":"YYYY-MM-DD","end":"YYYY-MM-DD"} — TỰ TÍNH ngày từ hôm nay. '
@@ -751,12 +761,14 @@ def _unified_prompt() -> str:
         'Nếu input mơ hồ không tính được ngày → đừng đoán, dùng {"action":"reply"} hỏi lại.\n'
         'LỌC URL: nếu user muốn chỉ một nhóm URL (vd "các url chứa /tutorial", "bài blog", "trang /product"), THÊM field "url_contains":"<từ khóa>" vào run_report HOẶC seo_range. Bỏ field này nếu xét toàn bộ.\n'
         '- Người dùng XÁC NHẬN đề xuất ngay trước đó ("ok", "đồng ý", "chạy đi"): {"action":"confirm"}\n'
-        '- Danh sách campaign Google Ads: {"action":"ads_list"}\n'
-        '- Hiệu suất/chi tiêu/CPA Google Ads: {"action":"ads_perf","days":<số ngày, mặc định 7>} '
+        '- Danh sách campaign Google Ads (CHỈ khi hỏi "liệt kê/có những campaign nào"): {"action":"ads_list"}\n'
+        '- Hiệu suất/chi tiêu/CPA/CTR Google Ads, HOẶC "tình hình/hiệu quả campaigns", "ads ổn không", "quảng cáo thế nào": {"action":"ads_perf","days":<số ngày, mặc định 7>} '
         'hoặc khoảng thời gian tự nhiên ("ads tháng 5", "chi tiêu từ 01/05 đến 31/05", "quảng cáo quý 1"): '
         '{"action":"ads_perf","start":"YYYY-MM-DD","end":"YYYY-MM-DD"} — tự tính ngày như seo_range\n'
         '- Trạng thái hệ thống: {"action":"status"}\n'
         '- HƯỚNG DẪN / HỎI VỀ NĂNG LỰC ("DeCho làm được gì", "có tính năng nào", "làm sao thêm URL", "đổi lịch ở đâu", "LCP là gì", "score bao nhiêu là tốt", "lọc URL được không"): {"action":"help"}\n'
+        '- TÌM TRÊN WEB (thông tin NGOÀI dữ liệu nội bộ: tin tức/cập nhật mới, đối thủ, xu hướng thị trường, "best practice mới nhất", giá dịch vụ bên ngoài, sự kiện sau tháng 5/2025): {"action":"web_search","query":"<từ khoá tìm kiếm súc tích>"}\n'
+        '- ĐỌC 1 URL cụ thể (người dùng dán link hoặc nói "đọc/tóm tắt trang này"): {"action":"web_fetch","url":"<url>"}\n'
         '- Còn lại: {"action":"reply","text":"<trả lời ngắn>"}\n'
         "Phân biệt: kiểm tra/điểm/score/LCP/CLS/pagespeed → PageSpeed; báo cáo/traffic/clicks/GSC/GA4/SEO → SEO."
     ) + _persona()
@@ -781,6 +793,9 @@ def _capabilities() -> str:
         "- Danh sách campaign, hiệu suất/chi tiêu/CTR/CPA theo N ngày hoặc khoảng ngày tự nhiên: 'chi tiêu ads tháng 5', 'CPA 30 ngày'. Lọc ngày bằng lời hoặc bằng date picker.\n"
         "## Cấu hình (menu Cấu hình)\n"
         "- Thêm/xóa URL theo dõi, đổi lịch PageSpeed (daily/weekly/monthly + giờ), đổi lịch & URL theo dõi SEO — chỉnh bằng lời ('thêm https://...', 'đổi lịch sang daily 8h') hoặc trong trang Cấu hình. Lưu là áp dụng ngay + đồng bộ Google Sheet.\n"
+        "## Tìm & đọc web\n"
+        "- Tìm thông tin NGOÀI dữ liệu nội bộ (tin mới, đối thủ, xu hướng, best practice): 'tìm trên mạng ...', 'tin mới nhất về ...'. Trả lời kèm trích nguồn.\n"
+        "- Đọc/tóm tắt một URL cụ thể: dán link và nói 'đọc/tóm tắt trang này'.\n"
         "## Khác\n"
         "- Trí nhớ dài hạn (nhớ sở thích/URL Đại ca quan tâm qua các phiên), trạng thái hệ thống, đổi model AI ở header.\n"
         "GIẢI THÍCH CHỈ SỐ (nếu được hỏi): LCP (Largest Contentful Paint) tốt <2.5s; CLS (độ giật layout) tốt <0.1; FCP <1.8s; TBT <200ms; điểm PageSpeed ≥90 xanh/tốt, 50-89 cần cải thiện, <50 kém. Traffic: clicks (GSC) = lượt bấm từ tìm kiếm, impressions = lượt hiển thị, views/users (GA4).\n"
@@ -868,6 +883,8 @@ def _all_keyword_intent(message: str) -> dict | None:
     m = message.lower()
     if m.strip() in ("ok", "oke", "okay", "đồng ý", "dong y", "chạy đi", "chay di", "xác nhận", "xac nhan", "confirm", "yes", "lgtm"):
         return {"action": "confirm"}
+    _health = any(k in m for k in ("ổn không", "on khong", "tốt không", "tot khong", "khoẻ không", "khoe khong",
+                                   "tình hình", "tinh hinh", "thế nào", "the nao", "ra sao", "ổn chứ", "hiệu quả"))
     # Hỏi về năng lực / hướng dẫn → help (grounded)
     if (any(k in m for k in ("làm được gì", "lam duoc gi", "làm được những gì", "giúp được gì", "giup duoc gi",
                              "tính năng", "tinh nang", "chức năng", "chuc nang", "hướng dẫn", "huong dan",
@@ -878,12 +895,25 @@ def _all_keyword_intent(message: str) -> dict | None:
                  and any(k in m for k in ("lcp", "cls", "fcp", "tbt", "inp", "score", "điểm", "impression",
                  "clicks", "views", "users", "ctr", "cpa", "core web", "web vitals"))))):
         return {"action": "help"}
+    # Đọc URL cụ thể khi user dán link + có ý "đọc/tóm tắt/xem"
+    import re as _ref2
+    mu = _ref2.search(r"https?://\S+", message)
+    if mu and any(k in m for k in ("đọc", "doc", "tóm tắt", "tom tat", "xem", "phân tích trang", "nội dung", "noi dung", "bài này", "trang này", "link này")):
+        return {"action": "web_fetch", "url": mu.group(0)}
+    # Tìm web — chỉ khi có ý định tìm kiếm rõ ràng
+    if any(k in m for k in ("tìm trên mạng", "tìm trên web", "search web", "google giúp",
+                            "tra google", "tin mới nhất về", "cập nhật mới nhất về", "tra cứu trên mạng",
+                            "lên mạng tìm", "tìm giúp trên internet")):
+        import re as _re4
+        q = _re4.sub(r"(?i)(tìm trên mạng|tìm trên web|search web|google giúp|tra google|tra cứu trên mạng|lên mạng tìm|tìm giúp trên internet|giúp tôi|giúp đệ|cho tôi)", "", message).strip(" :,")
+        return {"action": "web_search", "query": q or message}
     rng = _parse_range_vi(m)
     if rng and any(k in m for k in ("seo", "traffic", "báo cáo", "clicks", "gsc", "ga4")):
         uc = _parse_url_contains(message)
         return {**rng, **({"url_contains": uc} if uc else {})}
     if any(k in m for k in ("ads", "campaign", "quảng cáo", "cpa", "chi tiêu", "spend", "ngân sách")):
-        if any(k in m for k in ("danh sách", "list", "những campaign", "campaign nào đang")):
+        if (any(k in m for k in ("danh sách", "list", "những campaign", "campaign nào đang", "liệt kê"))
+                and not _health):
             return {"action": "ads_list"}
         if rng:  # khoảng thời gian tự nhiên ("tháng 5", "quý 1", "từ đầu năm"...) → lọc ads theo range
             return {"action": "ads_perf", "start": rng["start"], "end": rng["end"]}
@@ -901,6 +931,12 @@ def _all_keyword_intent(message: str) -> dict | None:
         return {"action": "ads_perf", "days": int(dm.group(1)) if dm else 7}
     psiish = any(k in m for k in ("lcp", "cls", "fcp", "tbt", "inp", "ttfb", "score", "điểm",
                                   "pagespeed", "kiểm tra", "web vitals", "chậm", "nhanh"))
+    # "SEO/traffic ổn không, tình hình SEO thế nào" → phân tích số liệu SEO
+    if _health and any(k in m for k in ("seo", "traffic", "clicks", "gsc", "ga4", "impression", "views")):
+        return {"action": "seo_query"}
+    # "pagespeed/web ổn không, tốt không, tình hình thế nào" → phân tích điểm thực tế
+    if _health and any(k in m for k in ("pagespeed", "web", "trang", "tốc độ")):
+        return {"action": "query_results"}
     seoish = any(k in m for k in ("seo", "traffic", "clicks", "gsc", "ga4", "impression",
                                   "báo cáo", "views", "users"))
     kw_seo = _seo_keyword_intent(message)
@@ -993,7 +1029,8 @@ async def agent_chat_stream(req: ChatStreamRequest):
                   "set_schedule": "Đổi lịch PageSpeed", "run_report": "Chạy báo cáo SEO", "seo_range": "Xác định khoảng thời gian SEO", "confirm": "Xác nhận & thực thi",
                   "seo_query": "Phân tích số liệu SEO", "list_months": "Các tháng có báo cáo SEO",
                   "ads_list": "Danh sách campaign Google Ads", "ads_perf": "Phân tích hiệu suất Google Ads",
-                  "status": "Trạng thái hệ thống", "help": "Hướng dẫn năng lực", "reply": "Trả lời"}
+                  "status": "Trạng thái hệ thống", "help": "Hướng dẫn năng lực",
+                  "web_search": "Tìm trên web", "web_fetch": "Đọc trang web", "reply": "Trả lời"}
         yield ev({"type": "step", "text": f"⚙️ Action: {labels.get(action, action)}"})
 
         async def stream_analysis(system_prompt: str):
@@ -1053,6 +1090,67 @@ async def agent_chat_stream(req: ChatStreamRequest):
         if action == "help":
             yield ev({"type": "step", "text": "📖 Tra năng lực DeCho..."})
             async for chunk in stream_analysis(_help_prompt()):
+                yield chunk
+            yield ev({"type": "done"})
+            return
+
+        # ── Tìm trên web (grounded theo kết quả search, có trích nguồn) ──
+        if action == "web_search":
+            query = str(data.get("query") or req.message).strip()
+            yield ev({"type": "step", "text": f"🌐 Tìm web: {query}"})
+            results = await asyncio.to_thread(web_search.search, query, 5)
+            if not results:
+                yield ev({"type": "final", "text": "Đệ tìm web không ra kết quả (hoặc chưa bật được tìm kiếm). Đại ca thử từ khoá khác, hoặc kiểm tra cấu hình TAVILY_API_KEY nhé."})
+                yield ev({"type": "done"})
+                return
+            for r in results[:5]:
+                yield ev({"type": "step", "text": f"• {r['title'][:70]}"})
+            yield ev({"type": "step", "text": f"🧠 Tổng hợp ({model})..."})
+            src = "\n\n".join(f"[{i+1}] {r['title']}\nURL: {r['url']}\n{r['snippet']}"
+                              for i, r in enumerate(results))
+            prompt = (
+                "Người dùng hỏi: " + req.message + "\n\n"
+                "KẾT QUẢ TÌM KIẾM WEB (chỉ dựa trên đây, KHÔNG thêm thông tin ngoài, KHÔNG bịa):\n\n"
+                + src +
+                "\n\nTrả lời câu hỏi bằng tiếng Việt, súc tích, dựa DUY NHẤT trên kết quả trên. "
+                "Trích nguồn bằng [số] sau mỗi ý. Cuối câu trả lời liệt kê 'Nguồn:' kèm URL. "
+                "Nếu kết quả không đủ để trả lời thì nói thẳng. KHÔNG dùng LaTeX. /no_think"
+            ) + _persona()
+            async for chunk in stream_analysis(prompt):
+                yield chunk
+            yield ev({"type": "done"})
+            return
+
+        # ── Đọc 1 URL cụ thể (grounded theo nội dung trang) ──
+        if action == "web_fetch":
+            url = str(data.get("url") or "").strip()
+            if not url:
+                mu = _re.search(r"https?://\S+", req.message)
+                url = mu.group(0) if mu else ""
+            if not url:
+                yield ev({"type": "final", "text": "Đại ca dán link cụ thể để Đệ đọc nha (vd: https://...)."})
+                yield ev({"type": "done"})
+                return
+            yield ev({"type": "step", "text": f"🌐 Đọc trang: {url[:70]}"})
+            try:
+                page = await asyncio.to_thread(web_search.fetch_url, url, 6000)
+            except Exception as e:  # noqa: BLE001
+                yield ev({"type": "error", "text": f"❌ Đọc trang không được: {type(e).__name__}: {e}"})
+                yield ev({"type": "done"})
+                return
+            if not (page.get("text") or "").strip():
+                yield ev({"type": "final", "text": "Trang này Đệ tải về nhưng không trích được nội dung (có thể render bằng JS). Đại ca thử URL bài viết trực tiếp nhé."})
+                yield ev({"type": "done"})
+                return
+            yield ev({"type": "step", "text": f"🧠 Tổng hợp ({model})..."})
+            prompt = (
+                "Người dùng yêu cầu: " + req.message + "\n\n"
+                f"NỘI DUNG TRANG ĐÃ TẢI ({page.get('title') or url}):\nURL: {url}\n\n"
+                + page["text"] +
+                "\n\nDựa DUY NHẤT trên nội dung trang trên để trả lời/tóm tắt bằng tiếng Việt, súc tích. "
+                "KHÔNG bịa thông tin ngoài trang. Cuối ghi 'Nguồn: " + url + "'. KHÔNG dùng LaTeX. /no_think"
+            ) + _persona()
+            async for chunk in stream_analysis(prompt):
                 yield chunk
             yield ev({"type": "done"})
             return
@@ -1750,8 +1848,15 @@ def _seo_status_text() -> str:
     if _seo_state["running"]:
         return "🔄 Đang chạy báo cáo SEO..."
     if _seo_state["last_run"]:
-        return f"Lần chạy gần nhất: {_seo_state['last_run']} — {_seo_state['last_result']}"
-    return "Chưa có lần chạy nào kể từ khi khởi động. Nói 'chạy báo cáo' để bắt đầu."
+        return f"Lần chạy gần nhất (phiên này): {_seo_state['last_run']} — {_seo_state['last_result']}"
+    try:
+        tabs = _seo_list_tabs()
+        if tabs:
+            return (f"Phiên server này chưa tự chạy, nhưng SEO Sheet đã có {len(tabs)} tháng "
+                    f"({tabs[-1]} mới nhất). Hỏi 'phân tích SEO' để xem, hoặc 'chạy báo cáo' để lấy mới.")
+    except Exception:  # noqa: BLE001
+        pass
+    return "Chưa có báo cáo nào. Nói 'chạy báo cáo' để bắt đầu."
 
 
 @app.post("/api/seo/chat/stream")
