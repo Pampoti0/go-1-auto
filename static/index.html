@@ -10,6 +10,7 @@
 <script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.5/babel.min.js"></script>
 <script src="https://cdn.tailwindcss.com"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/particles.js/2.0.0/particles.min.js"></script>
 <script src="https://unpkg.com/three@0.128.0/build/three.min.js"></script>
 <script src="https://unpkg.com/three@0.128.0/examples/js/loaders/GLTFLoader.js"></script>
 <script src="https://unpkg.com/three@0.128.0/examples/js/controls/OrbitControls.js"></script>
@@ -43,7 +44,30 @@ svg rect.bar{transition:width .6s cubic-bezier(.2,.8,.2,1)}
 </style>
 </head>
 <body class="bg-slate-100 dark:bg-slate-950 text-slate-800 dark:text-slate-100">
+<div id="particles-js" style="position:fixed;inset:0;z-index:-1;pointer-events:none"></div>
 <div id="root"></div>
+<script>
+(function initParticles(){
+  if(!window.particlesJS){return setTimeout(initParticles,200)}
+  particlesJS('particles-js',{
+    particles:{
+      number:{value:200,density:{enable:true,value_area:800}},
+      color:{value:['#ffffff','#dbeafe','#fde68a','#bfdbfe']},
+      shape:{type:'circle'},
+      opacity:{value:0.9,random:true,anim:{enable:true,speed:1.4,opacity_min:0.05,sync:false}},
+      size:{value:1.8,random:true,anim:{enable:true,speed:2,size_min:0.3,sync:false}},
+      line_linked:{enable:false},
+      move:{enable:true,speed:0.35,direction:'none',random:true,straight:false,out_mode:'out',bounce:false}
+    },
+    interactivity:{detect_on:'window',events:{
+      onhover:{enable:true,mode:'bubble'},
+      onclick:{enable:true,mode:'repulse'},
+      resize:true
+    },modes:{bubble:{distance:140,size:4,duration:2,opacity:1},repulse:{distance:120,duration:0.4}}},
+    retina_detect:true
+  });
+})();
+</script>
 
 <script type="text/babel" data-presets="react">
 const {useState,useEffect,useRef,useCallback} = React;
