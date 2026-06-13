@@ -769,6 +769,10 @@ def _unified_prompt() -> str:
         '- HƯỚNG DẪN / HỎI VỀ NĂNG LỰC ("DeCho làm được gì", "có tính năng nào", "làm sao thêm URL", "đổi lịch ở đâu", "LCP là gì", "score bao nhiêu là tốt", "lọc URL được không"): {"action":"help"}\n'
         '- TÌM TRÊN WEB (thông tin NGOÀI dữ liệu nội bộ: tin tức/cập nhật mới, đối thủ, xu hướng thị trường, "best practice mới nhất", giá dịch vụ bên ngoài, sự kiện sau tháng 5/2025): {"action":"web_search","query":"<từ khoá tìm kiếm súc tích>"}\n'
         '- ĐỌC 1 URL cụ thể (người dùng dán link hoặc nói "đọc/tóm tắt trang này"): {"action":"web_fetch","url":"<url>"}\n'
+        '- ƯU TIÊN TỐI ƯU / trang nào nên fix trước ("nên tối ưu trang nào", "trang nào vừa chậm vừa nhiều traffic", "ưu tiên fix"): {"action":"priority_fix"}\n'
+        '- KẾ HOẠCH HÀNH ĐỘNG ("tuần này nên làm gì", "cần làm gì", "lên kế hoạch", "to-do", "ưu tiên công việc"): {"action":"action_plan"}\n'
+        '- CHẨN ĐOÁN SỤT GIẢM ("tại sao clicks/traffic/views giảm", "vì sao tụt", "trang nào kéo xuống", "phân tích nguyên nhân giảm"): {"action":"diagnose_drop"}\n'
+        '- GỢI Ý CÁCH SỬA trang chậm ("làm sao tăng tốc", "cách tối ưu trang X", "fix LCP/CLS thế nào", "trang chậm sửa sao"): {"action":"fix_suggest","url":"<path nếu có>"}\n'
         '- Còn lại: {"action":"reply","text":"<trả lời ngắn>"}\n'
         "Phân biệt: kiểm tra/điểm/score/LCP/CLS/pagespeed → PageSpeed; báo cáo/traffic/clicks/GSC/GA4/SEO → SEO."
     ) + _persona()
@@ -793,6 +797,11 @@ def _capabilities() -> str:
         "- Danh sách campaign, hiệu suất/chi tiêu/CTR/CPA theo N ngày hoặc khoảng ngày tự nhiên: 'chi tiêu ads tháng 5', 'CPA 30 ngày'. Lọc ngày bằng lời hoặc bằng date picker.\n"
         "## Cấu hình (menu Cấu hình)\n"
         "- Thêm/xóa URL theo dõi, đổi lịch PageSpeed (daily/weekly/monthly + giờ), đổi lịch & URL theo dõi SEO — chỉnh bằng lời ('thêm https://...', 'đổi lịch sang daily 8h') hoặc trong trang Cấu hình. Lưu là áp dụng ngay + đồng bộ Google Sheet.\n"
+        "## Insight & hành động (gộp PSI + SEO)\n"
+        "- Ưu tiên tối ưu: 'nên tối ưu trang nào trước' → danh sách trang vừa chậm vừa nhiều traffic.\n"
+        "- Kế hoạch tuần: 'tuần này nên làm gì' → to-do xếp ưu tiên từ alerts + xu hướng.\n"
+        "- Chẩn đoán sụt giảm: 'tại sao clicks/traffic giảm' → trang nào kéo xuống + nguyên nhân khả dĩ.\n"
+        "- Gợi ý cách sửa trang chậm: 'cách tăng tốc trang X' → hành động cụ thể theo LCP/CLS/TBT.\n"
         "## Tìm & đọc web\n"
         "- Tìm thông tin NGOÀI dữ liệu nội bộ (tin mới, đối thủ, xu hướng, best practice): 'tìm trên mạng ...', 'tin mới nhất về ...'. Trả lời kèm trích nguồn.\n"
         "- Đọc/tóm tắt một URL cụ thể: dán link và nói 'đọc/tóm tắt trang này'.\n"
@@ -885,6 +894,19 @@ def _all_keyword_intent(message: str) -> dict | None:
         return {"action": "confirm"}
     _health = any(k in m for k in ("ổn không", "on khong", "tốt không", "tot khong", "khoẻ không", "khoe khong",
                                    "tình hình", "tinh hinh", "thế nào", "the nao", "ra sao", "ổn chứ", "hiệu quả"))
+    # Insight xuyên mảng
+    if any(k in m for k in ("ưu tiên", "uu tien", "nên tối ưu", "nen toi uu", "fix trước", "fix truoc", "trang nào nên")):
+        return {"action": "priority_fix"}
+    if any(k in m for k in ("nên làm gì", "nen lam gi", "kế hoạch", "ke hoach", "to-do", "todo", "việc tuần", "cần làm gì", "can lam gi", "ưu tiên công việc")):
+        return {"action": "action_plan"}
+    if (any(k in m for k in ("tại sao", "tai sao", "vì sao", "vi sao", "nguyên nhân", "nguyen nhan", "kéo xuống"))
+            and any(k in m for k in ("giảm", "giam", "tụt", "tut", "drop", "rớt", "rot"))):
+        return {"action": "diagnose_drop"}
+    if (any(k in m for k in ("tăng tốc", "tang toc", "speed up"))
+            or (any(k in m for k in ("làm sao", "lam sao", "cách", "cach", "fix", "sửa", "sua", "tối ưu", "toi uu"))
+                and any(k in m for k in ("chậm", "cham", "lcp", "cls", "tbt", "pagespeed", "tốc độ", "toc do", "tốc", "toc")))):
+        uc = _parse_url_contains(message)
+        return {"action": "fix_suggest", **({"url": uc} if uc else {})}
     # Hỏi về năng lực / hướng dẫn → help (grounded)
     if (any(k in m for k in ("làm được gì", "lam duoc gi", "làm được những gì", "giúp được gì", "giup duoc gi",
                              "tính năng", "tinh nang", "chức năng", "chuc nang", "hướng dẫn", "huong dan",
@@ -1030,7 +1052,9 @@ async def agent_chat_stream(req: ChatStreamRequest, request: Request = None):
                   "seo_query": "Phân tích số liệu SEO", "list_months": "Các tháng có báo cáo SEO",
                   "ads_list": "Danh sách campaign Google Ads", "ads_perf": "Phân tích hiệu suất Google Ads",
                   "status": "Trạng thái hệ thống", "help": "Hướng dẫn năng lực",
-                  "web_search": "Tìm trên web", "web_fetch": "Đọc trang web", "reply": "Trả lời"}
+                  "web_search": "Tìm trên web", "web_fetch": "Đọc trang web",
+                  "priority_fix": "Ưu tiên tối ưu", "action_plan": "Kế hoạch hành động",
+                  "diagnose_drop": "Chẩn đoán sụt giảm", "fix_suggest": "Gợi ý cách sửa", "reply": "Trả lời"}
         yield ev({"type": "step", "text": f"⚙️ Action: {labels.get(action, action)}"})
 
         async def stream_analysis(system_prompt: str):
@@ -1105,16 +1129,32 @@ async def agent_chat_stream(req: ChatStreamRequest, request: Request = None):
                 return
             for r in results[:5]:
                 yield ev({"type": "step", "text": f"• {r['title'][:70]}"})
+            # Đọc nội dung 3 trang đầu (snippet thường quá ngắn để trả lời chi tiết)
+            yield ev({"type": "step", "text": "📖 Đọc nội dung các trang đầu..."})
+            top = results[:3]
+
+            async def _fetch(u):
+                try:
+                    return await asyncio.to_thread(web_search.fetch_url, u, 3000)
+                except Exception:  # noqa: BLE001
+                    return None
+            pages = await asyncio.gather(*[_fetch(r["url"]) for r in top])
             yield ev({"type": "step", "text": f"🧠 Tổng hợp ({model})..."})
-            src = "\n\n".join(f"[{i+1}] {r['title']}\nURL: {r['url']}\n{r['snippet']}"
-                              for i, r in enumerate(results))
+            parts = []
+            for i, r in enumerate(results):
+                blk = f"[{i+1}] {r['title']}\nURL: {r['url']}\n{r['snippet']}"
+                if i < len(pages) and pages[i] and pages[i].get("text"):
+                    blk += "\nNỘI DUNG TRANG:\n" + pages[i]["text"]
+                parts.append(blk)
+            src = "\n\n".join(parts)
             prompt = (
                 "Người dùng hỏi: " + req.message + "\n\n"
-                "KẾT QUẢ TÌM KIẾM WEB (chỉ dựa trên đây, KHÔNG thêm thông tin ngoài, KHÔNG bịa):\n\n"
+                "KẾT QUẢ TÌM KIẾM + NỘI DUNG TRANG (chỉ dựa trên đây, KHÔNG thêm thông tin ngoài, KHÔNG bịa):\n\n"
                 + src +
-                "\n\nTrả lời câu hỏi bằng tiếng Việt, súc tích, dựa DUY NHẤT trên kết quả trên. "
-                "Trích nguồn bằng [số] sau mỗi ý. Cuối câu trả lời liệt kê 'Nguồn:' kèm URL. "
-                "Nếu kết quả không đủ để trả lời thì nói thẳng. KHÔNG dùng LaTeX. /no_think"
+                "\n\nTrả lời câu hỏi bằng tiếng Việt, súc tích, dựa DUY NHẤT trên dữ liệu trên — "
+                "ưu tiên thông tin cụ thể trong 'NỘI DUNG TRANG'. Trích nguồn bằng [số] sau mỗi ý. "
+                "Cuối câu trả lời liệt kê 'Nguồn:' kèm URL. "
+                "Nếu dữ liệu không đủ để trả lời thì nói thẳng. KHÔNG dùng LaTeX. /no_think"
             ) + _persona()
             async for chunk in stream_analysis(prompt):
                 yield chunk
@@ -1150,6 +1190,73 @@ async def agent_chat_stream(req: ChatStreamRequest, request: Request = None):
                 "\n\nDựa DUY NHẤT trên nội dung trang trên để trả lời/tóm tắt bằng tiếng Việt, súc tích. "
                 "KHÔNG bịa thông tin ngoài trang. Cuối ghi 'Nguồn: " + url + "'. KHÔNG dùng LaTeX. /no_think"
             ) + _persona()
+            async for chunk in stream_analysis(prompt):
+                yield chunk
+            yield ev({"type": "done"})
+            return
+
+        # ── Insight xuyên mảng: ưu tiên tối ưu / kế hoạch / chẩn đoán / gợi ý sửa ──
+        if action in ("priority_fix", "action_plan", "diagnose_drop", "fix_suggest"):
+            yield ev({"type": "step", "text": "📊 Đọc & gộp dữ liệu PSI + SEO..."})
+            j = await asyncio.to_thread(_insight_join)
+            rows = j["rows"]
+            if not rows:
+                yield ev({"type": "final", "text": "Đệ chưa có đủ dữ liệu PSI/SEO để phân tích — chạy 'kiểm tra PageSpeed' và 'báo cáo SEO' trước nha Đại ca."})
+                yield ev({"type": "done"})
+                return
+            fr = lambda v: ("" if v == "" or v is None else str(v))
+            ctxhdr = f"(PSI lần chạy {j['run'] or '—'} · SEO tháng {j['month'] or '—'})"
+
+            if action == "priority_fix":
+                cand = [r for r in rows if isinstance(r["psiM"], (int, float))]
+                cand.sort(key=lambda r: r["priority"], reverse=True)
+                tbl = "\n".join(f"{r['path']} | PSI mobile {fr(r['psiM'])}/desktop {fr(r['psiD'])} | "
+                                f"views {int(r['views'])} | clicks {int(r['clicks'])} | LCP {fr(r['lcp'])} CLS {fr(r['cls'])} | ưu_tiên {r['priority']}"
+                                for r in cand[:18])
+                instr = ("Dựa DUY NHẤT trên bảng dưới, lập DANH SÁCH ƯU TIÊN TỐI ƯU: trang nào vừa CHẬM (PSI thấp) "
+                         "vừa NHIỀU traffic thì xếp trước (cột ưu_tiên = traffic × độ chậm, càng cao càng nên fix sớm). "
+                         "Nêu 5-8 trang đầu kèm lý do ngắn (điểm + traffic) và việc nên làm gọn.")
+            elif action == "diagnose_drop":
+                def chnum(x):
+                    try:
+                        return float(str(x).replace("%", ""))
+                    except (ValueError, TypeError):
+                        return 0.0
+                drops = [r for r in rows if chnum(r["clicksCh"]) < 0 or chnum(r["viewsCh"]) < 0]
+                drops.sort(key=lambda r: (chnum(r["clicksCh"]) * (r["clicks"] or 1)))
+                tbl = "\n".join(f"{r['path']} | clicks {int(r['clicks'])} (Δ {fr(r['clicksCh'])}%) | views {int(r['views'])} (Δ {fr(r['viewsCh'])}%) | impr {int(r['impr'])}"
+                                for r in drops[:18]) or "(không có trang nào tụt so với kỳ trước)"
+                instr = ("Dựa DUY NHẤT trên bảng dưới (Δ% = so với tháng trước), CHẨN ĐOÁN vì sao traffic/clicks giảm: "
+                         "chỉ ra 3-6 trang kéo xuống mạnh nhất (tụt nhiều × lưu lượng lớn), nhận định khả năng nguyên nhân "
+                         "(mất thứ hạng, giảm hiển thị, mùa vụ...) và gợi ý kiểm tra. Nếu không có trang tụt thì nói traffic ổn định/tăng.")
+            elif action == "fix_suggest":
+                want = _path_only(str(data.get("url") or "")) if data.get("url") else ""
+                sel = [r for r in rows if want and want in r["path"]] if want else []
+                if not sel:
+                    sel = [r for r in rows if isinstance(r["psiM"], (int, float)) and r["psiM"] < 60]
+                    sel.sort(key=lambda r: r["psiM"])
+                tbl = "\n".join(f"{r['path']} | PSI mobile {fr(r['psiM'])}/desktop {fr(r['psiD'])} | LCP {fr(r['lcp'])}ms CLS {fr(r['cls'])} TBT {fr(r['tbt'])}ms"
+                                for r in sel[:12]) or "(không có trang nào dưới ngưỡng — web đang khá ổn)"
+                instr = ("Dựa trên chỉ số dưới, GỢI Ý CÁCH SỬA cụ thể cho từng trang chậm: chỉ rõ chỉ số nào đang tệ "
+                         "(LCP cao → tối ưu ảnh/hero, preload; CLS cao → set kích thước ảnh/khung, tránh layout shift; "
+                         "TBT cao → giảm/defer JS, code-split). Mỗi trang 1-2 hành động ưu tiên. Bám số liệu, đừng bịa.")
+            else:  # action_plan
+                slow = sorted([r for r in rows if isinstance(r["psiM"], (int, float))], key=lambda r: r["psiM"])[:6]
+                def chnum(x):
+                    try:
+                        return float(str(x).replace("%", ""))
+                    except (ValueError, TypeError):
+                        return 0.0
+                drops = sorted([r for r in rows if chnum(r["clicksCh"]) < 0], key=lambda r: chnum(r["clicksCh"]))[:6]
+                tbl = ("TRANG CHẬM NHẤT:\n" + ("\n".join(f"- {r['path']}: PSI {fr(r['psiM'])}, traffic {int(r['views']+r['clicks'])}" for r in slow) or "- (không có)")
+                       + "\n\nTRANG TỤT TRAFFIC:\n" + ("\n".join(f"- {r['path']}: clicks Δ {fr(r['clicksCh'])}%, views Δ {fr(r['viewsCh'])}%" for r in drops) or "- (không có)"))
+                instr = ("Dựa DUY NHẤT trên dữ liệu dưới, lập KẾ HOẠCH HÀNH ĐỘNG TUẦN cho marketer: 4-6 việc xếp theo ƯU TIÊN "
+                         "(việc tác động lớn — trang chậm mà nhiều traffic, hoặc trang tụt mạnh — làm trước), mỗi việc kèm lý do "
+                         "ngắn dựa số liệu. Cuối cùng 1 câu nhắc lịch tự động nếu hợp lý. Không bịa số.")
+
+            yield ev({"type": "step", "text": f"🧠 Tổng hợp {ctxhdr} ({model})..."})
+            prompt = (f"Bạn là DeCho — agent marketing all-in-one. {instr}\n\nDỮ LIỆU {ctxhdr}:\n{tbl}\n\n"
+                      "TIẾNG VIỆT, súc tích, **đậm** + gạch đầu dòng, KHÔNG LaTeX, trả lời trực tiếp. /no_think") + _knowledge() + _persona()
             async for chunk in stream_analysis(prompt):
                 yield chunk
             yield ev({"type": "done"})
@@ -1622,6 +1729,53 @@ def decho_ask(req: DechoAskRequest, request: Request = None):
         return {"error": f"{type(e).__name__}: {e}"}
 
 
+class VisionRequest(BaseModel):
+    image: str               # data URL (data:image/...;base64,...)
+    question: str | None = None
+    model: str | None = None
+    user_id: str | None = None
+    session_id: str | None = None
+
+
+@app.post("/api/decho/vision")
+def decho_vision(req: VisionRequest):
+    """DeCho đọc ảnh (OpenAI-compatible multimodal). Cần model hỗ trợ vision trên MaaS."""
+    if not (MAAS_API_KEY and MAAS_BASE_URL):
+        return {"error": "Chưa cấu hình MAAS_API_KEY / MAAS_BASE_URL."}
+    if not str(req.image).startswith("data:image"):
+        return {"error": "Ảnh không hợp lệ."}
+    import httpx
+
+    model = os.getenv("MAAS_VISION_MODEL") or (req.model if req.model in ALLOWED_MODELS else MAAS_MODEL)
+    q = (req.question or "").strip() or "Đọc và mô tả nội dung ảnh này giúp tôi, nêu các chi tiết/số liệu quan trọng."
+    system = ("Bạn là DeCho — trợ lý AI. Người dùng gửi 1 ảnh; hãy xem ảnh và trả lời câu hỏi của họ "
+              "bằng tiếng Việt, súc tích, bám vào những gì THẬT SỰ thấy trong ảnh, không bịa. KHÔNG dùng LaTeX. /no_think"
+              ) + _rules() + _persona()
+    try:
+        r = httpx.post(
+            f"{MAAS_BASE_URL}/chat/completions",
+            json={"model": model, "temperature": 0.3, "max_tokens": 1500,
+                  "messages": [{"role": "system", "content": system},
+                               {"role": "user", "content": [
+                                   {"type": "text", "text": q},
+                                   {"type": "image_url", "image_url": {"url": req.image}}]}]},
+            headers={"Authorization": f"Bearer {MAAS_API_KEY}"}, timeout=120)
+        if r.status_code != 200:
+            body = r.text[:200]
+            return {"error": f"Model '{model}' chưa đọc được ảnh (HTTP {r.status_code}). "
+                             f"Cần cấu hình MAAS_VISION_MODEL là model hỗ trợ ảnh. Chi tiết: {body}"}
+        msg = r.json()["choices"][0]["message"]
+        reply = _strip_think(msg.get("content") or "") or _strip_think(msg.get("reasoning_content") or "")
+        reply = reply or "Đệ nhìn ảnh nhưng chưa mô tả được gì rõ ràng 😅"
+        if memory_agent.configured() and req.user_id and req.session_id:
+            threading.Thread(target=memory_agent.add_turns_safe,
+                             args=(req.user_id, req.session_id,
+                                   [("user", f"[gửi 1 ảnh] {q}"), ("assistant", reply)]), daemon=True).start()
+        return {"reply": reply, "model": model}
+    except Exception as e:  # noqa: BLE001
+        return {"error": f"{type(e).__name__}: {e}"}
+
+
 _QUIPS_FALLBACK = [
     "Vibe check ✅ Đệ đứng đây canh số liệu, Đại ca cứ chill.",
     "Cần gì cứ gọi Đệ: PageSpeed, SEO, Google Ads — chill thôi nhưng output xịn.",
@@ -1823,6 +1977,89 @@ def _seo_results_prompt(tab: str, headers: list, rows: list) -> str:
         "(mũi tên viết là →). Trả lời trực tiếp, không suy luận dài. /no_think"
         + _knowledge() + _persona()
     )
+
+
+# ── Insight xuyên mảng: gộp PSI (lần chạy mới nhất) + SEO (tháng mới nhất) theo URL ──
+
+def _path_only(u: str) -> str:
+    import re
+    return re.sub(r"^https?://[^/]+", "", str(u or "")) or "/"
+
+
+def _psi_latest_by_path() -> tuple[dict, str | None]:
+    """{path: {MOBILE, DESKTOP, lcp, cls, tbt}} của lần chạy mới nhất."""
+    try:
+        _tab, _h, rows = sheet_store.read_results(5000)
+    except Exception:  # noqa: BLE001
+        return {}, None
+    if not rows:
+        return {}, None
+    runs = sorted({r[0] for r in rows if r})
+    last = runs[-1] if runs else None
+    out: dict = {}
+    for r in rows:
+        if not r or r[0] != last:
+            continue
+        p, st = _path_only(r[1]), (r[2] if len(r) > 2 else "")
+        try:
+            sc = float(r[3])
+        except (ValueError, IndexError):
+            sc = None
+        d = out.setdefault(p, {})
+        d[st] = sc
+        if st == "MOBILE":
+            d["lcp"] = r[5] if len(r) > 5 else ""
+            d["cls"] = r[6] if len(r) > 6 else ""
+            d["tbt"] = r[7] if len(r) > 7 else ""
+    return out, last
+
+
+def _seo_latest_by_path() -> tuple[dict, str | None]:
+    """{path: {views, users, clicks, impr, clicksCh, viewsCh}} của tháng SEO mới nhất."""
+    try:
+        tab, h, rows = _seo_read_results(None, 2000)
+    except Exception:  # noqa: BLE001
+        return {}, None
+    if not rows:
+        return {}, tab
+    idx = {c: i for i, c in enumerate(h)}
+
+    def g(r, c):
+        return r[idx[c]] if c in idx and idx[c] < len(r) else ""
+
+    def num(x):
+        try:
+            return float(str(x).replace(",", ""))
+        except (ValueError, TypeError):
+            return 0.0
+    out = {}
+    for r in rows:
+        out[_path_only(g(r, "url"))] = {
+            "views": num(g(r, "views")), "users": num(g(r, "users")),
+            "clicks": num(g(r, "clicks")), "impr": num(g(r, "impressions")),
+            "clicksCh": g(r, "clicks_change_%"), "viewsCh": g(r, "views_change_%")}
+    return out, tab
+
+
+def _insight_join() -> dict:
+    """Gộp PSI + SEO theo path; trả về data + các danh sách phục vụ phân tích."""
+    psi, run = _psi_latest_by_path()
+    seo, month = _seo_latest_by_path()
+    paths = set(psi) | set(seo)
+    rows = []
+    for p in paths:
+        ps, se = psi.get(p, {}), seo.get(p, {})
+        m = ps.get("MOBILE")
+        traffic = (se.get("views") or 0) + (se.get("clicks") or 0)
+        slow = (100 - m) / 100 if isinstance(m, (int, float)) else 0
+        rows.append({
+            "path": p, "psiM": m, "psiD": ps.get("DESKTOP"),
+            "lcp": ps.get("lcp", ""), "cls": ps.get("cls", ""), "tbt": ps.get("tbt", ""),
+            "views": se.get("views") or 0, "clicks": se.get("clicks") or 0,
+            "impr": se.get("impr") or 0, "clicksCh": se.get("clicksCh", ""), "viewsCh": se.get("viewsCh", ""),
+            "priority": round(traffic * slow),
+        })
+    return {"run": run, "month": month, "rows": rows}
 
 
 def _seo_keyword_intent(message: str) -> dict | None:
