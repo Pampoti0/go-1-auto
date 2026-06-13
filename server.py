@@ -62,12 +62,20 @@ def _md_file(env_key: str, default_name: str, header: str) -> str:
     return _md_cache[key]["text"]
 
 
+def _rules() -> str:
+    """RULE.md — NGUYÊN TẮC bất khả xâm phạm (chống bịa đặt). Ưu tiên cao nhất,
+    nhúng vào MỌI prompt (kể cả phân loại intent)."""
+    return _md_file("RULE_FILE", "RULE.md",
+                    "\n\n# ⚠️ RULES — NGUYÊN TẮC TUYỆT ĐỐI (ưu tiên trên hết, kể cả trên tính cách)\n")
+
+
 def _persona() -> str:
-    """SOUL.md — TÍNH CÁCH: nhúng vào mọi prompt có sinh văn bản cho người dùng."""
-    return _md_file("SOUL_FILE", "SOUL.md",
-                    "\n\n# PERSONALITY — áp dụng cho mọi câu trả lời dạng văn bản\n"
-                    "(khi được yêu cầu trả về JSON thì JSON vẫn phải đúng format, "
-                    "cá tính chỉ áp dụng vào nội dung text bên trong)\n")
+    """SOUL.md — TÍNH CÁCH (kèm RULE.md): nhúng vào mọi prompt có sinh văn bản cho người dùng."""
+    return _rules() + _md_file(
+        "SOUL_FILE", "SOUL.md",
+        "\n\n# PERSONALITY — áp dụng cho mọi câu trả lời dạng văn bản\n"
+        "(khi được yêu cầu trả về JSON thì JSON vẫn phải đúng format, "
+        "cá tính chỉ áp dụng vào nội dung text bên trong)\n")
 
 
 def _knowledge() -> str:
@@ -102,7 +110,7 @@ __import__("logging").getLogger("seo_agent").addHandler(_SeoLogHandler())
 __import__("logging").getLogger("seo_agent").setLevel(__import__("logging").INFO)
 
 
-def _run_seo_safe(year: int | None = None, month: int | None = None):
+def _run_seo_safe(year: int | None = None, month: int | None = None, url_contains: str | None = None):
     with _seo_lock:
         if _seo_state["running"]:
             return
@@ -111,10 +119,11 @@ def _run_seo_safe(year: int | None = None, month: int | None = None):
         import seo_agent
 
         if year and month:
-            result = seo_agent.run_for_month(year, month)
+            result = seo_agent.run_for_month(year, month, url_contains or None)
         else:
             result = seo_agent.run()
-        _seo_state["last_result"] = f"success: {result['rows']} URL → tab {result['label']}"
+        flt = f" · lọc URL chứa '{url_contains}'" if url_contains else ""
+        _seo_state["last_result"] = f"success: {result['rows']} URL → tab {result['label']}{flt}"
     except Exception as e:  # noqa: BLE001
         _seo_state["last_result"] = f"error: {type(e).__name__}: {e}"
         _seo_state["log"].append(f"[{datetime.now().strftime('%H:%M:%S')}] ❌ {type(e).__name__}: {e}")
@@ -127,7 +136,7 @@ def _run_seo_safe(year: int | None = None, month: int | None = None):
 _pending_range: dict = {}  # đề xuất date range đang chờ user xác nhận
 
 
-def _run_seo_range_safe(start: str, end: str):
+def _run_seo_range_safe(start: str, end: str, url_contains: str | None = None):
     with _seo_lock:
         if _seo_state["running"]:
             return
@@ -135,7 +144,7 @@ def _run_seo_range_safe(start: str, end: str):
     try:
         import seo_agent
 
-        result = seo_agent.run_for_range(start, end)
+        result = seo_agent.run_for_range(start, end, url_contains or None)
         t = result.get("totals", {})
 
         def _fmt(k):
@@ -145,9 +154,15 @@ def _run_seo_range_safe(start: str, end: str):
             pct = f" ({'+' if v['pct'] and v['pct'] > 0 else ''}{v['pct']}%)" if v["pct"] is not None else " (kỳ trước = 0)"
             return f"{k} **{v['cur']:,}**{pct}"
         summary = " · ".join(_fmt(k) for k in ("views", "users", "clicks", "impressions"))
+        flt = f" · lọc URL chứa '{url_contains}'" if url_contains else ""
+        top = result.get("top") or []
+        top_txt = ""
+        if top:
+            top_txt = "\n🏆 Top URL theo views: " + "; ".join(
+                f"{seo_agent.clean_url(r['url']).split('://')[-1]} ({r['views']:,} views)" for r in top[:5])
         _seo_state["last_result"] = (f"success: {result['rows']} URL → tab {result['label']} "
-                                     f"({result['days']} ngày, so sánh {result['compare']})\n"
-                                     f"📊 So với kỳ trước: {summary}\n"
+                                     f"({result['days']} ngày, so sánh {result['compare']}){flt}\n"
+                                     f"📊 So với kỳ trước: {summary}{top_txt}\n"
                                      f"Chi tiết %_change từng URL nằm trong sheet (cột tô màu xanh/đỏ).")
     except Exception as e:  # noqa: BLE001
         _seo_state["last_result"] = f"error: {type(e).__name__}: {e}"
@@ -725,7 +740,7 @@ def _unified_prompt() -> str:
         '- Xóa URL: {"action":"remove_url","url":"<url hoặc từ khóa>"}\n'
         '- Đổi lịch PageSpeed: {"action":"set_schedule","schedule_mode":"daily|weekly|monthly","schedule_time":"HH:MM","schedule_day_of_month":<1-28>,"schedule_weekday":"<thứ>"} (chỉ kèm field người dùng nêu)\n'
         '- Chạy báo cáo SEO 1 tháng: {"action":"run_report","year":<năm>,"month":<1-12>} (bỏ year/month → tháng vừa rồi)\n'
-        '- Chạy báo cáo SEO NHIỀU tháng TÁCH RIÊNG TỪNG THÁNG (mỗi tháng 1 sheet — CHỈ khi user nói rõ "từng tháng"/"backfill theo tháng"): {"action":"run_report","months":[{"year":2026,"month":1},...]}. Các cụm thời gian tự nhiên khác ("cả năm", "quý", "N tháng gần nhất") → dùng seo_range.\n'
+        '- Chạy báo cáo SEO NHIỀU tháng TÁCH RIÊNG TỪNG THÁNG, mỗi tháng tự so với THÁNG LIỀN TRƯỚC (dùng khi user nói "so sánh từng tháng"/"tháng sau so tháng trước"/"backfill theo tháng"): {"action":"run_report","months":[{"year":2026,"month":3},{"year":2026,"month":4},...]}. KHÁC với seo_range (chỉ 1 kỳ + so với kỳ liền trước).\n'
         '- Phân tích số liệu SEO (traffic, views, users, clicks, impressions): {"action":"seo_query","month":"YYYY-MM hoặc bỏ"} '
         'hoặc nhiều tháng/xu hướng: {"action":"seo_query","months":["2026-01",...]} (tất cả: "months":"all")\n'
         '- Các tháng có báo cáo SEO: {"action":"list_months"}\n'
@@ -734,6 +749,7 @@ def _unified_prompt() -> str:
         'Quy ước: "N tháng gần nhất" = N tháng TRỌN VẸN trước tháng hiện tại (vd hôm nay 2026-06-12 thì "3 tháng gần nhất" = 2026-03-01 → 2026-05-31); '
         '"N ngày gần nhất" = N ngày kết thúc hôm qua; "tuần trước" = thứ 2 → CN tuần trước. '
         'Nếu input mơ hồ không tính được ngày → đừng đoán, dùng {"action":"reply"} hỏi lại.\n'
+        'LỌC URL: nếu user muốn chỉ một nhóm URL (vd "các url chứa /tutorial", "bài blog", "trang /product"), THÊM field "url_contains":"<từ khóa>" vào run_report HOẶC seo_range. Bỏ field này nếu xét toàn bộ.\n'
         '- Người dùng XÁC NHẬN đề xuất ngay trước đó ("ok", "đồng ý", "chạy đi"): {"action":"confirm"}\n'
         '- Danh sách campaign Google Ads: {"action":"ads_list"}\n'
         '- Hiệu suất/chi tiêu/CPA Google Ads: {"action":"ads_perf","days":<số ngày, mặc định 7>} '
@@ -797,6 +813,18 @@ def _parse_range_vi(m: str) -> dict | None:
     return None
 
 
+def _parse_url_contains(message: str) -> str | None:
+    """Bắt từ khóa lọc URL: 'url chứa /tutorial', 'các trang /product', 'bài /blog'."""
+    import re
+    for pat in (r"(?:url|trang|bài|đường dẫn|path)\s*(?:nào\s*)?(?:có\s*)?chứa\s*[\"']?(/[\w\-/]+)",
+                r"chứa\s*[\"']?(/[\w\-/]+)",
+                r"(?:url|trang|bài|path)\s+(/[\w\-/]{2,})"):
+        mt = re.search(pat, message, re.I)
+        if mt:
+            return mt.group(1).rstrip("/")
+    return None
+
+
 def _all_keyword_intent(message: str) -> dict | None:
     import re as _re2
 
@@ -805,7 +833,8 @@ def _all_keyword_intent(message: str) -> dict | None:
         return {"action": "confirm"}
     rng = _parse_range_vi(m)
     if rng and any(k in m for k in ("seo", "traffic", "báo cáo", "clicks", "gsc", "ga4")):
-        return rng
+        uc = _parse_url_contains(message)
+        return {**rng, **({"url_contains": uc} if uc else {})}
     if any(k in m for k in ("ads", "campaign", "quảng cáo", "cpa", "chi tiêu", "spend", "ngân sách")):
         if any(k in m for k in ("danh sách", "list", "những campaign", "campaign nào đang")):
             return {"action": "ads_list"}
@@ -1154,12 +1183,15 @@ async def agent_chat_stream(req: ChatStreamRequest):
                 return
             p1 = d0 - _td(days=1)
             p0 = p1 - _td(days=days - 1)
+            uc = str(data.get("url_contains") or "").strip() or _parse_url_contains(req.message) or ""
             _pending_range.clear()
-            _pending_range.update({"start": d0.isoformat(), "end": d1.isoformat(), "ts": time.time()})
-            yield ev({"type": "step", "text": f"📅 Đã xác định khoảng: {d0} → {d1} ({days} ngày)"})
+            _pending_range.update({"start": d0.isoformat(), "end": d1.isoformat(),
+                                   "url_contains": uc, "ts": time.time()})
+            flt_line = f"\n• **Lọc URL chứa**: `{uc}`" if uc else ""
+            yield ev({"type": "step", "text": f"📅 Đã xác định khoảng: {d0} → {d1} ({days} ngày)" + (f" · lọc '{uc}'" if uc else "")})
             yield ev({"type": "final",
                       "text": (f"Đệ xác định được rồi nha:\n• **Khoảng lấy data**: {d0} → {d1} ({days} ngày)\n"
-                               f"• **Kỳ so sánh tự động**: {p0} → {p1}\n• **Tên sheet**: {d0}__{d1}\n\n"
+                               f"• **Kỳ so sánh tự động**: {p0} → {p1}{flt_line}\n• **Tên sheet**: {d0}__{d1}\n\n"
                                "Đúng ý thì Đại ca gõ **ok** (hoặc 'chạy đi') để Đệ chạy nhé.")})
             yield ev({"type": "done"})
             return
@@ -1175,10 +1207,11 @@ async def agent_chat_stream(req: ChatStreamRequest):
                 yield ev({"type": "done"})
                 return
             rs, re_ = _pending_range["start"], _pending_range["end"]
+            uc = _pending_range.get("url_contains") or ""
             _pending_range.clear()
-            yield ev({"type": "step", "text": f"▶ Chạy báo cáo SEO khoảng {rs} → {re_}"})
+            yield ev({"type": "step", "text": f"▶ Chạy báo cáo SEO khoảng {rs} → {re_}" + (f" · lọc '{uc}'" if uc else "")})
             log_pos = len(_seo_state["log"])
-            t = threading.Thread(target=_run_seo_range_safe, args=(rs, re_), daemon=True)
+            t = threading.Thread(target=_run_seo_range_safe, args=(rs, re_, uc or None), daemon=True)
             t.start()
             while t.is_alive():
                 await asyncio.sleep(1)
@@ -1200,6 +1233,7 @@ async def agent_chat_stream(req: ChatStreamRequest):
                 yield ev({"type": "final", "text": "Đang có báo cáo SEO chạy rồi — chờ xong đã nhé."})
                 yield ev({"type": "done"})
                 return
+            uc = str(data.get("url_contains") or "").strip() or _parse_url_contains(req.message) or ""
             jobs = []
             for it in (data.get("months") or [{"year": data.get("year"), "month": data.get("month")}]):
                 if isinstance(it, dict):
@@ -1215,9 +1249,9 @@ async def agent_chat_stream(req: ChatStreamRequest):
             for idx, (y, m) in enumerate(jobs, 1):
                 label = f"{y}-{m:02d}" if y else "tháng vừa rồi"
                 if len(jobs) > 1:
-                    yield ev({"type": "step", "text": f"▶ [{idx}/{len(jobs)}] Chạy báo cáo {label}"})
+                    yield ev({"type": "step", "text": f"▶ [{idx}/{len(jobs)}] Chạy báo cáo {label}" + (f" · lọc '{uc}'" if uc else "")})
                 log_pos = len(_seo_state["log"])
-                t = threading.Thread(target=_run_seo_safe, args=(y, m), daemon=True)
+                t = threading.Thread(target=_run_seo_safe, args=(y, m, uc or None), daemon=True)
                 t.start()
                 while t.is_alive():
                     await asyncio.sleep(1)
@@ -1715,6 +1749,7 @@ async def seo_chat_stream(req: ChatStreamRequest):
                 yield ev({"type": "done"})
                 return
             # Danh sách (year, month) cần chạy — 1 hoặc nhiều tháng
+            uc = str(data.get("url_contains") or "").strip() or _parse_url_contains(req.message) or ""
             jobs = []
             for it in (data.get("months") or [{"year": data.get("year"), "month": data.get("month")}]):
                 if isinstance(it, dict):
@@ -1730,9 +1765,9 @@ async def seo_chat_stream(req: ChatStreamRequest):
             for idx, (y, m) in enumerate(jobs, 1):
                 label = f"{y}-{m:02d}" if y else "tháng vừa rồi"
                 if len(jobs) > 1:
-                    yield ev({"type": "step", "text": f"▶ [{idx}/{len(jobs)}] Chạy báo cáo {label}"})
+                    yield ev({"type": "step", "text": f"▶ [{idx}/{len(jobs)}] Chạy báo cáo {label}" + (f" · lọc '{uc}'" if uc else "")})
                 log_pos = len(_seo_state["log"])
-                t = threading.Thread(target=_run_seo_safe, args=(y, m), daemon=True)
+                t = threading.Thread(target=_run_seo_safe, args=(y, m, uc or None), daemon=True)
                 t.start()
                 while t.is_alive():
                     await asyncio.sleep(1)

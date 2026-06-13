@@ -73,17 +73,25 @@ def runtime_val(key: str, fallback):
         return fallback
 
 
-def filter_urls(df):
+def filter_urls(df, url_contains: str | None = None):
     df = df.copy()
     df["url"] = df["url"].apply(clean_url)
     num_cols = [c for c in df.columns if c != "url"]
     df = df.groupby("url", as_index=False)[num_cols].sum()
     tracked = runtime_val("seo_tracked_urls", TRACKED_URLS)
-    if not tracked:
-        return df.reset_index(drop=True)
-    base = SITE_URL.rstrip("/")
-    targets = {clean_url(base + u) for u in tracked}
-    return df[df["url"].isin(targets)].reset_index(drop=True)
+    if tracked:
+        base = SITE_URL.rstrip("/")
+        targets = {clean_url(base + u) for u in tracked}
+        df = df[df["url"].isin(targets)]
+    if url_contains:  # lọc thêm theo từ khóa trong URL (vd "/tutorial")
+        df = df[df["url"].str.contains(url_contains, case=False, na=False)]
+    return df.reset_index(drop=True)
+
+
+def _slug(s: str) -> str:
+    """Chuỗi an toàn cho tên sheet từ url_contains (vd '/tutorial' → 'tutorial')."""
+    import re
+    return re.sub(r"[^a-zA-Z0-9]+", "-", (s or "").strip("/")).strip("-")[:20] or "filtered"
 
 
 # ── Fetch ─────────────────────────────────────────────────────────────────────
@@ -209,7 +217,7 @@ def save_to_sheet(df, label: str):
 
 # ── Main job ──────────────────────────────────────────────────────────────────
 
-def run_for_month(target_year: int, target_month: int):
+def run_for_month(target_year: int, target_month: int, url_contains: str | None = None):
     if not (SEO_SHEET_ID and GA4_PROPERTY_ID):
         raise RuntimeError("Thiếu SEO_SHEET_ID / GA4_PROPERTY_ID trong env — xem .env.example.")
     from datetime import date
@@ -224,12 +232,15 @@ def run_for_month(target_year: int, target_month: int):
     s1, e1 = first_cur.strftime("%Y-%m-%d"), last_cur.strftime("%Y-%m-%d")
     s2, e2 = first_prev.strftime("%Y-%m-%d"), last_prev.strftime("%Y-%m-%d")
     label = first_cur.strftime("%Y-%m")
+    if url_contains:  # sheet riêng để không đè báo cáo tháng đầy đủ
+        label = f"{label}_{_slug(url_contains)}"
 
-    log.info(f"Tháng lấy data: {label} ({s1} → {e1}) — so với {s2[:7]}")
-    cur_gsc = filter_urls(fetch_gsc(s1, e1))
-    cur_ga4 = filter_urls(fetch_ga4(s1, e1))
-    prev_gsc = filter_urls(fetch_gsc(s2, e2))
-    prev_ga4 = filter_urls(fetch_ga4(s2, e2))
+    log.info(f"Tháng lấy data: {label} ({s1} → {e1}) — so với {s2[:7]}"
+             + (f" — lọc URL chứa '{url_contains}'" if url_contains else ""))
+    cur_gsc = filter_urls(fetch_gsc(s1, e1), url_contains)
+    cur_ga4 = filter_urls(fetch_ga4(s1, e1), url_contains)
+    prev_gsc = filter_urls(fetch_gsc(s2, e2), url_contains)
+    prev_ga4 = filter_urls(fetch_ga4(s2, e2), url_contains)
     log.info(f"GSC: {len(cur_gsc)} URL, GA4: {len(cur_ga4)} URL")
 
     report = build_report(cur_gsc, cur_ga4, prev_gsc, prev_ga4)
@@ -238,9 +249,9 @@ def run_for_month(target_year: int, target_month: int):
     return {"label": label, "rows": len(report)}
 
 
-def run_for_range(start: str, end: str):
+def run_for_range(start: str, end: str, url_contains: str | None = None):
     """Báo cáo theo khoảng ngày bất kỳ (YYYY-MM-DD), tự so sánh với kỳ liền trước
-    cùng số ngày. Sheet label = 'start__end'."""
+    cùng số ngày. Sheet label = 'start__end'. url_contains: lọc URL theo từ khóa."""
     if not (SEO_SHEET_ID and GA4_PROPERTY_ID):
         raise RuntimeError("Thiếu SEO_SHEET_ID / GA4_PROPERTY_ID trong env — xem .env.example.")
     from datetime import datetime as _dt, timedelta
@@ -255,19 +266,26 @@ def run_for_range(start: str, end: str):
     p1 = d0 - timedelta(days=1)
     p0 = p1 - timedelta(days=days - 1)
     s1, e1, s2, e2 = d0.isoformat(), d1.isoformat(), p0.isoformat(), p1.isoformat()
-    label = f"{s1}__{e1}"
+    label = f"{s1}__{e1}" + (f"_{_slug(url_contains)}" if url_contains else "")
 
-    log.info(f"Khoảng lấy data: {s1} → {e1} ({days} ngày) — so sánh {s2} → {e2}")
-    cur_gsc = filter_urls(fetch_gsc(s1, e1))
-    cur_ga4 = filter_urls(fetch_ga4(s1, e1))
+    log.info(f"Khoảng lấy data: {s1} → {e1} ({days} ngày) — so sánh {s2} → {e2}"
+             + (f" — lọc URL chứa '{url_contains}'" if url_contains else ""))
+    cur_gsc = filter_urls(fetch_gsc(s1, e1), url_contains)
+    cur_ga4 = filter_urls(fetch_ga4(s1, e1), url_contains)
     log.info(f"Kỳ chính: GSC {len(cur_gsc)} URL, GA4 {len(cur_ga4)} URL")
-    prev_gsc = filter_urls(fetch_gsc(s2, e2))
-    prev_ga4 = filter_urls(fetch_ga4(s2, e2))
+    prev_gsc = filter_urls(fetch_gsc(s2, e2), url_contains)
+    prev_ga4 = filter_urls(fetch_ga4(s2, e2), url_contains)
     log.info(f"Kỳ so sánh ({s2} → {e2}): GSC {len(prev_gsc)} URL, GA4 {len(prev_ga4)} URL")
 
     report = build_report(cur_gsc, cur_ga4, prev_gsc, prev_ga4)
     report.insert(0, "range", label)
     save_to_sheet(report, label)
+    # Top URL theo views (để chat trả lời "bài nào tốt nhất")
+    top = []
+    if "url" in report.columns and "views" in report.columns and len(report):
+        t = report.sort_values("views", ascending=False).head(5)
+        top = [{"url": r["url"], "views": int(r.get("views") or 0),
+                "clicks": int(r.get("clicks") or 0)} for _, r in t.iterrows()]
 
     # Tổng + % thay đổi so với kỳ trước (hiện trong kết quả chat)
     def _tot(df, col):
@@ -282,7 +300,8 @@ def run_for_range(start: str, end: str):
         for k, v in totals.items()))
     log.info("Hoàn thành!")
     return {"label": label, "rows": len(report), "days": days,
-            "compare": f"{s2} → {e2}", "totals": totals}
+            "compare": f"{s2} → {e2}", "totals": totals,
+            "url_contains": url_contains or "", "top": top}
 
 
 def run():

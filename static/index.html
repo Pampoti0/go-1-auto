@@ -72,9 +72,13 @@ function HeaderSlot({children}){
 
 function md(s){
   s=s.replace(/\$?\\(rightarrow|to)\$?/g,'→').replace(/\$?\\leftarrow\$?/g,'←')
+     .replace(/\$?\\(downarrow|searrow)\$?/g,'↓').replace(/\$?\\(uparrow|nearrow)\$?/g,'↑')
+     .replace(/\$?\\(updownarrow|leftrightarrow)\$?/g,'↔')
      .replace(/\$?\\times\$?/g,'×').replace(/\$?\\(le|leq)\$?/g,'≤')
      .replace(/\$?\\(ge|geq)\$?/g,'≥').replace(/\$?\\approx\$?/g,'≈')
-     .replace(/\$(\d[\d.,]*)\$/g,'$1');
+     .replace(/\$?\\(pm|mp)\$?/g,'±').replace(/\$?\\(cdot|ast)\$?/g,'·')
+     .replace(/\$?\\(Delta|delta)\$?/g,'Δ').replace(/\$?\\percent\$?/g,'%')
+     .replace(/\$(\d[\d.,]*%?)\$/g,'$1');
   s=esc(s);
   s=s.replace(/```[a-z]*\n?([\s\S]*?)```/g,(m,c)=>'<code>'+c.trim()+'</code>');
   s=s.replace(/`([^`\n]+)`/g,'<code>$1</code>');
@@ -896,6 +900,7 @@ function Dashboard(){
   const [month,setMonth]=useState('');
   const [run,setRun]=useState('');
   const [err,setErr]=useState('');
+  const [sort,setSort]=useState({i:null,dir:1}); // i=index cột (raw row); dir -1 giảm / 1 tăng
 
   const load=useCallback(async m=>{
     setErr('');
@@ -954,6 +959,16 @@ function Dashboard(){
     return mn(a)-mn(b); /* trang tệ nhất lên đầu */
   });
   const h=data.headers;
+  /* sort bảng chi tiết theo cột header (numeric-aware, ERROR/rỗng dồn cuối) */
+  const sortedRows=sort.i==null?rows:[...rows].sort((a,b)=>{
+    let va=a[sort.i],vb=b[sort.i];
+    const na=parseFloat(va),nb=parseFloat(vb);
+    if(!isNaN(na)||!isNaN(nb)){
+      va=isNaN(na)?-Infinity:na; vb=isNaN(nb)?-Infinity:nb;
+      return sort.dir*(va-vb);
+    }
+    return sort.dir*String(va??'').localeCompare(String(vb??''));
+  });
   const pillOf=v=>v==null?null:(v>=90?'bg-emerald-500/20 text-emerald-700 dark:text-emerald-400':v>=50?'bg-amber-500/20 text-amber-700 dark:text-amber-400':'bg-red-500/20 text-red-700 dark:text-red-400');
   const delta=s=>s.length>1?s[s.length-1]-s[s.length-2]:null;
   const fmtD=d=>d==null?null:(d>0?'+':'')+d;
@@ -1026,11 +1041,26 @@ function Dashboard(){
             <table className="w-full text-[12.5px]">
               <thead>
                 <tr className="text-[10.5px] uppercase tracking-wide text-slate-400 bg-slate-50 dark:bg-slate-800/60">
-                  {h.slice(1).map(x=><th key={x} className="px-3 py-2.5 text-right first:text-left font-semibold whitespace-nowrap">{x}</th>)}
+                  {h.slice(1).map((x,j)=>{
+                    const i=j+1,active=sort.i===i;
+                    return (
+                      <th key={x} className="px-3 py-2.5 text-right first:text-left font-semibold whitespace-nowrap">
+                        <button onClick={()=>setSort(s=>({i,dir:s.i===i?-s.dir:-1}))}
+                          className={"inline-flex items-center gap-1 uppercase tracking-wide transition select-none first:flex-row "+(active?'text-violet-500':'hover:text-slate-600 dark:hover:text-slate-200')+(j===0?'':' flex-row-reverse')}>
+                          {x}
+                          <svg className="w-3 h-3 flex-none" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                            {active
+                              ?(sort.dir===-1?<path d="M12 5v14M19 12l-7 7-7-7"/>:<path d="M12 19V5M5 12l7-7 7 7"/>)
+                              :<path d="M8 9l4-4 4 4M8 15l4 4 4-4" opacity=".45"/>}
+                          </svg>
+                        </button>
+                      </th>
+                    );
+                  })}
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
-                {rows.map((x,ri)=><tr key={ri} className="hover:bg-slate-50 dark:hover:bg-slate-800/40">
+                {sortedRows.map((x,ri)=><tr key={ri} className="hover:bg-slate-50 dark:hover:bg-slate-800/40">
                   {h.slice(1).map((_,j)=>{
                     const i=j+1,v=x[i]??'';
                     return <td key={j} title={i===1?v:undefined}
