@@ -914,6 +914,7 @@ function Dashboard(){
   const [run,setRun]=useState('');
   const [err,setErr]=useState('');
   const [sort,setSort]=useState({i:null,dir:1}); // i=index cột (raw row); dir -1 giảm / 1 tăng
+  const [q,setQ]=useState('');
 
   const load=useCallback(async m=>{
     setErr('');
@@ -972,8 +973,9 @@ function Dashboard(){
     return mn(a)-mn(b); /* trang tệ nhất lên đầu */
   });
   const h=data.headers;
-  /* sort bảng chi tiết theo cột header (numeric-aware, ERROR/rỗng dồn cuối) */
-  const sortedRows=sort.i==null?rows:[...rows].sort((a,b)=>{
+  /* lọc theo URL (cột 1) rồi sort */
+  const fRows=q.trim()?rows.filter(x=>String(x[1]||'').toLowerCase().includes(q.trim().toLowerCase())):rows;
+  const sortedRows=sort.i==null?fRows:[...fRows].sort((a,b)=>{
     let va=a[sort.i],vb=b[sort.i];
     const na=parseFloat(va),nb=parseFloat(vb);
     if(!isNaN(na)||!isNaN(nb)){
@@ -1050,23 +1052,32 @@ function Dashboard(){
           <div className="px-5 pt-4 pb-3 border-b border-slate-100 dark:border-slate-800">
             <h3 className="font-semibold text-slate-800 dark:text-slate-100 text-[15px]">Chi tiết <span className="text-slate-400 font-normal">({rows.length} dòng)</span></h3>
           </div>
-          <div className="overflow-x-auto">
+          <div className="overflow-auto h-[62vh]">
             <table className="w-full text-[12.5px]">
               <thead>
-                <tr className="text-[10.5px] uppercase tracking-wide text-slate-400 bg-slate-50 dark:bg-slate-800/60">
+                <tr className="text-[10.5px] uppercase tracking-wide text-slate-400">
                   {h.slice(1).map((x,j)=>{
                     const i=j+1,active=sort.i===i;
                     return (
-                      <th key={x} className="px-3 py-2.5 text-right first:text-left font-semibold whitespace-nowrap">
-                        <button onClick={()=>setSort(s=>({i,dir:s.i===i?-s.dir:-1}))}
-                          className={"inline-flex items-center gap-1 uppercase tracking-wide transition select-none first:flex-row "+(active?'text-violet-500':'hover:text-slate-600 dark:hover:text-slate-200')+(j===0?'':' flex-row-reverse')}>
-                          {x}
-                          <svg className="w-3 h-3 flex-none" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
-                            {active
-                              ?(sort.dir===-1?<path d="M12 5v14M19 12l-7 7-7-7"/>:<path d="M12 19V5M5 12l7-7 7 7"/>)
-                              :<path d="M8 9l4-4 4 4M8 15l4 4 4-4" opacity=".45"/>}
-                          </svg>
-                        </button>
+                      <th key={x} className="sticky top-0 z-10 bg-slate-100 dark:bg-slate-800 px-2.5 py-2.5 text-right first:text-left font-semibold whitespace-nowrap">
+                        <div className="inline-flex items-center gap-2">
+                          <button onClick={()=>setSort(s=>({i,dir:s.i===i?-s.dir:-1}))}
+                            className={"inline-flex items-center gap-1 uppercase tracking-wide transition select-none "+(active?'text-violet-500':'hover:text-slate-600 dark:hover:text-slate-200')}>
+                            {x}
+                            <svg className="w-3 h-3 flex-none" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                              {active
+                                ?(sort.dir===-1?<path d="M12 5v14M19 12l-7 7-7-7"/>:<path d="M12 19V5M5 12l7-7 7 7"/>)
+                                :<path d="M8 9l4-4 4 4M8 15l4 4 4-4" opacity=".45"/>}
+                            </svg>
+                          </button>
+                          {j===0&&(
+                            <div className="relative normal-case">
+                              <svg className="w-3.5 h-3.5 absolute left-2 top-1/2 -translate-y-1/2 text-slate-400 pointer-events-none" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/></svg>
+                              <input value={q} onChange={e=>setQ(e.target.value)} placeholder="Tìm..."
+                                className="w-32 max-w-full pl-7 pr-2 py-1 text-[12px] font-normal tracking-normal rounded-md border border-slate-300 dark:border-slate-600 bg-white dark:bg-slate-900 text-slate-700 dark:text-slate-200 outline-none focus:border-violet-400 focus:ring-2 focus:ring-violet-500/20"/>
+                            </div>
+                          )}
+                        </div>
                       </th>
                     );
                   })}
@@ -1077,7 +1088,7 @@ function Dashboard(){
                   {h.slice(1).map((_,j)=>{
                     const i=j+1,v=x[i]??'';
                     return <td key={j} title={i===1?v:undefined}
-                      className={"px-3 py-1.5 text-right whitespace-nowrap first:text-left first:max-w-[280px] first:truncate "+(v==='ERROR'?'bg-red-100 dark:bg-red-900/40':cellCls(i,v))}>
+                      className={"px-2.5 py-1.5 text-right whitespace-nowrap first:text-left first:max-w-[220px] first:truncate "+(v==='ERROR'?'bg-red-100 dark:bg-red-900/40':cellCls(i,v))}>
                       {i===1?pathOf(v):v}
                     </td>;
                   })}
@@ -1379,27 +1390,32 @@ function UrlIntel(){
   return (
     <div className="flex-1 min-h-0 overflow-y-auto px-6 py-5 bg-slate-50 dark:bg-slate-950">
       <div className="max-w-[1180px] mx-auto flex flex-col gap-4">
-        <HeaderSlot>
-          <input value={q} onChange={e=>setQ(e.target.value)} placeholder="Tìm URL..." className={input+" w-64"}/>
-        </HeaderSlot>
-
         <div className={mosaicCard}>
-          <div className="overflow-x-auto">
+          <div className="overflow-auto h-[calc(100vh-110px)]">
             <table className="w-full text-[12.5px]">
-              <thead><tr className="text-[10.5px] uppercase tracking-wide text-slate-400 bg-slate-50 dark:bg-slate-800/60">
+              <thead><tr className="text-[10.5px] uppercase tracking-wide text-slate-400">
                 {[['URL','path'],['Views','views'],['Δ Views','viewsCh'],['Users','users'],['Clicks','clicks'],['Δ Clicks','clicksCh'],['Impressions','impr'],['PSI M','psiM'],['PSI D','psiD']].map(([c,k])=>{
                   const active=sort.key===k;
                   return (
-                    <th key={c} className="px-3 py-2.5 text-right first:text-left font-semibold whitespace-nowrap">
-                      <button onClick={()=>setSort(s=>({key:k,dir:s.key===k?-s.dir:-1}))}
-                        className={"inline-flex items-center gap-1 uppercase tracking-wide transition select-none "+(active?'text-violet-500':'hover:text-slate-600 dark:hover:text-slate-200')}>
-                        {c}
-                        <svg className="w-3 h-3 flex-none" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
-                          {active
-                            ?(sort.dir===-1?<path d="M12 5v14M19 12l-7 7-7-7"/>:<path d="M12 19V5M5 12l7-7 7 7"/>)
-                            :<path d="M8 9l4-4 4 4M8 15l4 4 4-4" opacity=".45"/>}
-                        </svg>
-                      </button>
+                    <th key={c} className="sticky top-0 z-10 bg-slate-100 dark:bg-slate-800 px-3 py-2.5 text-right first:text-left font-semibold whitespace-nowrap">
+                      <div className="inline-flex items-center gap-2">
+                        <button onClick={()=>setSort(s=>({key:k,dir:s.key===k?-s.dir:-1}))}
+                          className={"inline-flex items-center gap-1 uppercase tracking-wide transition select-none "+(active?'text-violet-500':'hover:text-slate-600 dark:hover:text-slate-200')}>
+                          {c}
+                          <svg className="w-3 h-3 flex-none" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                            {active
+                              ?(sort.dir===-1?<path d="M12 5v14M19 12l-7 7-7-7"/>:<path d="M12 19V5M5 12l7-7 7 7"/>)
+                              :<path d="M8 9l4-4 4 4M8 15l4 4 4-4" opacity=".45"/>}
+                          </svg>
+                        </button>
+                        {k==='path'&&(
+                          <div className="relative normal-case">
+                            <svg className="w-3.5 h-3.5 absolute left-2 top-1/2 -translate-y-1/2 text-slate-400 pointer-events-none" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/></svg>
+                            <input value={q} onChange={e=>setQ(e.target.value)} placeholder="Tìm URL..."
+                              className="w-52 max-w-full pl-7 pr-2 py-1 text-[12px] font-normal tracking-normal rounded-md border border-slate-300 dark:border-slate-600 bg-white dark:bg-slate-900 text-slate-700 dark:text-slate-200 outline-none focus:border-violet-400 focus:ring-2 focus:ring-violet-500/20"/>
+                          </div>
+                        )}
+                      </div>
                     </th>
                   );
                 })}
@@ -1425,11 +1441,13 @@ function UrlIntel(){
         </div>
 
         {sel&&(
-          <div className={mosaicCard+" p-5"}>
+          <div className={mosaicCard+" p-5 sticky bottom-0 z-20 shadow-[0_-8px_24px_-12px_rgba(0,0,0,0.25)] ring-1 ring-violet-200 dark:ring-violet-900"}>
             <div className="flex items-center gap-3 mb-3">
-              <h3 className="font-semibold text-[15px]">{sel.path}</h3>
-              <a href={sel.url} target="_blank" className="text-xs text-violet-500 hover:underline">mở trang ↗</a>
-              <button onClick={()=>setSel(null)} className="ml-auto text-slate-400 hover:text-slate-600">✕</button>
+              <h3 className="font-semibold text-[15px] truncate">{sel.path}</h3>
+              <a href={sel.url} target="_blank" className="text-xs text-violet-500 hover:underline flex-none">mở trang ↗</a>
+              <button onClick={()=>setSel(null)} className="ml-auto flex-none text-slate-400 hover:text-slate-600 w-7 h-7 grid place-items-center rounded-lg hover:bg-slate-100 dark:hover:bg-slate-800">
+                <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M18 6L6 18M6 6l12 12"/></svg>
+              </button>
             </div>
             <div className="grid gap-4" style={{gridTemplateColumns:'repeat(auto-fit,minmax(150px,1fr))'}}>
               <div><div className="text-[11px] uppercase text-slate-400 font-semibold">PSI Mobile</div><div className="text-2xl font-bold" style={{color:sel.psiM!=null?scoreColor(sel.psiM):undefined}}>{sel.psiM??'—'}</div></div>
