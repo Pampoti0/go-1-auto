@@ -322,8 +322,11 @@ const dechoBus={
   listeners:new Set(),
   emit(e){this.listeners.forEach(f=>f(e))},
   on(f){this.listeners.add(f);return()=>this.listeners.delete(f)},
-  /* thời gian hiện theo độ dài text (≈60ms/ký tự), tối thiểu 12s, tối đa 45s */
-  say(text,ms){this.emit({type:'say',text,ms:ms||(text?Math.min(45000,Math.max(12000,text.length*60)):1)})},
+  /* thời gian hiện theo độ dài + số dòng (thơ đọc lâu hơn), tối thiểu 12s, tối đa 60s */
+  say(text,ms){
+    const dur=text?Math.min(60000,Math.max(12000,text.length*70+(text.split('\n').length-1)*2200)):1;
+    this.emit({type:'say',text,ms:ms||dur});
+  },
   busy(b){this.emit({type:'busy',b})},
   act(a){this.emit({type:'act',a})},
 };
@@ -331,15 +334,18 @@ const dechoBus={
 const dechoCtx={view:'',info:'',model:''};
 
 /* ───────────────────────── Decho 3D stage ───────────────────────── */
+/* Lời thoại nhàn rỗi của DeCho (tĩnh — gồm vài bài lục bát/haiku) */
 const QUIPS=[
-  'Vibe check ✅ Hệ thống xanh, deadline chưa cháy. Đại ca cứ yên tâm.',
-  'Lục bát nè Đại ca:\nWeb nhanh thì khách mới vui,\nLCP chậm chạp thì lui khách liền 🫡',
+  'Vibe check ✅ Đệ đứng đây canh số liệu, Đại ca cứ chill.',
   'Đại ca hỏi gì hỏi đi, Đệ đứng đây mãi cũng mỏi chân á.',
-  'No cap, Đại ca qua tab 📊 Dashboard xem điểm đi, đẹp lắm.',
-  'Đệ là DeCho — biết làm thơ, bắt trend, đo web nhanh hơn Đại ca F5.',
-  'Haiku tặng Đại ca:\nĐiểm xanh trên bảng,\nclicks về như lá mùa thu —\nSEO thắng lớn 🍂',
-  'Đại ca kéo Đệ xoay thử đi, góc nào Đệ cũng đẹp. Lowkey tự tin đấy.',
-  'Cần gì cứ gọi Đệ: PageSpeed, SEO, phân tích số liệu — chill thôi, nhưng output thì xịn.',
+  'No cap, qua tab Dashboard xem điểm đi Đại ca, Đệ vẽ chart đẹp lắm.',
+  'Cần gì cứ gọi Đệ: PageSpeed, SEO, Google Ads — chill thôi nhưng output xịn.',
+  'Lục bát tặng Đại ca:\nWeb nhanh thì khách mới vui,\nLCP chậm chạp thì lui khách liền 🫡',
+  'Lục bát nhắc Đại ca:\nTrang nhà tải chậm như rùa,\nkhách chờ mất kiên, lượt mua cũng rời.',
+  'Lục bát SEO nè:\nTừ khoá lên top mỗi ngày,\nkhách vào nườm nượp, click bay đầy nhà.',
+  'Lục bát động viên:\nĐiểm xanh chín chục trở lên,\nĐại ca cứ ngủ, Đệ nền tảng lo.',
+  'Lục bát quảng cáo:\nTiền tiêu mỗi sáng mỗi giờ,\nchi mà đúng chỗ, lời chờ sẵn tay.',
+  'Haiku nè Đại ca:\nĐiểm xanh trên bảng,\nclicks về như lá mùa thu —\nSEO thắng lớn 🍂',
 ];
 function useDechoSpeech(){
   const [bubble,setBubble]=useState(null);

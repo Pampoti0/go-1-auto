@@ -1508,6 +1508,24 @@ def decho_ask(req: DechoAskRequest):
         return {"error": f"{type(e).__name__}: {e}"}
 
 
+_QUIPS_FALLBACK = [
+    "Vibe check ✅ Đệ đứng đây canh số liệu, Đại ca cứ chill.",
+    "Cần gì cứ gọi Đệ: PageSpeed, SEO, Google Ads — chill thôi nhưng output xịn.",
+    "Đại ca hỏi gì hỏi đi, Đệ đứng mãi cũng mỏi chân á.",
+    "No cap, qua tab Dashboard xem điểm đi Đại ca, Đệ vẽ chart đẹp lắm.",
+    "Lục bát tặng Đại ca:\nWeb nhanh thì khách mới vui,\nLCP chậm chạp thì lui khách liền 🫡",
+    "Lục bát nhắc Đại ca:\nTrang nhà tải chậm như rùa,\nkhách chờ mất kiên, lượt mua cũng rời.",
+    "Lục bát SEO nè:\nTừ khoá lên top mỗi ngày,\nkhách vào nườm nượp, click bay đầy nhà.",
+    "Lục bát động viên:\nĐiểm xanh chín chục trở lên,\nĐại ca cứ ngủ, Đệ nền tảng lo.",
+    "Lục bát quảng cáo:\nTiền tiêu mỗi sáng mỗi giờ,\nchi mà đúng chỗ, lời chờ sẵn tay.",
+    "Haiku nè Đại ca:\nĐiểm xanh trên bảng,\nclicks về như lá mùa thu —\nSEO thắng lớn 🍂",
+]
+@app.get("/api/decho/quips")
+def decho_quips():
+    """Lời thoại nhàn rỗi của DeCho — danh sách tĩnh (không gọi model, khỏi tốn token)."""
+    return {"quips": _QUIPS_FALLBACK}
+
+
 # ── AgentBase Memory endpoints ────────────────────────────────────────────────
 
 @app.get("/api/memory/status")
