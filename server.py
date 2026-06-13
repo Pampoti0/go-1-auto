@@ -21,7 +21,7 @@ import time
 from datetime import datetime
 
 import schedule
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.responses import HTMLResponse, StreamingResponse
 from pydantic import BaseModel
 
@@ -970,7 +970,7 @@ def _all_keyword_intent(message: str) -> dict | None:
 
 
 @app.post("/api/agent/chat/stream")
-async def agent_chat_stream(req: ChatStreamRequest):
+async def agent_chat_stream(req: ChatStreamRequest, request: Request = None):
     """DeCho all-in-one: một chat xử lý mọi action của cả PageSpeed lẫn SEO."""
     import asyncio
     import re as _re
@@ -1417,8 +1417,24 @@ async def agent_chat_stream(req: ChatStreamRequest):
                 results.append((label, _seo_state["last_result"] or ""))
             if len(results) == 1:
                 result = results[0][1]
-                icon = "✅" if result.startswith("success") else "❌"
-                yield ev({"type": "final", "text": f"{icon} {result}"})
+                # Chạy xong 1 tháng → đi thẳng vào phân tích (không hiện dòng success rồi đè)
+                analyzed = False
+                if result.startswith("success"):
+                    mt = _re.search(r"tab (\S+)", result)
+                    if mt:
+                        try:
+                            tab, headers, rows = await asyncio.to_thread(_seo_read_results, mt.group(1))
+                            if rows:
+                                yield ev({"type": "step", "text": f"✅ {result}"})
+                                yield ev({"type": "step", "text": f"🧠 Phân tích {tab} ({model})..."})
+                                async for chunk in stream_analysis(_seo_results_prompt(tab, headers, rows)):
+                                    yield chunk
+                                analyzed = True
+                        except Exception as e:  # noqa: BLE001
+                            yield ev({"type": "step", "text": f"⚠️ Lấy data để phân tích lỗi: {type(e).__name__}"})
+                if not analyzed:
+                    icon = "✅" if result.startswith("success") else "❌"
+                    yield ev({"type": "final", "text": f"{icon} {result}"})
             else:
                 okn = sum(1 for _, r in results if r.startswith("success"))
                 lines = "\n".join(f"{'✅' if r.startswith('success') else '❌'} {lb}: {r}" for lb, r in results)
@@ -1541,7 +1557,7 @@ def _range_from_text(text: str) -> dict | None:
 
 
 @app.post("/api/decho/ask")
-def decho_ask(req: DechoAskRequest):
+def decho_ask(req: DechoAskRequest, request: Request = None):
     """Hỏi đáp nhanh với DeCho — có bối cảnh màn hình người dùng đang xem."""
     if not (MAAS_API_KEY and MAAS_BASE_URL):
         return {"error": "Chưa cấu hình MAAS_API_KEY / MAAS_BASE_URL."}
@@ -1860,7 +1876,7 @@ def _seo_status_text() -> str:
 
 
 @app.post("/api/seo/chat/stream")
-async def seo_chat_stream(req: ChatStreamRequest):
+async def seo_chat_stream(req: ChatStreamRequest, request: Request = None):
     """SSE chat cho SEO Agent: chạy báo cáo, đọc & phân tích số liệu từ SEO Sheet."""
     import asyncio
     import re as _re
@@ -1968,8 +1984,24 @@ async def seo_chat_stream(req: ChatStreamRequest):
                 results.append((label, _seo_state["last_result"] or ""))
             if len(results) == 1:
                 result = results[0][1]
-                icon = "✅" if result.startswith("success") else "❌"
-                yield ev({"type": "final", "text": f"{icon} {result}"})
+                # Chạy xong 1 tháng → đi thẳng vào phân tích (không hiện dòng success rồi đè)
+                analyzed = False
+                if result.startswith("success"):
+                    mt = _re.search(r"tab (\S+)", result)
+                    if mt:
+                        try:
+                            tab, headers, rows = await asyncio.to_thread(_seo_read_results, mt.group(1))
+                            if rows:
+                                yield ev({"type": "step", "text": f"✅ {result}"})
+                                yield ev({"type": "step", "text": f"🧠 Phân tích {tab} ({model})..."})
+                                async for chunk in stream_analysis(_seo_results_prompt(tab, headers, rows)):
+                                    yield chunk
+                                analyzed = True
+                        except Exception as e:  # noqa: BLE001
+                            yield ev({"type": "step", "text": f"⚠️ Lấy data để phân tích lỗi: {type(e).__name__}"})
+                if not analyzed:
+                    icon = "✅" if result.startswith("success") else "❌"
+                    yield ev({"type": "final", "text": f"{icon} {result}"})
             else:
                 ok = sum(1 for _, r in results if r.startswith("success"))
                 lines = "\n".join(f"{'✅' if r.startswith('success') else '❌'} {lb}: {r}" for lb, r in results)
