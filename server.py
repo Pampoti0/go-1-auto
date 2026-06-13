@@ -756,8 +756,45 @@ def _unified_prompt() -> str:
         'hoặc khoảng thời gian tự nhiên ("ads tháng 5", "chi tiêu từ 01/05 đến 31/05", "quảng cáo quý 1"): '
         '{"action":"ads_perf","start":"YYYY-MM-DD","end":"YYYY-MM-DD"} — tự tính ngày như seo_range\n'
         '- Trạng thái hệ thống: {"action":"status"}\n'
+        '- HƯỚNG DẪN / HỎI VỀ NĂNG LỰC ("DeCho làm được gì", "có tính năng nào", "làm sao thêm URL", "đổi lịch ở đâu", "LCP là gì", "score bao nhiêu là tốt", "lọc URL được không"): {"action":"help"}\n'
         '- Còn lại: {"action":"reply","text":"<trả lời ngắn>"}\n'
         "Phân biệt: kiểm tra/điểm/score/LCP/CLS/pagespeed → PageSpeed; báo cáo/traffic/clicks/GSC/GA4/SEO → SEO."
+    ) + _persona()
+
+
+def _capabilities() -> str:
+    """Danh sách năng lực THẬT của DeCho — nguồn grounded cho action help (không để model bịa)."""
+    return (
+        "NĂNG LỰC THẬT CỦA DECHO (chỉ trả lời dựa trên đây, không bịa thêm tính năng không có):\n"
+        "## PageSpeed (Core Web Vitals)\n"
+        "- Chạy kiểm tra real-time mọi URL đang theo dõi: nói 'chạy kiểm tra ngay'. PageSpeed CHỈ đo hiện tại, không đo lại quá khứ/tương lai.\n"
+        "- Xem & phân tích kết quả đã đo (điểm, LCP/CLS/FCP/TBT, trang nhanh/chậm): 'phân tích PageSpeed', 'trang nào chậm nhất', 'xem điểm tháng 5'.\n"
+        "- Dashboard (menu PageSpeed): điểm TB mobile/desktop, xu hướng theo lần chạy, bảng chi tiết sort được theo từng cột.\n"
+        "## SEO (Google Search Console + GA4)\n"
+        "- Chạy báo cáo 1 tháng / nhiều tháng (mỗi tháng tự so tháng liền trước): 'báo cáo SEO tháng 5', 'so sánh từng tháng từ tháng 3 đến tháng 5'.\n"
+        "- Báo cáo theo khoảng thời gian tự nhiên, tự so kỳ liền trước: '3 tháng gần nhất', 'quý 1 2026', 'từ 01/05 đến 12/06', 'cả năm 2025'. Có bước xác nhận trước khi chạy.\n"
+        "- Lọc theo nhóm URL: thêm 'các url chứa /tutorial' / 'trang /product' vào yêu cầu.\n"
+        "- Phân tích số liệu traffic/clicks/views/users/impressions: 'traffic tháng này sao', 'xu hướng 6 tháng'.\n"
+        "## URL Intelligence (menu URL Intelligence)\n"
+        "- Bảng gộp traffic (GSC/GA4) + PageSpeed theo từng URL, click 1 dòng xem chi tiết + lịch sử điểm; sort theo mọi cột; ô tìm URL.\n"
+        "## Paid Campaigns (Google Ads — chỉ ĐỌC, không tạo/sửa campaign, không tiêu tiền)\n"
+        "- Danh sách campaign, hiệu suất/chi tiêu/CTR/CPA theo N ngày hoặc khoảng ngày tự nhiên: 'chi tiêu ads tháng 5', 'CPA 30 ngày'. Lọc ngày bằng lời hoặc bằng date picker.\n"
+        "## Cấu hình (menu Cấu hình)\n"
+        "- Thêm/xóa URL theo dõi, đổi lịch PageSpeed (daily/weekly/monthly + giờ), đổi lịch & URL theo dõi SEO — chỉnh bằng lời ('thêm https://...', 'đổi lịch sang daily 8h') hoặc trong trang Cấu hình. Lưu là áp dụng ngay + đồng bộ Google Sheet.\n"
+        "## Khác\n"
+        "- Trí nhớ dài hạn (nhớ sở thích/URL Đại ca quan tâm qua các phiên), trạng thái hệ thống, đổi model AI ở header.\n"
+        "GIẢI THÍCH CHỈ SỐ (nếu được hỏi): LCP (Largest Contentful Paint) tốt <2.5s; CLS (độ giật layout) tốt <0.1; FCP <1.8s; TBT <200ms; điểm PageSpeed ≥90 xanh/tốt, 50-89 cần cải thiện, <50 kém. Traffic: clicks (GSC) = lượt bấm từ tìm kiếm, impressions = lượt hiển thị, views/users (GA4).\n"
+    )
+
+
+def _help_prompt() -> str:
+    return (
+        "Người dùng đang hỏi về NĂNG LỰC hoặc CÁCH DÙNG của bạn (DeCho — agent marketing all-in-one). "
+        "Trả lời ĐÚNG TRỌNG TÂM câu hỏi, ngắn gọn, dựa DUY NHẤT trên danh sách dưới đây. "
+        "Nếu hỏi cách làm, chỉ rõ câu lệnh mẫu để gõ hoặc menu cần vào. "
+        "Nếu hỏi tính năng không có trong danh sách, nói thẳng là chưa hỗ trợ — KHÔNG bịa. "
+        "Gợi ý 2-3 việc liên quan người dùng có thể làm tiếp. KHÔNG dùng LaTeX. /no_think\n\n"
+        + _capabilities()
     ) + _persona()
 
 
@@ -831,6 +868,16 @@ def _all_keyword_intent(message: str) -> dict | None:
     m = message.lower()
     if m.strip() in ("ok", "oke", "okay", "đồng ý", "dong y", "chạy đi", "chay di", "xác nhận", "xac nhan", "confirm", "yes", "lgtm"):
         return {"action": "confirm"}
+    # Hỏi về năng lực / hướng dẫn → help (grounded)
+    if (any(k in m for k in ("làm được gì", "lam duoc gi", "làm được những gì", "giúp được gì", "giup duoc gi",
+                             "tính năng", "tinh nang", "chức năng", "chuc nang", "hướng dẫn", "huong dan",
+                             "dùng như nào", "dùng sao", "dung sao", "sử dụng", "su dung", "có thể làm",
+                             "bạn là ai", "ban la ai", "decho là gì", "decho la gi", "menu nào", "ở đâu"))
+            or any(p in m for p in ("làm sao", "lam sao", "làm thế nào", "lam the nao", "cách "))
+            or ((any(p in m for p in ("là gì", "la gi", "bao nhiêu là", "ngưỡng", "thế nào là tốt", "nghĩa là gì"))
+                 and any(k in m for k in ("lcp", "cls", "fcp", "tbt", "inp", "score", "điểm", "impression",
+                 "clicks", "views", "users", "ctr", "cpa", "core web", "web vitals"))))):
+        return {"action": "help"}
     rng = _parse_range_vi(m)
     if rng and any(k in m for k in ("seo", "traffic", "báo cáo", "clicks", "gsc", "ga4")):
         uc = _parse_url_contains(message)
@@ -946,7 +993,7 @@ async def agent_chat_stream(req: ChatStreamRequest):
                   "set_schedule": "Đổi lịch PageSpeed", "run_report": "Chạy báo cáo SEO", "seo_range": "Xác định khoảng thời gian SEO", "confirm": "Xác nhận & thực thi",
                   "seo_query": "Phân tích số liệu SEO", "list_months": "Các tháng có báo cáo SEO",
                   "ads_list": "Danh sách campaign Google Ads", "ads_perf": "Phân tích hiệu suất Google Ads",
-                  "status": "Trạng thái hệ thống", "reply": "Trả lời"}
+                  "status": "Trạng thái hệ thống", "help": "Hướng dẫn năng lực", "reply": "Trả lời"}
         yield ev({"type": "step", "text": f"⚙️ Action: {labels.get(action, action)}"})
 
         async def stream_analysis(system_prompt: str):
@@ -999,6 +1046,14 @@ async def agent_chat_stream(req: ChatStreamRequest):
         # ── Trạng thái tổng hợp ──
         if action == "status":
             yield ev({"type": "final", "text": f"**PageSpeed**: {_status_text()}\n**SEO**: {_seo_status_text()}"})
+            yield ev({"type": "done"})
+            return
+
+        # ── Hướng dẫn / hỏi về năng lực (grounded — không bịa) ──
+        if action == "help":
+            yield ev({"type": "step", "text": "📖 Tra năng lực DeCho..."})
+            async for chunk in stream_analysis(_help_prompt()):
+                yield chunk
             yield ev({"type": "done"})
             return
 
@@ -1415,13 +1470,23 @@ def decho_ask(req: DechoAskRequest):
     mem_block = ""
     if memory_agent.configured() and req.user_id:
         mem_block = memory_agent.memory_block(req.user_id, req.question)
+    # Hỏi về năng lực/cách dùng → bơm danh sách năng lực thật để trả lời grounded
+    ql = (req.question or "").lower()
+    cap_block = ""
+    if any(k in ql for k in ("làm được", "lam duoc", "tính năng", "tinh nang", "chức năng", "chuc nang",
+                             "hướng dẫn", "huong dan", "làm sao", "lam sao", "cách ", "là gì", "la gi",
+                             "giúp được", "giup duoc", "dùng sao", "menu nào", "ở đâu", "có thể")):
+        cap_block = "\n\n# " + _capabilities()
     system = (
-        "Bạn là DeCho — mascot trợ thủ của app DeCho Agent (PageSpeed + SEO). "
+        "Bạn là DeCho — mascot trợ thủ của app DeCho Agent (PageSpeed + SEO + Google Ads). "
         "Bạn đang đứng ở góc màn hình, nhìn cùng màn hình với người dùng.\n"
         "# BỐI CẢNH MÀN HÌNH HIỆN TẠI\n" + (req.context or "(không rõ)") +
         "\n\nTrả lời dựa trên bối cảnh trên: bình thường ngắn gọn (~80 từ), nhưng nếu người dùng hỏi chi tiết/phân tích thì dùng số liệu cụ thể trong bối cảnh, tối đa ~200 từ; "
         "nếu câu hỏi vượt quá dữ liệu đang thấy thì nói thẳng và chỉ người dùng nơi xem "
-        "(menu Chat để chạy/phân tích, Dashboard để xem điểm). KHÔNG dùng LaTeX. /no_think"
+        "(menu Chat để chạy/phân tích, Dashboard để xem điểm). "
+        "Nếu hỏi về năng lực/cách dùng thì trả lời theo phần năng lực bên dưới, không bịa tính năng. "
+        "KHÔNG dùng LaTeX. /no_think"
+        + cap_block
     ) + mem_block + _knowledge() + _persona()
     try:
         r = httpx.post(

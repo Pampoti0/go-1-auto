@@ -4,6 +4,8 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>DeCho Agent</title>
+<link rel="icon" type="image/png" href="/static/decho.png">
+<link rel="apple-touch-icon" href="/static/decho.png">
 <script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.5/babel.min.js"></script>
@@ -71,14 +73,25 @@ function HeaderSlot({children}){
 }
 
 function md(s){
-  s=s.replace(/\$?\\(rightarrow|to)\$?/g,'→').replace(/\$?\\leftarrow\$?/g,'←')
-     .replace(/\$?\\(downarrow|searrow)\$?/g,'↓').replace(/\$?\\(uparrow|nearrow)\$?/g,'↑')
-     .replace(/\$?\\(updownarrow|leftrightarrow)\$?/g,'↔')
-     .replace(/\$?\\times\$?/g,'×').replace(/\$?\\(le|leq)\$?/g,'≤')
-     .replace(/\$?\\(ge|geq)\$?/g,'≥').replace(/\$?\\approx\$?/g,'≈')
-     .replace(/\$?\\(pm|mp)\$?/g,'±').replace(/\$?\\(cdot|ast)\$?/g,'·')
-     .replace(/\$?\\(Delta|delta)\$?/g,'Δ').replace(/\$?\\percent\$?/g,'%')
-     .replace(/\$(\d[\d.,]*%?)\$/g,'$1');
+  /* ── LaTeX → văn bản thường (model thỉnh thoảng vẫn xổ LaTeX dù bị cấm) ── */
+  /* cấu trúc trước (\frac, \text, \left/\right) — làm trước khi đổi ký hiệu lệnh */
+  s=s.replace(/\\left\s*([([{|.])/g,(m,b)=>b==='.'?'':b).replace(/\\right\s*([)\]}|.])/g,(m,b)=>b==='.'?'':b);
+  /* \text{} trước (gỡ ngoặc nhọn lồng) rồi mới \frac{}{} */
+  for(let i=0;i<3;i++)
+    s=s.replace(/\\(?:text|mathrm|mathbf|mathit|operatorname|textbf|textit)\s*\{([^{}]*)\}/g,'$1');
+  for(let i=0;i<3;i++)
+    s=s.replace(/\\(?:d?frac|tfrac|cfrac)\s*\{([^{}]*)\}\s*\{([^{}]*)\}/g,'($1) / ($2)');
+  /* ký hiệu lệnh — \b chặn nuốt prefix (vd \left không bị \le ăn) */
+  const sym=[['(?:rightarrow|to)','→'],['leftarrow','←'],['(?:downarrow|searrow)','↓'],
+    ['(?:uparrow|nearrow)','↑'],['(?:updownarrow|leftrightarrow)','↔'],['times','×'],
+    ['(?:leq|le)','≤'],['(?:geq|ge)','≥'],['(?:neq|ne)','≠'],['approx','≈'],['(?:pm|mp)','±'],
+    ['div','÷'],['(?:cdot|ast)','·'],['Delta','Δ'],['delta','δ'],['percent','%'],
+    ['alpha','α'],['beta','β'],['sum','Σ'],['infty','∞']];
+  for(const [pat,ch] of sym) s=s.replace(new RegExp('\\\\(?:'+pat+')(?![a-zA-Z])','g'),ch);
+  s=s.replace(/\\[,;:!\s]/g,' ');                 /* khoảng trắng LaTeX */
+  s=s.replace(/\$\$([\s\S]*?)\$\$/g,'$1').replace(/\$([^$\n]+?)\$/g,'$1'); /* bỏ $...$ và $$...$$ */
+  s=s.replace(/\\([%$&#_{}])/g,'$1');              /* ký tự escape: \% \$ \& \# \_ \{ \} */
+  s=s.replace(/\\[()[\]]/g,'');                    /* \( \) \[ \] còn sót */
   s=esc(s);
   s=s.replace(/```[a-z]*\n?([\s\S]*?)```/g,(m,c)=>'<code>'+c.trim()+'</code>');
   s=s.replace(/`([^`\n]+)`/g,'<code>$1</code>');
@@ -1769,7 +1782,7 @@ function App(){
   const DECHO_CHAT={
     endpoint:'/api/agent/chat/stream',storageKey:'decho-chat',
     greeting:'Yo Đại ca! Đệ là DeCho 🤖 — all-in-one luôn:\n• "chạy kiểm tra ngay" → đo Core Web Vitals 19 URL\n• "chạy báo cáo SEO tháng vừa rồi" → kéo GSC + GA4\n• "trang nào chậm nhất?", "traffic tháng này sao?" → Đệ đọc Sheet phân tích liền\n• "thêm https://...", "đổi lịch sang daily 8h" → chỉnh cấu hình bằng mồm\n\nChill thôi, nhưng output thì xịn. No cap.',
-    chips:[['play','Chạy PageSpeed','Chạy kiểm tra ngay'],['news','Báo cáo SEO','Chạy báo cáo SEO tháng vừa rồi'],['dash','Phân tích PSI','Phân tích kết quả PageSpeed lần chạy gần nhất'],['trend','Phân tích SEO','Phân tích số liệu SEO tháng gần nhất'],['clipboard','Trạng thái','Trạng thái hệ thống thế nào?']],
+    chips:[['play','Chạy PageSpeed','Chạy kiểm tra ngay'],['news','Báo cáo SEO','Chạy báo cáo SEO tháng vừa rồi'],['dash','Phân tích PSI','Phân tích kết quả PageSpeed lần chạy gần nhất'],['trend','Phân tích SEO','Phân tích số liệu SEO tháng gần nhất'],['clipboard','Trạng thái','Trạng thái hệ thống thế nào?'],['chat','DeCho làm được gì?','DeCho làm được những gì? Hướng dẫn cách dùng nhanh đi']],
     placeholder:'Nhắn Đệ bất cứ gì: chạy check, báo cáo SEO, phân tích, thêm URL…',
   };
 
@@ -1800,7 +1813,11 @@ function App(){
       {/* Sidebar */}
       <aside className="w-60 flex-none flex flex-col gap-1 p-3 bg-white dark:bg-slate-900 border-r border-slate-200 dark:border-slate-800">
         <div className="flex items-center gap-2.5 px-2.5 pb-3">
-          <div className="w-9 h-9 rounded-xl grid place-items-center text-emerald-600 dark:text-emerald-400 bg-gradient-to-br from-emerald-100 to-cyan-100 dark:from-emerald-900 dark:to-cyan-900 border border-slate-200 dark:border-slate-700"><NavIcon id="zap"/></div>
+          <div className="w-9 h-9 rounded-xl grid place-items-center overflow-hidden bg-gradient-to-br from-emerald-100 to-cyan-100 dark:from-emerald-900 dark:to-cyan-900 border border-slate-200 dark:border-slate-700">
+            <img src="/static/decho.png" alt="DeCho" className="w-full h-full object-cover"
+                 onError={e=>{e.currentTarget.style.display='none';e.currentTarget.nextSibling.style.display='block'}}/>
+            <span className="text-emerald-600 dark:text-emerald-400" style={{display:'none'}}><NavIcon id="zap"/></span>
+          </div>
           <b className="text-[14.5px]">DeCho Agent</b>
         </div>
         {NAV.map((n,i)=>n.sec
