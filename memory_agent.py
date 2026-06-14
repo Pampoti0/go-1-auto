@@ -236,3 +236,12 @@ def persist_turns_safe(actor: str, session: str, turns: list[tuple[str, str]]):
     Nhờ vậy fact hiện trong panel sau vài giây thay vì chờ auto-gen (có thể rất trễ)."""
     add_turns_safe(actor, session, turns)
     generate_records_safe(actor, session)
+
+
+def remember_fact_safe(actor: str, session: str, fact: str):
+    """Lưu 1 fact do user CHỦ ĐỘNG yêu cầu nhớ: ghi như event có nhãn rồi ép chắt lọc record ngay."""
+    fact = (fact or "").strip()
+    if not fact:
+        return
+    add_turns_safe(actor, session, [("user", f"[GHI NHỚ] {fact}")])
+    generate_records_safe(actor, session)

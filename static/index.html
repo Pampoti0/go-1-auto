@@ -1879,22 +1879,26 @@ function AdsView(){
 
 /* ───────────────────────── Config ───────────────────────── */
 function MemoryCard(){
-  const [st,setSt]=useState({loading:true,configured:false,facts:[]});
+  const [st,setSt]=useState({loading:true,loaded:false,configured:false,facts:[],at:null});
   const load=()=>{
     setSt(s=>({...s,loading:true}));
     fetch(`/api/memory/records?user_id=${memIds.uid}`).then(r=>r.json())
-      .then(d=>setSt({loading:false,configured:!!d.configured,facts:d.facts||[],error:d.error}))
-      .catch(e=>setSt({loading:false,configured:false,facts:[],error:e.message}));
+      .then(d=>setSt({loading:false,loaded:true,configured:!!d.configured,facts:d.facts||[],error:d.error,at:new Date()}))
+      .catch(e=>setSt(s=>({...s,loading:false,loaded:true,error:e.message,at:new Date()})));
   };
-  useEffect(()=>{load();const id=setInterval(load,8000);return()=>clearInterval(id)},[]); // tự làm mới: fact vừa chắt lọc sẽ hiện sau vài giây
+  useEffect(()=>{load();const id=setInterval(load,15000);return()=>clearInterval(id)},[]); // tự làm mới mỗi 15s
+  const fmtTime=d=>d?d.toLocaleTimeString('vi-VN',{hour:'2-digit',minute:'2-digit',second:'2-digit'}):'';
   return (
     <div className={mosaicCard+" p-5 flex flex-col gap-3"} style={{gridColumn:'1/-1'}}>
       <div className="flex items-center gap-2">
-        <h3 className="text-sm font-bold flex items-center gap-2"><span className="text-violet-500"><NavIcon id="chat"/></span>Đệ nhớ gì về Đại ca</h3>
-        <span className="text-[11px] text-slate-400">AgentBase Memory — fact dài hạn tự chưng cất từ hội thoại</span>
-        <button onClick={load} className={chipCls+" ml-auto inline-flex items-center gap-1.5"}><NavIcon id="refresh" cls="w-3.5 h-3.5"/>Tải lại</button>
+        <h3 className="text-sm font-bold flex items-center gap-2 flex-none"><span className="text-violet-500"><NavIcon id="chat"/></span>Đệ nhớ gì về Đại ca</h3>
+        <span className="text-[11px] text-slate-400 truncate hidden md:inline">AgentBase Memory — fact dài hạn tự chưng cất từ hội thoại</span>
+        {st.at&&<span className="ml-auto text-[11px] text-slate-400 flex-none">Cập nhật {fmtTime(st.at)}</span>}
+        <button onClick={load} disabled={st.loading} className={chipCls+(st.at?"":" ml-auto")+" inline-flex items-center gap-1.5 flex-none"}>
+          <NavIcon id="refresh" cls={"w-3.5 h-3.5"+(st.loading?" animate-spin":"")}/>Tải lại
+        </button>
       </div>
-      {st.loading?<Spinner/>
+      {!st.loaded?<Spinner/>
         :!st.configured?<p className="text-xs text-slate-400">Chưa bật memory — cần env <code>MEMORY_ID</code> (xem .env.example).</p>
         :st.facts.length===0?<p className="text-xs text-slate-400">Chưa có fact nào — chat thêm với Đệ, vài giây sau fact sẽ tự xuất hiện ở đây.{st.error?` (${st.error})`:''}</p>
         :<ul className="text-[13px] text-slate-600 dark:text-slate-300 flex flex-col gap-1.5">

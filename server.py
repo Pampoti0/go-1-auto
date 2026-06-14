@@ -65,6 +65,11 @@ def _md_file(env_key: str, default_name: str, header: str) -> str:
     return _md_cache[key]["text"]
 
 
+import logging
+
+log = logging.getLogger("decho")
+
+
 def _rules() -> str:
     """RULE.md — NGUYÊN TẮC bất khả xâm phạm (chống bịa đặt). Ưu tiên cao nhất,
     nhúng vào MỌI prompt (kể cả phân loại intent)."""
@@ -145,6 +150,7 @@ def _run_seo_safe(year: int | None = None, month: int | None = None, url_contain
 
 
 _pending_range: dict = {}  # đề xuất date range đang chờ user xác nhận
+_pending_op: dict = {}     # thao tác config (xóa URL / đổi lịch) đang chờ xác nhận
 
 
 def _run_seo_range_safe(start: str, end: str, url_contains: str | None = None):
@@ -589,6 +595,106 @@ def _system_prompt() -> str:
     )
 
 
+_KNOWN_ACTIONS = {
+    "run_check", "query_results", "list_urls", "add_url", "remove_url", "set_schedule",
+    "run_report", "seo_range", "confirm", "seo_query", "list_months", "ads_list", "ads_perf",
+    "status", "help", "web_search", "web_fetch", "priority_fix", "action_plan",
+    "diagnose_drop", "fix_suggest", "remember", "reply",
+}
+_TOOL_ALIAS = {"search": "web_search", "websearch": "web_search", "fetch": "web_fetch",
+               "read_url": "web_fetch", "readurl": "web_fetch", "open_url": "web_fetch", "browse": "web_fetch"}
+
+
+def _extract_tool_action(text: str) -> dict | None:
+    """Một số model (Gemma/minimax) trả khối <tool_code> hoặc tool => 'x' thay vì JSON thuần.
+    Bóc tên tool + query/url ra thành action dict để Đệ vẫn thực thi đúng (thay vì in raw ra màn hình)."""
+    import re
+    if not text:
+        return None
+    m = re.search(r"""(?:tool|action|name)["']?\s*(?:=>|:|=)\s*["']?([a-zA-Z_]+)["']?""", text)
+    if not m:
+        # Không có key tool/action nhưng có JSON trần {"url":...}/{"query":...} (model giả tool-call) → route thật
+        mj = re.search(r'\{\s*"url"\s*:\s*"(https?://[^"]+)"', text)
+        if mj:
+            return {"action": "web_fetch", "url": mj.group(1)}
+        mj = re.search(r'\{\s*"query"\s*:\s*"([^"]+)"', text)
+        if mj:
+            return {"action": "web_search", "query": mj.group(1)}
+        return None
+    tool = _TOOL_ALIAS.get(m.group(1).strip().lower(), m.group(1).strip().lower())
+    if tool not in _KNOWN_ACTIONS:
+        return None
+    out = {"action": tool}
+
+    def _grab(*names):
+        tags = "|".join(names)
+        mt = re.search(rf"<(?:{tags})>(.*?)</(?:{tags})>", text, re.S | re.I)
+        if mt:
+            return mt.group(1).strip()
+        mk = re.search(rf"""(?:{tags})["']?\s*(?:=>|:|=)\s*["']([^"']+)["']""", text, re.I)
+        return mk.group(1).strip() if mk else ""
+
+    if tool == "web_search":
+        out["query"] = _grab("query", "q")
+    elif tool == "remember":
+        out["fact"] = _grab("fact", "query", "text")
+    elif tool in ("web_fetch", "add_url", "remove_url"):
+        mu = re.search(r"https?://[^\s'\"<>)]+", text)
+        if mu:
+            out["url"] = mu.group(0)
+    return out
+
+
+def _validate_action(data: dict) -> dict:
+    """Chặn action thiếu field bắt buộc → đổi sang hỏi lại, tránh thực thi sai (Đệ hết 'hứa suông')."""
+    a = data.get("action")
+    if a == "add_url" and not str(data.get("url") or "").strip():
+        return {"action": "reply", "text": "Đại ca cho Đệ URL cụ thể để thêm nha (vd: https://...)."}
+    if a == "remove_url" and not str(data.get("url") or "").strip():
+        return {"action": "reply", "text": "Đại ca muốn xóa URL nào? Cho Đệ URL hoặc từ khóa của nó nha."}
+    if a == "set_schedule" and not any(str(data.get(k) or "").strip()
+                                       for k in ("schedule_mode", "schedule_time", "schedule_day_of_month", "schedule_weekday")):
+        return {"action": "reply", "text": "Đổi lịch thế nào hả Đại ca? Nói rõ giúp Đệ: daily/weekly/monthly + giờ (vd 'daily 8h sáng')."}
+    if a == "remember" and not str(data.get("fact") or "").strip():
+        return {"action": "remember", "fact": ""}  # để handler tự lấy nguyên câu của user
+    return data
+
+
+def _describe_op(data: dict) -> str:
+    """Mô tả thao tác config để hỏi xác nhận."""
+    a = data.get("action")
+    if a == "remove_url":
+        return f"**xóa URL** khớp '{data.get('url')}' khỏi danh sách theo dõi?"
+    if a == "set_schedule":
+        bits = [f"{k.replace('schedule_', '')}={data[k]}" for k in
+                ("schedule_mode", "schedule_time", "schedule_day_of_month", "schedule_weekday") if data.get(k)]
+        return "**đổi lịch PageSpeed** (" + ", ".join(bits) + ")?"
+    return "thực hiện thao tác này?"
+
+
+_EXTERNAL_CUES = ("mới nhất", "tin tức", "đối thủ", "competitor", "xu hướng thị trường",
+                  "benchmark", "bảng giá", "ra mắt", "vừa ra", "cập nhật mới", "thị trường hiện",
+                  "trên thị trường", "tình hình ngành", "best practice mới")
+_INTERNAL_CUES = ("pagespeed", "lcp", "cls", "score", "điểm", "seo", "traffic", "clicks",
+                  "impression", "campaign", "ads", "quảng cáo", "url", "lịch", "sheet",
+                  "báo cáo", "theo dõi", "decho", "đệ ", "năng lực", "làm được gì")
+
+
+def _looks_external(msg: str) -> bool:
+    """Câu hỏi RÕ RÀNG cần thông tin ngoài hệ thống/cập nhật → nên web_search (lưới an toàn khi model bỏ sót)."""
+    m = (msg or "").lower()
+    if any(k in m for k in _INTERNAL_CUES):
+        return False
+    return any(k in m for k in _EXTERNAL_CUES)
+
+
+def _proactive_suffix() -> str:
+    """Bắt mọi phân tích kết thúc bằng cảnh báo + việc nên làm tiếp — BÁM SỐ LIỆU THẬT, không bịa."""
+    return ("\n\nQUAN TRỌNG — sau phần phân tích, KẾT THÚC bằng (chỉ dựa trên số liệu thật ở trên, tuyệt đối không bịa):\n"
+            "⚠️ **Cảnh báo**: 1-2 bất thường đáng lưu ý (sụt mạnh, điểm thấp, chi phí tăng…) — KHÔNG có thì bỏ hẳn phần này.\n"
+            "👉 **Nên làm tiếp**: 1-3 việc ưu tiên cao, cụ thể & actionable, bám đúng dữ liệu vừa phân tích.")
+
+
 def _execute_action(data: dict) -> str:
     action = data.get("action")
     if action == "run_check":
@@ -776,7 +882,8 @@ def _unified_prompt() -> str:
         '{"action":"ads_perf","start":"YYYY-MM-DD","end":"YYYY-MM-DD"} — tự tính ngày như seo_range\n'
         '- Trạng thái hệ thống: {"action":"status"}\n'
         '- HƯỚNG DẪN / HỎI VỀ NĂNG LỰC ("DeCho làm được gì", "có tính năng nào", "làm sao thêm URL", "đổi lịch ở đâu", "LCP là gì", "score bao nhiêu là tốt", "lọc URL được không"): {"action":"help"}\n'
-        '- TÌM TRÊN WEB (thông tin NGOÀI dữ liệu nội bộ: tin tức/cập nhật mới, đối thủ, xu hướng thị trường, "best practice mới nhất", giá dịch vụ bên ngoài, sự kiện sau tháng 5/2025): {"action":"web_search","query":"<từ khoá tìm kiếm súc tích>"}\n'
+        '- GHI NHỚ theo yêu cầu ("nhớ giúp...", "ghi nhớ...", "DeCho nhớ là...", "lưu lại: ...", "từ giờ gọi tôi là...", "thông tin về anh/cửa hàng/brand là..."): {"action":"remember","fact":"<dữ kiện cô đọng, ngôi thứ 3 về Đại ca/doanh nghiệp>"}\n'
+        '- TÌM TRÊN WEB (thông tin NGOÀI dữ liệu nội bộ: tin tức/cập nhật mới, đối thủ, xu hướng thị trường, "best practice mới nhất", giá dịch vụ bên ngoài, sự kiện sau tháng 5/2025): {"action":"web_search","query":"<từ khoá tìm kiếm súc tích>"}. CHỦ ĐỘNG chọn web_search khi câu cần thông tin CẬP NHẬT/ngoài hệ thống — đừng trả lời chung chung từ trí nhớ rồi thôi.\n'
         '- ĐỌC 1 URL cụ thể (người dùng dán link hoặc nói "đọc/tóm tắt trang này"): {"action":"web_fetch","url":"<url>"}\n'
         '- ƯU TIÊN TỐI ƯU / trang nào nên fix trước ("nên tối ưu trang nào", "trang nào vừa chậm vừa nhiều traffic", "ưu tiên fix"): {"action":"priority_fix"}\n'
         '- KẾ HOẠCH HÀNH ĐỘNG ("tuần này nên làm gì", "cần làm gì", "lên kế hoạch", "to-do", "ưu tiên công việc"): {"action":"action_plan"}\n'
@@ -1029,7 +1136,9 @@ async def agent_chat_stream(req: ChatStreamRequest, request: Request = None):
         if memory_agent.configured() and req.user_id:
             mem_block = await asyncio.to_thread(memory_agent.memory_block, req.user_id, req.message)
             if mem_block:
-                yield ev({"type": "step", "text": "🧠 Đệ nhớ ra vài điều liên quan về Đại ca"})
+                facts = memory_agent.recall_safe(req.user_id, req.message)  # cache hit từ memory_block ở trên
+                preview = "; ".join(f[:60] for f in facts[:3])
+                yield ev({"type": "step", "text": "🧠 Đệ nhớ: " + (preview or "vài điều về Đại ca")})
         yield ev({"type": "step", "text": f"🧠 Phân tích yêu cầu ({model})..."})
         try:
             data = await _call_llm_stream(model, req.message, history, system=_unified_prompt() + mem_block)
@@ -1054,6 +1163,14 @@ async def agent_chat_stream(req: ChatStreamRequest, request: Request = None):
         action = data.get("action", "reply")
         if action == "query_data":  # alias từ prompt SEO cũ
             action = "seo_query"
+        data = _validate_action(data)            # chặn action thiếu field → hỏi lại thay vì làm sai
+        action = data.get("action", action)
+        # Lưới an toàn web-aware: model lỡ trả 'reply' cho câu rõ ràng cần info ngoài → Đệ tự tra web
+        if action == "reply" and _looks_external(req.message):
+            data = {"action": "web_search", "query": req.message}
+            action = "web_search"
+            yield ev({"type": "step", "text": "🌐 Câu này cần info ngoài — Đệ chủ động tra web"})
+        log.info("DeCho action=%s | msg=%r", action, (req.message or "")[:120])
 
         labels = {"run_check": "Chạy kiểm tra PageSpeed", "query_results": "Phân tích kết quả PageSpeed",
                   "list_urls": "Liệt kê URL", "add_url": "Thêm URL", "remove_url": "Xóa URL",
@@ -1063,7 +1180,8 @@ async def agent_chat_stream(req: ChatStreamRequest, request: Request = None):
                   "status": "Trạng thái hệ thống", "help": "Hướng dẫn năng lực",
                   "web_search": "Tìm trên web", "web_fetch": "Đọc trang web",
                   "priority_fix": "Ưu tiên tối ưu", "action_plan": "Kế hoạch hành động",
-                  "diagnose_drop": "Chẩn đoán sụt giảm", "fix_suggest": "Gợi ý cách sửa", "reply": "Trả lời"}
+                  "diagnose_drop": "Chẩn đoán sụt giảm", "fix_suggest": "Gợi ý cách sửa",
+                  "remember": "Ghi nhớ", "reply": "Trả lời"}
         yield ev({"type": "step", "text": f"⚙️ Action: {labels.get(action, action)}"})
 
         async def stream_analysis(system_prompt: str):
@@ -1124,6 +1242,19 @@ async def agent_chat_stream(req: ChatStreamRequest, request: Request = None):
             yield ev({"type": "step", "text": "📖 Tra năng lực DeCho..."})
             async for chunk in stream_analysis(_help_prompt()):
                 yield chunk
+            yield ev({"type": "done"})
+            return
+
+        # ── Ghi nhớ theo yêu cầu (lưu fact dài hạn ngay) ──
+        if action == "remember":
+            fact = (str(data.get("fact") or "").strip() or req.message.strip())[:500]
+            if memory_agent.configured() and req.user_id and req.session_id:
+                yield ev({"type": "step", "text": "🧠 Đệ ghi vào trí nhớ dài hạn..."})
+                threading.Thread(target=memory_agent.remember_fact_safe,
+                                 args=(req.user_id, req.session_id, fact), daemon=True).start()
+                yield ev({"type": "final", "text": f"Rõ! Đệ khắc cốt ghi tâm nha Đại ca: **{fact}** 🧠\n(Vài giây nữa nó sẽ hiện ở mục “Đệ nhớ gì về Đại ca”.)"})
+            else:
+                yield ev({"type": "final", "text": "Đệ chưa bật được trí nhớ dài hạn (thiếu cấu hình MEMORY_ID) nên chưa lưu lâu dài được. Trong phiên này thì Đệ vẫn nhớ nha Đại ca."})
             yield ev({"type": "done"})
             return
 
@@ -1271,9 +1402,17 @@ async def agent_chat_stream(req: ChatStreamRequest, request: Request = None):
             yield ev({"type": "done"})
             return
 
-        # ── PSI: quản lý URL / lịch ──
-        if action in ("list_urls", "add_url", "remove_url", "set_schedule"):
+        # ── PSI: đọc/thêm (an toàn) → làm ngay ──
+        if action in ("list_urls", "add_url"):
             yield ev({"type": "final", "text": _execute_action(data)})
+            yield ev({"type": "done"})
+            return
+        # ── PSI: xóa URL / đổi lịch (dễ ngoài ý muốn nếu model đoán sai) → XÁC NHẬN trước ──
+        if action in ("remove_url", "set_schedule"):
+            _pending_op.clear()
+            _pending_op.update({"data": data, "ts": time.time()})
+            yield ev({"type": "final", "text": "Đại ca xác nhận giúp Đệ: " + _describe_op(data)
+                      + "\nNhắn “ok”/“đồng ý” để Đệ làm, hoặc nói lại cho đúng nha."})
             yield ev({"type": "done"})
             return
 
@@ -1299,7 +1438,7 @@ async def agent_chat_stream(req: ChatStreamRequest, request: Request = None):
             extra = ("\nLƯU Ý: đây là dữ liệu ĐÃ ĐO trong tháng " + tab +
                      " (PageSpeed không đo lại quá khứ được). Kết thúc câu trả lời bằng đúng 1 câu mời theo tính cách: "
                      "nếu Đại ca muốn số liệu mới nhất thì nói 'chạy kiểm tra ngay' để Đệ đo liền.") if month else ""
-            async for chunk in stream_analysis(_results_prompt(tab, headers, rows) + extra):
+            async for chunk in stream_analysis(_results_prompt(tab, headers, rows) + extra + _proactive_suffix()):
                 yield chunk
             yield ev({"type": "done"})
             return
@@ -1404,7 +1543,7 @@ async def agent_chat_stream(req: ChatStreamRequest, request: Request = None):
                 return
             yield ev({"type": "step", "text": f"📊 {len(perf['rows'])} dòng ({perf['start']} → {perf['end']})"})
             yield ev({"type": "step", "text": f"🧠 Phân tích dữ liệu ({model})..."})
-            async for chunk in stream_analysis(_ads_prompt(perf)):
+            async for chunk in stream_analysis(_ads_prompt(perf) + _proactive_suffix()):
                 yield chunk
             yield ev({"type": "done"})
             return
@@ -1467,6 +1606,13 @@ async def agent_chat_stream(req: ChatStreamRequest, request: Request = None):
 
         # ── Bước 2: user xác nhận → chạy range đang chờ ──
         if action == "confirm":
+            if _pending_op.get("data") and time.time() - _pending_op.get("ts", 0) <= 600:
+                op = _pending_op["data"]
+                _pending_op.clear()
+                yield ev({"type": "step", "text": "✅ Đã xác nhận — Đệ thực thi"})
+                yield ev({"type": "final", "text": _execute_action(op)})
+                yield ev({"type": "done"})
+                return
             if not _pending_range.get("start") or time.time() - _pending_range.get("ts", 0) > 600:
                 yield ev({"type": "final", "text": "Hiện không có đề xuất nào đang chờ xác nhận (hoặc đã quá 10 phút). Đại ca nêu lại yêu cầu nhé."})
                 yield ev({"type": "done"})
@@ -1543,7 +1689,7 @@ async def agent_chat_stream(req: ChatStreamRequest, request: Request = None):
                             if rows:
                                 yield ev({"type": "step", "text": f"✅ {result}"})
                                 yield ev({"type": "step", "text": f"🧠 Phân tích {tab} ({model})..."})
-                                async for chunk in stream_analysis(_seo_results_prompt(tab, headers, rows)):
+                                async for chunk in stream_analysis(_seo_results_prompt(tab, headers, rows) + _proactive_suffix()):
                                     yield chunk
                                 analyzed = True
                         except Exception as e:  # noqa: BLE001
@@ -1589,7 +1735,7 @@ async def agent_chat_stream(req: ChatStreamRequest, request: Request = None):
                     summaries.append(_seo_month_summary(t, headers, rows))
                     yield ev({"type": "step", "text": f"📊 {t}: {len(rows)} URL"})
                 yield ev({"type": "step", "text": f"🧠 Phân tích xu hướng {len(summaries)} tháng ({model})..."})
-                async for chunk in stream_analysis(_seo_trend_prompt(summaries)):
+                async for chunk in stream_analysis(_seo_trend_prompt(summaries) + _proactive_suffix()):
                     yield chunk
                 yield ev({"type": "done"})
                 return
@@ -1605,7 +1751,7 @@ async def agent_chat_stream(req: ChatStreamRequest, request: Request = None):
                 return
             yield ev({"type": "step", "text": f"📊 Đọc {len(rows)} dòng từ SEO Sheet tab {tab}"})
             yield ev({"type": "step", "text": f"🧠 Phân tích dữ liệu ({model})..."})
-            async for chunk in stream_analysis(_seo_results_prompt(tab, headers, rows)):
+            async for chunk in stream_analysis(_seo_results_prompt(tab, headers, rows) + _proactive_suffix()):
                 yield chunk
             yield ev({"type": "done"})
             return
@@ -2267,7 +2413,7 @@ async def seo_chat_stream(req: ChatStreamRequest, request: Request = None):
                             if rows:
                                 yield ev({"type": "step", "text": f"✅ {result}"})
                                 yield ev({"type": "step", "text": f"🧠 Phân tích {tab} ({model})..."})
-                                async for chunk in stream_analysis(_seo_results_prompt(tab, headers, rows)):
+                                async for chunk in stream_analysis(_seo_results_prompt(tab, headers, rows) + _proactive_suffix()):
                                     yield chunk
                                 analyzed = True
                         except Exception as e:  # noqa: BLE001
@@ -2364,7 +2510,7 @@ async def seo_chat_stream(req: ChatStreamRequest, request: Request = None):
                     summaries.append(_seo_month_summary(t, headers, rows))
                     yield ev({"type": "step", "text": f"📊 {t}: {len(rows)} URL"})
                 yield ev({"type": "step", "text": f"🧠 Phân tích xu hướng {len(summaries)} tháng ({model})..."})
-                async for chunk in stream_analysis(_seo_trend_prompt(summaries)):
+                async for chunk in stream_analysis(_seo_trend_prompt(summaries) + _proactive_suffix()):
                     yield chunk
                 yield ev({"type": "done"})
                 return
@@ -2382,7 +2528,7 @@ async def seo_chat_stream(req: ChatStreamRequest, request: Request = None):
                 return
             yield ev({"type": "step", "text": f"📊 Đọc {len(rows)} dòng từ tab {tab}"})
             yield ev({"type": "step", "text": f"🧠 Phân tích dữ liệu ({model})..."})
-            async for chunk in stream_analysis(_seo_results_prompt(tab, headers, rows)):
+            async for chunk in stream_analysis(_seo_results_prompt(tab, headers, rows) + _proactive_suffix()):
                 yield chunk
             yield ev({"type": "done"})
             return
@@ -2414,7 +2560,9 @@ async def _call_llm_stream(model: str, message: str, history: list[dict] | None 
     payload = {
         "model": model, "stream": True, "temperature": 0, "max_tokens": 4096,
         # /no_think: tắt thinking mode của Qwen cho bước phân loại intent (không cần suy luận dài)
-        "messages": [{"role": "system", "content": (system or _system_prompt()) + "\nTrả về JSON ngay, không suy luận dài. /no_think"},
+        "messages": [{"role": "system", "content": (system or _system_prompt()) + "\nCHỈ trả về JSON thuần (KHÔNG dùng <tool_code>, KHÔNG markdown ```, KHÔNG thẻ XML, KHÔNG 'tool =>'). "
+                     "TUYỆT ĐỐI KHÔNG tự diễn cảnh gọi tool trong câu trả lời (không viết '🔍 Đang lấy dữ liệu...', không in {\"url\":...}/{\"query\":...} rồi tự BỊA bảng/kết quả). "
+                     "Cần dữ liệu ngoài → chỉ trả ĐÚNG 1 JSON action (web_search/web_fetch) để hệ thống chạy THẬT. Trả JSON ngay, không suy luận dài. /no_think"},
                      *(history or []),
                      {"role": "user", "content": message}],
     }
@@ -2447,19 +2595,27 @@ async def _call_llm_stream(model: str, message: str, history: list[dict] | None 
 
     # Gom toàn bộ rồi mới xử lý — an toàn với thẻ <think> bị cắt giữa các chunk
     raw_text = "".join(content_parts)
-    visible = re.sub(r"<think>.*?(?:</think>|$)", "", raw_text, flags=re.S).strip()
+    visible = re.sub(r"<think>.*?(?:</think>|$)", "", raw_text, flags=re.S)
+    visible = re.sub(r"<tool_code>.*?(?:</tool_code>|$)", "", visible, flags=re.S)  # bỏ khối tool_code khỏi text
+    visible = re.sub(r"</?(?:query|fact|tool_code|args)>", "", visible).strip()    # bỏ thẻ lẻ còn sót
 
     # Tìm JSON action: hỗ trợ cả MẢNG nhiều action lẫn object đơn.
     # Ưu tiên ký tự mở xuất hiện TRƯỚC — tránh vớ nhầm mảng con bên trong object
     # (vd {"action":"query_data","months":[...]}).
+    def _repair(cand: str) -> str:
+        c = re.sub(r"```(?:json)?", "", cand)     # bỏ code fence ```json ... ```
+        c = re.sub(r",\s*([}\]])", r"\1", c)      # bỏ trailing comma trước } hoặc ]
+        return c
+
     def _try_parse(cand: str):
-        pairs = sorted((p for p in (("{", "}"), ("[", "]")) if p[0] in cand and p[1] in cand),
-                       key=lambda p: cand.index(p[0]))
-        for op, cl in pairs:
-            try:
-                return json.loads(cand[cand.index(op):cand.rindex(cl) + 1])
-            except Exception:  # noqa: BLE001
-                continue
+        for variant in (cand, _repair(cand)):     # thử bản gốc, rồi bản đã sửa nhẹ
+            pairs = sorted((p for p in (("{", "}"), ("[", "]")) if p[0] in variant and p[1] in variant),
+                           key=lambda p: variant.index(p[0]))
+            for op, cl in pairs:
+                try:
+                    return json.loads(variant[variant.index(op):variant.rindex(cl) + 1])
+                except Exception:  # noqa: BLE001
+                    continue
         return None
 
     for cand in (visible, raw_text, "".join(reasoning_parts)):
@@ -2470,8 +2626,15 @@ async def _call_llm_stream(model: str, message: str, history: list[dict] | None 
                 return {"action": "batch", "items": items}
         elif isinstance(val, dict) and val.get("action"):
             return val
+    # Model trả <tool_code>/tool=>'x' thay vì JSON → bóc tool ra thực thi (không in raw)
+    tool_act = _extract_tool_action(raw_text) or _extract_tool_action("".join(reasoning_parts))
+    if tool_act:
+        return tool_act
     if visible:
-        return {"action": "reply", "text": visible}
+        # Lưới an toàn: bỏ dòng chỉ chứa 1 JSON tool-key (model lỡ in {"url":...}/{"query":...} ra prose)
+        clean = re.sub(r'(?m)^\s*\{\s*"(?:url|query|action|tool|fact|args)"\s*:.*\}\s*,?\s*$', "", visible)
+        clean = re.sub(r"\n{3,}", "\n\n", clean).strip()
+        return {"action": "reply", "text": clean or visible}
     return {"action": "reply", "text": "❌ Model không trả về nội dung."}
 
 
