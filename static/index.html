@@ -21,6 +21,7 @@ tailwind.config={darkMode:'class',theme:{extend:{colors:{accent:'#0ea371',accent
 ::-webkit-scrollbar{width:8px;height:8px}::-webkit-scrollbar-thumb{background:rgba(120,130,150,.35);border-radius:4px}
 .md b{font-weight:700}
 .md code{background:rgba(120,130,150,.15);border:1px solid rgba(120,130,150,.25);border-radius:5px;padding:1px 5px;font-size:12.5px;font-family:ui-monospace,monospace}
+.md pre.cb{background:rgba(120,130,150,.13);border:1px solid rgba(120,130,150,.25);border-radius:8px;padding:9px 11px;margin:7px 0;font-size:12px;line-height:1.55;font-family:ui-monospace,monospace;white-space:pre;overflow-x:auto;max-width:100%}
 .md table{border-collapse:collapse;margin:8px 0;font-size:12.5px;display:block;max-width:100%;overflow-x:auto;white-space:nowrap}
 .md th,.md td{border:1px solid rgba(120,130,150,.28);padding:4px 11px;text-align:right}
 .md th:first-child,.md td:first-child{text-align:left}
@@ -127,7 +128,9 @@ function md(s){
   s=s.replace(/\\([%$&#_{}])/g,'$1');              /* ký tự escape: \% \$ \& \# \_ \{ \} */
   s=s.replace(/\\[()[\]]/g,'');                    /* \( \) \[ \] còn sót */
   s=esc(s);
-  s=s.replace(/```[a-z]*\n?([\s\S]*?)```/g,(m,c)=>'<code>'+c.trim()+'</code>');
+  /* code block ``` → tách ra placeholder (bảo vệ khỏi bold/bullet/table/autolink), khôi phục ở cuối */
+  const _cb=[];
+  s=s.replace(/```[a-z]*\n?([\s\S]*?)```/g,(m,c)=>{_cb.push('<pre class="cb">'+c.replace(/\s+$/,'')+'</pre>');return '\x00CB'+(_cb.length-1)+'\x00'});
   s=s.replace(/`([^`\n]+)`/g,'<code>$1</code>');
   s=s.replace(/\*\*([^*\n]+)\*\*/g,'<b>$1</b>');
   s=s.replace(/(^|\n)#{1,4} (.*)/g,'$1<b>$2</b>');
@@ -156,6 +159,7 @@ function md(s){
   s=s.replace(/(^|[\s(>])((?:https?:\/\/|www\.)[^\s<>"')\]]+[^\s<>"')\].,;:])/g,
     (m,pre,url)=>pre+'<a href="'+(url.startsWith('www.')?'https://'+url:url)+'" target="_blank" rel="noopener" class="text-violet-500 hover:underline break-all">'+url+'</a>');
   s=s.replace(/\n{3,}/g,'\n\n');
+  s=s.replace(/\x00CB(\d+)\x00/g,(m,i)=>_cb[+i]||'');  /* khôi phục code block */
   return s;
 }
 const scoreColor=n=>n>=90?'#0ea371':(n>=50?'#d97706':'#dc2626');
@@ -859,7 +863,7 @@ function ChatView({cfg,model}){
   async function sendImage(text,image){
     if(busy)return;
     const now=Date.now();
-    setMsgs(m=>[...m,{me:true,text,image,ts:now},{me:false,text:'',streaming:true,ts:now}]);
+    setMsgs(m=>[...m,{me:true,text,image,ts:now},{me:false,text:'',streaming:true}]); // ts của DeCho gán lúc trả lời xong
     saveHist(true,text||'[ảnh]');
     setBusy(true);dechoBus.busy(true);
     const upd=patch=>setMsgs(m=>{const n=[...m];n[n.length-1]={...n[n.length-1],...patch};return n});
@@ -868,11 +872,11 @@ function ChatView({cfg,model}){
         body:JSON.stringify({image,question:text,model,user_id:memIds.uid,session_id:memIds.sid})})).json();
       const t=r.reply||('❌ '+(r.error||'Đệ đọc ảnh không được'));
       const err=!r.reply;
-      upd({text:t,streaming:false,error:err});
+      upd({text:t,streaming:false,error:err,ts:Date.now()});
       saveHist(false,t);
       dechoBus.act(err?'sad':'nod');
     }catch(e){
-      upd({text:'❌ Lỗi gửi ảnh: '+e.message,error:true,streaming:false});
+      upd({text:'❌ Lỗi gửi ảnh: '+e.message,error:true,streaming:false,ts:Date.now()});
     }finally{setBusy(false);dechoBus.busy(false)}
   }
 
@@ -914,7 +918,7 @@ function ChatView({cfg,model}){
     if(busy)return;
     saveHist(true,text);
     const now=Date.now();
-    setMsgs(m=>[...m,{me:true,text,ts:now},{me:false,text:'',steps:'',streaming:true,ts:now}]);
+    setMsgs(m=>[...m,{me:true,text,ts:now},{me:false,text:'',steps:'',streaming:true}]); // ts của DeCho gán lúc trả lời xong
     setBusy(true);
     dechoBus.busy(true);
     const aborter=new AbortController();aborterRef.current=aborter;
@@ -945,17 +949,17 @@ function ChatView({cfg,model}){
         }
       }
       if(!finalText){finalText='❌ Không nhận được phản hồi.';isErr=true;upd({text:finalText,error:true})}
-      upd({streaming:false,stepsOpen:steps.split('\n').length>3});
+      upd({streaming:false,stepsOpen:steps.split('\n').length>3,ts:Date.now()});
       saveHist(false,finalText,steps||undefined);
       dechoBus.act(isErr?'sad':'nod'); /* câu trả lời đã nằm trong chat — dock chỉ diễn cảm xúc */
     }catch(e){
       if(e.name==='AbortError'){
         const note='⏹ Đã dừng theo yêu cầu.';
         finalText=finalText?finalText+'\n\n'+note:note;
-        upd({text:finalText,streaming:false});
+        upd({text:finalText,streaming:false,ts:Date.now()});
         saveHist(false,finalText,steps||undefined);
       }else{
-        upd({text:'❌ Lỗi kết nối server: '+e.message,error:true,streaming:false});
+        upd({text:'❌ Lỗi kết nối server: '+e.message,error:true,streaming:false,ts:Date.now()});
         saveHist(false,'❌ Lỗi kết nối server: '+e.message);
       }
     }finally{aborterRef.current=null;setBusy(false);dechoBus.busy(false)}
