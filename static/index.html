@@ -1886,7 +1886,7 @@ function MemoryCard(){
       .then(d=>setSt({loading:false,configured:!!d.configured,facts:d.facts||[],error:d.error}))
       .catch(e=>setSt({loading:false,configured:false,facts:[],error:e.message}));
   };
-  useEffect(load,[]);
+  useEffect(()=>{load();const id=setInterval(load,8000);return()=>clearInterval(id)},[]); // tự làm mới: fact vừa chắt lọc sẽ hiện sau vài giây
   return (
     <div className={mosaicCard+" p-5 flex flex-col gap-3"} style={{gridColumn:'1/-1'}}>
       <div className="flex items-center gap-2">

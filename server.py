@@ -1622,7 +1622,7 @@ async def agent_chat_stream(req: ChatStreamRequest, request: Request = None):
             if memory_agent.configured() and req.user_id and req.session_id:
                 ans = "\n\n".join(final_parts).strip()
                 turns = [("user", req.message)] + ([("assistant", ans)] if ans else [])
-                threading.Thread(target=memory_agent.add_turns_safe,
+                threading.Thread(target=memory_agent.persist_turns_safe,
                                  args=(req.user_id, req.session_id, turns), daemon=True).start()
 
     return StreamingResponse(gen_with_memory(), media_type="text/event-stream",
@@ -1693,7 +1693,7 @@ def decho_ask(req: DechoAskRequest, request: Request = None):
             reply = (f"Dạ để Đệ chỉnh filter liền: **{_fmt(rng['start'])} → {_fmt(rng['end'])}**. "
                      "Số liệu đang lên màn hình đó Đại ca — xem xong cần Đệ phân tích thì hỏi tiếp nha!")
             if memory_agent.configured() and req.user_id and req.session_id:
-                threading.Thread(target=memory_agent.add_turns_safe,
+                threading.Thread(target=memory_agent.persist_turns_safe,
                                  args=(req.user_id, req.session_id,
                                        [("user", req.question), ("assistant", reply)]), daemon=True).start()
             return {"reply": reply, "action": {"type": "ads_range", **rng}}
@@ -1730,7 +1730,7 @@ def decho_ask(req: DechoAskRequest, request: Request = None):
         reply = _strip_think(msg.get("content") or "") or _strip_think(msg.get("reasoning_content") or "")
         reply = reply or "Đệ bí câu này rồi Đại ca 😅"
         if memory_agent.configured() and req.user_id and req.session_id:
-            threading.Thread(target=memory_agent.add_turns_safe,
+            threading.Thread(target=memory_agent.persist_turns_safe,
                              args=(req.user_id, req.session_id,
                                    [("user", req.question), ("assistant", reply)]), daemon=True).start()
         return {"reply": reply}
@@ -1777,7 +1777,7 @@ def decho_vision(req: VisionRequest):
         reply = _strip_think(msg.get("content") or "") or _strip_think(msg.get("reasoning_content") or "")
         reply = reply or "Đệ nhìn ảnh nhưng chưa mô tả được gì rõ ràng 😅"
         if memory_agent.configured() and req.user_id and req.session_id:
-            threading.Thread(target=memory_agent.add_turns_safe,
+            threading.Thread(target=memory_agent.persist_turns_safe,
                              args=(req.user_id, req.session_id,
                                    [("user", f"[gửi 1 ảnh] {q}"), ("assistant", reply)]), daemon=True).start()
         return {"reply": reply, "model": model}

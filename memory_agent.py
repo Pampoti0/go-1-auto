@@ -207,3 +207,32 @@ def list_records(actor: str, limit: int = 50) -> list[str]:
     resp = _req("GET", f"/memories/{MEMORY_ID}/memory-records",
                 params={"namespace": _namespace(actor), "limit": limit})
     return [t for t in (_record_text(it) for it in _items(resp)) if t.strip()]
+
+
+# ── Long-term: ép chắt lọc record NGAY (khỏi chờ auto-gen bất đồng bộ) ──
+
+def generate_records(actor: str, session: str) -> int:
+    """Ép LTMS chắt lọc fact dài hạn từ session này ngay lập tức.
+    REST: POST /memory-records:generate-from-session (AgentBase Memory docs).
+    Trả số record sinh ra (chỉ để log)."""
+    sid = strategy_id()
+    if not sid:
+        return 0
+    resp = _req("POST", f"/memories/{MEMORY_ID}/memory-records:generate-from-session",
+                params={"actorId": actor, "sessionId": session, "longTermMemoryStrategyId": sid})
+    return len(_items(resp))
+
+
+def generate_records_safe(actor: str, session: str):
+    try:
+        n = generate_records(actor, session)
+        log.info(f"Memory generate-from-session: {n} record (actor={actor[:8]}…)")
+    except Exception as e:  # noqa: BLE001
+        log.warning(f"Memory generate-from-session lỗi (bỏ qua): {type(e).__name__}: {e}")
+
+
+def persist_turns_safe(actor: str, session: str, turns: list[tuple[str, str]]):
+    """Ghi event các lượt chat → rồi ép chắt lọc record ngay. Chạy thread nền, nuốt lỗi.
+    Nhờ vậy fact hiện trong panel sau vài giây thay vì chờ auto-gen (có thể rất trễ)."""
+    add_turns_safe(actor, session, turns)
+    generate_records_safe(actor, session)
