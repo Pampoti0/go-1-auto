@@ -412,10 +412,11 @@ function SpeechBubble({bubble,busy,fallback,className}){
 
 function DechoScene3D({className}){
   const mountRef=useRef(null);
-  const animRef=useRef({busy:false,action:null});
+  const animRef=useRef({busy:false,action:null,talkUntil:0});
   useEffect(()=>dechoBus.on(e=>{
     if(e.type==='busy')animRef.current.busy=e.b;
     else if(e.type==='act')animRef.current.action={type:e.a,start:performance.now()};
+    else if(e.type==='say')animRef.current.talkUntil=e.text?performance.now()+Math.min(e.ms||3000,3500):0;
   }),[]);
   useEffect(()=>{
     const el=mountRef.current;
@@ -439,7 +440,8 @@ function DechoScene3D({className}){
     controls.enablePan=false;controls.enableZoom=false;
     controls.target.set(0,1,0);controls.update();
 
-    const group=new THREE.Group();scene.add(group);
+    const group=new THREE.Group();group.position.y=1;scene.add(group);   // pivot ở tâm model (world y=1)
+    const body=new THREE.Group();group.add(body);                        // body: squash/scale quanh tâm
     let model=null;
     new THREE.GLTFLoader().load('/static/decho.glb',g=>{
       model=g.scene;
@@ -448,32 +450,64 @@ function DechoScene3D({className}){
       const s=2.1/Math.max(size.y,0.001);
       model.scale.setScalar(s);
       box.setFromObject(model);box.getCenter(center);
-      model.position.sub(center).add(new THREE.Vector3(0,1,0));
-      group.add(model);
+      model.position.sub(center);            // canh tâm model về gốc local của body
+      body.add(model);
+      animRef.current.action={type:'wave',start:performance.now()};  // vẫy chào khi xuất hiện
     });
 
+    // Chuột: liếc/nghiêng về phía con trỏ; tự nhìn quanh khi rảnh; ngưng liếc khi đang kéo xoay
+    const aim={x:0,y:0,tx:0,ty:0,drag:false};
+    const onMove=ev=>{if(aim.drag)return;const r=el.getBoundingClientRect();
+      aim.tx=((ev.clientX-r.left)/Math.max(r.width,1))*2-1;
+      aim.ty=((ev.clientY-r.top)/Math.max(r.height,1))*2-1;};
+    const onLeave=()=>{aim.tx=0;aim.ty=0;};
+    const onDown=()=>{aim.drag=true};const onUp=()=>{aim.drag=false};
+    el.addEventListener('pointermove',onMove);el.addEventListener('pointerleave',onLeave);
+    controls.addEventListener('start',onDown);controls.addEventListener('end',onUp);
+
+    const ease=p=>p*p*(3-2*p);
+    let nextBlink=2+Math.random()*3,nextLook=3+Math.random()*4,lookX=0;
     const clock=new THREE.Clock();
     let raf;
     const tick=()=>{
       raf=requestAnimationFrame(tick);
-      const dt=clock.getDelta(),t=clock.elapsedTime;
-      const st=animRef.current;
-      /* idle: lơ lửng + thở (không tự xoay — kéo chuột mới xoay) */
-      group.position.y=Math.sin(t*1.8)*0.06;
-      const br=1+Math.sin(t*2.3)*0.012;
-      group.scale.set(1,br,1);
-      /* busy: rung lắc nhẹ kiểu đang gõ phím */
-      group.rotation.z=st.busy?Math.sin(t*9)*0.035:group.rotation.z*0.9;
-      /* action: jump (click) / nod (trả lời xong) */
+      const dt=clock.getDelta(),t=clock.elapsedTime,st=animRef.current,now=performance.now();
+      /* ── liếc theo chuột + tự nhìn quanh khi rảnh ── */
+      nextLook-=dt;
+      if(nextLook<=0){lookX=(Math.random()*2-1)*0.6;nextLook=4+Math.random()*5}
+      const active=Math.abs(aim.tx)+Math.abs(aim.ty)>0.02;
+      const aimX=aim.drag?aim.x:(active?aim.tx:lookX*0.5),aimY=aim.drag?aim.y:(active?aim.ty:0);
+      aim.x+=(aimX-aim.x)*Math.min(1,dt*4);aim.y+=(aimY-aim.y)*Math.min(1,dt*4);
+      let rotX=aim.y*0.18,rotY=aim.x*0.32,rotZ=0;
+      /* ── idle: bồng bềnh + thở + lắc jelly ── */
+      let posY=Math.sin(t*1.8)*0.06;
+      let sqY=(1+Math.sin(t*2.3)*0.02)*(1+Math.sin(t*1.1+0.5)*0.012);
+      /* ── chớp/nảy nhẹ định kỳ (đời hơn) ── */
+      nextBlink-=dt;st._bl=st._bl||0;
+      if(nextBlink<=0){st._bl=0.32;nextBlink=4+Math.random()*4}
+      if(st._bl>0){sqY*=1-Math.sin((1-st._bl/0.32)*Math.PI)*0.045;st._bl-=dt}
+      /* ── busy/think: lắc nhẹ kiểu đang nghĩ ── */
+      if(st.busy){rotZ+=Math.sin(t*9)*0.04;rotX+=Math.sin(t*3.2)*0.05}
+      /* ── talking: nhún + gật nhẹ, êm (không co giật) ── */
+      if(now<st.talkUntil){posY+=Math.sin(t*5)*0.018;rotX+=Math.sin(t*5)*0.03}
+      /* ── action transient ── */
       if(st.action){
-        const p=(performance.now()-st.action.start)/(st.action.type==='jump'?900:1100);
-        if(p>=1){st.action=null;group.rotation.x=0}
-        else if(st.action.type==='jump'){
-          group.position.y+=Math.sin(p*Math.PI)*0.55;
-        }else{ /* nod */
-          group.rotation.x=Math.sin(p*Math.PI*3)*0.09*(1-p);
-        }
+        const a=st.action.type;
+        const dur={jump:850,nod:1000,sad:2200,wave:1400,shake:900,happy:1200,spin:1100}[a]||1000;
+        const p=(now-st.action.start)/dur;
+        if(p>=1)st.action=null;
+        else if(a==='jump'){const e=Math.sin(p*Math.PI);posY+=e*0.55;sqY*=(p<0.18?1-(0.18-p)/0.18*0.22:1+e*0.18)}
+        else if(a==='nod')rotX+=Math.sin(p*Math.PI*3)*0.11*(1-p);
+        else if(a==='shake')rotY+=Math.sin(p*Math.PI*4)*0.18*(1-p);
+        else if(a==='sad'){const e=ease(Math.min(1,p*2));rotX+=e*0.26*(1-ease(Math.max(0,(p-0.6)/0.4)));posY-=e*0.05;sqY*=1-e*0.08}
+        else if(a==='wave'){rotZ+=Math.sin(p*Math.PI*4)*0.20*(1-p);rotX-=0.05*Math.sin(p*Math.PI)}
+        else if(a==='happy'){const e=Math.sin(p*Math.PI*2);posY+=Math.abs(e)*0.18;sqY*=1+e*0.10}
+        else if(a==='spin')rotY+=p*Math.PI*2;
       }
+      const sxz=1/Math.sqrt(Math.max(sqY,0.2));   /* squash-and-stretch giữ thể tích */
+      group.position.y=1+posY;
+      group.rotation.set(rotX,rotY,rotZ);
+      body.scale.set(sxz,sqY,sxz);
       controls.update();
       renderer.render(scene,camera);
     };
@@ -485,12 +519,15 @@ function DechoScene3D({className}){
     });
     ro.observe(el);
 
-    return()=>{cancelAnimationFrame(raf);ro.disconnect();controls.dispose();
-      renderer.dispose();el.contains(renderer.domElement)&&el.removeChild(renderer.domElement)};
+    return()=>{cancelAnimationFrame(raf);ro.disconnect();
+      el.removeEventListener('pointermove',onMove);el.removeEventListener('pointerleave',onLeave);
+      controls.dispose();renderer.dispose();
+      el.contains(renderer.domElement)&&el.removeChild(renderer.domElement)};
   },[]);
 
   const poke=()=>{
-    dechoBus.act('jump');
+    const acts=['jump','happy','spin','wave','nod'];
+    dechoBus.act(acts[Math.floor(Math.random()*acts.length)]);
     dechoBus.say(QUIPS[Math.floor(Math.random()*QUIPS.length)]);
   };
   return <div ref={mountRef} onClick={poke} className={"cursor-pointer "+(className||'')} title="Click Đệ đi Đại ca"/>;
