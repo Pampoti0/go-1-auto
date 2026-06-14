@@ -738,7 +738,7 @@ function ChatView({cfg,model}){
   const [inp,setInp]=useState('');
   const [img,setImg]=useState(null);   // ảnh đính kèm (data URL đã nén)
   const [rec,setRec]=useState(false);  // đang ghi âm STT
-  const scrollRef=useRef(null), aborterRef=useRef(null), histRef=useRef([]), fileRef=useRef(null), mediaRef=useRef(null);
+  const scrollRef=useRef(null), aborterRef=useRef(null), histRef=useRef([]), fileRef=useRef(null), mediaRef=useRef(null), inpRef=useRef(null);
 
   /* Whisper MaaS chỉ nhận WAV (header RIFF). MediaRecorder ra WebM/Opus (Chrome/FF)
      hoặc MP4/AAC (Safari) → decode rồi encode lại thành WAV 16kHz mono 16-bit PCM. */
@@ -789,7 +789,11 @@ function ChatView({cfg,model}){
         const fd=new FormData();fd.append('audio',wav,'audio.wav');
         const r=await(await fetch('/api/decho/stt',{method:'POST',body:fd})).json();
         setInp(v=>v.replace(/…$/,'').trim());
-        if(r.text)setInp(v=>(v?v+' ':'')+r.text);
+        if(r.text){
+          setInp(v=>(v?v+' ':'')+r.text);
+          // focus ô chat + caret cuối dòng để Đại ca nhấn Enter gửi luôn (chờ value cập nhật xong)
+          requestAnimationFrame(()=>{const el=inpRef.current;if(el){el.focus();const n=el.value.length;try{el.setSelectionRange(n,n)}catch(_){}}});
+        }
         else dechoBus.say('❌ Nghe không rõ: '+(r.error||'thử lại nhé'),6000);
       }catch(e){setInp(v=>v.replace(/…$/,'').trim());dechoBus.say('❌ Lỗi STT: '+e.message,6000)}
     };
@@ -970,7 +974,7 @@ function ChatView({cfg,model}){
                   className={"w-11 h-11 rounded-xl flex-none grid place-items-center transition disabled:opacity-40 "+(rec?"text-white bg-red-500 hover:bg-red-600 animate-pulse":"text-slate-500 hover:text-violet-500 hover:bg-slate-100 dark:hover:bg-slate-800")}>
             <svg className="w-5 h-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="9" y="2" width="6" height="12" rx="3"/><path d="M5 10a7 7 0 0 0 14 0M12 17v4"/></svg>
           </button>
-          <input value={inp} onChange={e=>setInp(e.target.value)} placeholder={img?'Hỏi gì về ảnh này…':cfg.placeholder}
+          <input ref={inpRef} value={inp} onChange={e=>setInp(e.target.value)} placeholder={img?'Hỏi gì về ảnh này…':cfg.placeholder}
                  className="flex-1 bg-transparent outline-none pl-0 pr-2.5 text-[14.5px]"/>
           <button className={"w-11 h-11 rounded-xl text-white grid place-items-center transition "+(busy?"bg-red-500 hover:bg-red-600":"bg-violet-500 hover:bg-violet-600")}
                   title={busy?'Dừng':'Gửi'}>
@@ -2033,6 +2037,77 @@ const NAV=[
 ];
 const TITLES={home:'Tổng quan',chat:'Chat với DeCho',urls:'URL Intelligence',dash:'PageSpeed · Dashboard',alerts:'Alerts',ads:'Paid Campaigns',config:'Cấu hình'};
 
+/* ── Particle layers (mỗi vùng 1 kiểu) ─────────────────────────────────────
+   Sidebar: đốm sáng emerald/cyan trôi LÊN như đom đóm. Topbar: chòm sao violet
+   trôi NGANG nối line. Canvas absolute inset-0, pointer-events-none, nằm dưới nội
+   dung (content z-10). Tự co theo khung qua ResizeObserver, scale theo dpr. */
+function useParticleCanvas(draw){
+  const ref=useRef(null);
+  useEffect(()=>{
+    const cv=ref.current, ctx=cv.getContext('2d'), host=cv.parentElement;
+    const dpr=Math.min(window.devicePixelRatio||1,2);
+    let w=0,h=0,raf=0,parts=[],t=0,run=true;
+    function resize(){
+      const r=host.getBoundingClientRect(); w=Math.max(1,r.width); h=Math.max(1,r.height);
+      cv.width=w*dpr; cv.height=h*dpr; cv.style.width=w+'px'; cv.style.height=h+'px';
+      ctx.setTransform(dpr,0,0,dpr,0,0); parts=draw.init(w,h);
+    }
+    function tick(){ if(!run)return; t+=0.016; ctx.clearRect(0,0,w,h); draw.frame(ctx,parts,w,h,t); raf=requestAnimationFrame(tick); }
+    resize(); tick();
+    const ro=new ResizeObserver(resize); ro.observe(host);
+    const onVis=()=>{ if(document.hidden){run=false;cancelAnimationFrame(raf);} else if(!run){run=true;tick();} };
+    document.addEventListener('visibilitychange',onVis);
+    return()=>{run=false;cancelAnimationFrame(raf);ro.disconnect();document.removeEventListener('visibilitychange',onVis);};
+  },[]);
+  return ref;
+}
+
+const SIDEBAR_FX={
+  init(w,h){
+    const n=Math.max(14,Math.min(30,Math.round(h/26)));
+    return Array.from({length:n},()=>({
+      x:Math.random()*w, y:Math.random()*h, r:1+Math.random()*2.2,
+      vy:-(6+Math.random()*16)/60, sway:0.4+Math.random()*0.9, ph:Math.random()*6.28,
+      a:0.22+Math.random()*0.4, c:Math.random()<0.5?'16,185,129':'8,145,178'}));
+  },
+  frame(ctx,parts,w,h,t){
+    for(const p of parts){
+      p.y+=p.vy; p.x+=Math.sin(t*p.sway+p.ph)*0.25;
+      if(p.y<-8){p.y=h+8; p.x=Math.random()*w;}
+      const a=p.a*(0.6+0.4*Math.sin(t*2+p.ph)), R=p.r*4;
+      const g=ctx.createRadialGradient(p.x,p.y,0,p.x,p.y,R);
+      g.addColorStop(0,'rgba('+p.c+','+a+')'); g.addColorStop(1,'rgba('+p.c+',0)');
+      ctx.fillStyle=g; ctx.beginPath(); ctx.arc(p.x,p.y,R,0,6.29); ctx.fill();
+    }
+  }
+};
+function SidebarParticles(){ const ref=useParticleCanvas(SIDEBAR_FX); return <canvas ref={ref} className="absolute inset-0 pointer-events-none" style={{zIndex:0}}/>; }
+
+const TOPBAR_FX={
+  C:'139,92,246',
+  init(w,h){
+    const n=Math.max(10,Math.min(34,Math.round(w/55)));
+    return Array.from({length:n},()=>({
+      x:Math.random()*w, y:Math.random()*h, r:1+Math.random()*1.5,
+      vx:(0.2+Math.random()*0.55)*(Math.random()<0.5?1:-1), vy:(Math.random()-0.5)*0.22,
+      a:0.3+Math.random()*0.4}));
+  },
+  frame(ctx,parts,w,h){
+    const C=this.C;
+    for(const p of parts){
+      p.x+=p.vx; p.y+=p.vy;
+      if(p.x<-12)p.x=w+12; if(p.x>w+12)p.x=-12; if(p.y<-12)p.y=h+12; if(p.y>h+12)p.y=-12;
+    }
+    for(let i=0;i<parts.length;i++)for(let j=i+1;j<parts.length;j++){
+      const a=parts[i],b=parts[j],d=Math.hypot(a.x-b.x,a.y-b.y);
+      if(d<92){ ctx.strokeStyle='rgba('+C+','+(0.16*(1-d/92))+')'; ctx.lineWidth=1;
+        ctx.beginPath(); ctx.moveTo(a.x,a.y); ctx.lineTo(b.x,b.y); ctx.stroke(); }
+    }
+    for(const p of parts){ ctx.fillStyle='rgba('+C+','+p.a+')'; ctx.beginPath(); ctx.arc(p.x,p.y,p.r,0,6.29); ctx.fill(); }
+  }
+};
+function TopbarParticles(){ const ref=useParticleCanvas(TOPBAR_FX); return <canvas ref={ref} className="absolute inset-0 pointer-events-none" style={{zIndex:0}}/>; }
+
 function App(){
   const [view,setView]=useState('chat');
   const [theme,setTheme]=useLS('psi-theme','light');
@@ -2129,7 +2204,9 @@ function App(){
       <div className="fixed inset-0 -z-10 bg-cover bg-center" style={{backgroundImage:'url(/static/decho-background.jpeg)'}}/>
       <div className="fixed inset-0 -z-10 bg-white/25 dark:bg-slate-950/65"/>
       {/* Sidebar */}
-      <aside className="w-60 flex-none flex flex-col gap-1 p-3 bg-white/80 dark:bg-slate-900/80 backdrop-blur border-r border-slate-200 dark:border-slate-800">
+      <aside className="w-60 flex-none relative flex flex-col bg-white/80 dark:bg-slate-900/80 backdrop-blur border-r border-slate-200 dark:border-slate-800">
+        <SidebarParticles/>
+        <div className="relative z-10 flex-1 flex flex-col gap-1 p-3">
         <div className="flex items-center gap-2.5 px-2.5 pb-3">
           <div className="w-9 h-9 rounded-xl grid place-items-center overflow-hidden bg-gradient-to-br from-emerald-100 to-cyan-100 dark:from-emerald-900 dark:to-cyan-900 border border-slate-200 dark:border-slate-700">
             <img src="/static/decho.png" alt="DeCho" className="w-full h-full object-cover"
@@ -2154,23 +2231,25 @@ function App(){
                  :"text-slate-500 hover:bg-slate-100 dark:hover:bg-slate-800 hover:text-inherit")}><NavIcon id={n.id}/>{n.label}</button>)}
         <div className="flex-1"/>
         <DechoDock showAsk={view!=='chat'}/>
+        </div>
       </aside>
 
       {/* Content */}
       <div className="flex-1 flex flex-col min-w-0">
         <header className="relative z-30 grid items-center gap-3 px-6 py-3 bg-white/80 dark:bg-slate-900/80 backdrop-blur border-b border-slate-200 dark:border-slate-800" style={{gridTemplateColumns:'1fr auto 1fr'}}>
-          <div>
+          <TopbarParticles/>
+          <div className="relative z-10">
             <h1 className="text-[15px] font-bold">{TITLES[view]}</h1>
             <p className="text-[11.5px] text-slate-400 flex items-center gap-1.5 mt-0.5">
               <span className="w-1.5 h-1.5 rounded-full bg-accent shadow-[0_0_6px_#0ea371] flex-none"/>
               <span className="truncate">{pageSub||meta}</span></p>
           </div>
-          <div className="flex items-center gap-2 justify-self-center">
+          <div className="flex items-center gap-2 justify-self-center relative z-10">
             <label className="text-xs text-slate-400">Model</label>
             <Select value={model} onChange={setModel} className="w-40"
                     options={MODELS.map(([v,lb])=>({value:v,label:lb}))}/>
           </div>
-          <div id="header-actions" className="justify-self-end flex items-center gap-2 min-w-0"/>
+          <div id="header-actions" className="justify-self-end flex items-center gap-2 min-w-0 relative z-10"/>
         </header>
         {view==='home'&&<Overview go={setView}/>}
         {view==='chat'&&<ChatView cfg={DECHO_CHAT} model={model}/>}
