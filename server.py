@@ -21,7 +21,9 @@ import time
 from datetime import datetime
 
 import schedule
-from fastapi import FastAPI, Request
+from contextlib import asynccontextmanager
+
+from fastapi import FastAPI, File, Request, UploadFile
 from fastapi.responses import HTMLResponse, StreamingResponse
 from pydantic import BaseModel
 
@@ -85,7 +87,15 @@ def _knowledge() -> str:
     return _md_file("AGENT_FILE", "AGENT.md",
                     "\n\n# DOMAIN KNOWLEDGE & OUTPUT STANDARDS — áp dụng khi phân tích và đề xuất\n")
 
-app = FastAPI(title="DeCho Agent")
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Startup: khôi phục config, bật scheduler, warm-up Ads (logic ở _startup bên dưới)
+    _startup()
+    yield
+    # (chỗ này để dọn dẹp khi shutdown nếu sau này cần)
+
+
+app = FastAPI(title="DeCho Agent", lifespan=lifespan)
 
 from pathlib import Path as _Path  # noqa: E402
 
@@ -225,8 +235,7 @@ def _scheduler_loop():
         time.sleep(30)
 
 
-@app.on_event("startup")
-def startup():
+def _startup():
     # 1) Khôi phục config đã lưu trên Sheet (sống qua container recreate)
     if config.SHEET_ID:
         saved = sheet_store.load_config()
@@ -1772,6 +1781,33 @@ def decho_vision(req: VisionRequest):
                              args=(req.user_id, req.session_id,
                                    [("user", f"[gửi 1 ảnh] {q}"), ("assistant", reply)]), daemon=True).start()
         return {"reply": reply, "model": model}
+    except Exception as e:  # noqa: BLE001
+        return {"error": f"{type(e).__name__}: {e}"}
+
+
+@app.post("/api/decho/stt")
+async def decho_stt(audio: UploadFile = File(...)):
+    """Speech-to-Text qua MaaS Whisper (OpenAI-compatible /audio/transcriptions)."""
+    if not MAAS_API_KEY:
+        return {"error": "Chưa cấu hình MAAS_API_KEY."}
+    # STT có endpoint RIÊNG (theo user/model), khác base LLM — lấy từ portal AI Platform.
+    stt_url = os.getenv("MAAS_STT_URL", "")
+    if not stt_url:
+        return {"error": "Chưa cấu hình MAAS_STT_URL (URL Speech-to-Text từ portal, vd .../maas/user-XXXX/openai/whisper-large-v3/v1/audio/transcriptions)."}
+    import httpx
+
+    try:
+        data = await audio.read()
+        if not data:
+            return {"error": "Không nhận được dữ liệu âm thanh."}
+        files = {"file": (audio.filename or "audio.webm", data, audio.content_type or "audio/webm")}
+        form = {"model": os.getenv("MAAS_STT_MODEL", "openai/whisper-large-v3"), "response_format": "json"}
+        r = httpx.post(stt_url, files=files, data=form,
+                       headers={"Authorization": f"Bearer {MAAS_API_KEY}"}, timeout=120)
+        if r.status_code != 200:
+            return {"error": f"STT lỗi (HTTP {r.status_code}): {r.text[:200]}"}
+        j = r.json()
+        return {"text": (j.get("text") or "").strip()}
     except Exception as e:  # noqa: BLE001
         return {"error": f"{type(e).__name__}: {e}"}
 

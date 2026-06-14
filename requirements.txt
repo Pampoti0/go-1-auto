@@ -16,3 +16,6 @@ google-analytics-data
 
 # Paid Campaigns
 google-ads
+
+# Speech-to-Text (upload audio)
+python-multipart
