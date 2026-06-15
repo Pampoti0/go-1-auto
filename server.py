@@ -1399,7 +1399,7 @@ async def agent_chat_stream(req: ChatStreamRequest, request: Request = None):
                   "remember": "Ghi nhớ", "reply": "Trả lời"}
         yield ev({"type": "step", "text": f"⚙️ Action: {labels.get(action, action)}"})
 
-        async def stream_analysis(system_prompt: str):
+        async def stream_analysis(system_prompt: str, fallback_on_deflect: str | None = None):
             payload = {"model": model, "stream": True, "temperature": 0.2, "max_tokens": 4096,
                        "messages": [{"role": "system", "content": system_prompt + mem_block},
                                     *history, {"role": "user", "content": req.message}]}
@@ -1440,6 +1440,8 @@ async def agent_chat_stream(req: ChatStreamRequest, request: Request = None):
                 return
             visible = think_re.sub("", raw_acc).strip() or think_re.sub("", "".join(reasoning_acc)).strip()
             if visible:
+                if fallback_on_deflect and _seo_deflected(visible):
+                    visible = fallback_on_deflect
                 if len(visible) > sent:
                     yield ev({"type": "delta", "delta": visible[sent:]})
                 yield ev({"type": "final", "text": visible})
@@ -1978,7 +1980,10 @@ async def agent_chat_stream(req: ChatStreamRequest, request: Request = None):
                             if rows:
                                 yield ev({"type": "step", "text": f"✅ {result}"})
                                 yield ev({"type": "step", "text": f"🧠 Phân tích {tab} ({model})..."})
-                                async for chunk in stream_analysis(_seo_results_prompt(tab, headers, rows) + _proactive_suffix()):
+                                async for chunk in stream_analysis(
+                                    _seo_results_prompt(tab, headers, rows) + _proactive_suffix(),
+                                    _seo_results_fallback(tab, headers, rows),
+                                ):
                                     yield chunk
                                 analyzed = True
                         except Exception as e:  # noqa: BLE001
@@ -2040,7 +2045,10 @@ async def agent_chat_stream(req: ChatStreamRequest, request: Request = None):
                 return
             yield ev({"type": "step", "text": f"📊 Đọc {len(rows)} dòng từ SEO Sheet tab {tab}"})
             yield ev({"type": "step", "text": f"🧠 Phân tích dữ liệu ({model})..."})
-            async for chunk in stream_analysis(_seo_results_prompt(tab, headers, rows) + _proactive_suffix()):
+            async for chunk in stream_analysis(
+                _seo_results_prompt(tab, headers, rows) + _proactive_suffix(),
+                _seo_results_fallback(tab, headers, rows),
+            ):
                 yield chunk
             yield ev({"type": "done"})
             return
@@ -2443,10 +2451,65 @@ def _seo_results_prompt(tab: str, headers: list, rows: list) -> str:
         f"({len(rows)} URL): views/users từ GA4, clicks/impressions từ Google Search Console; "
         "các cột *_change_% là % thay đổi so với THÁNG TRƯỚC (N/A = trang mới).\n\n"
         + "\n".join(lines) +
-        "\n\nTrả lời câu hỏi dựa trên dữ liệu trên. Yêu cầu: TIẾNG VIỆT, ngắn gọn (tối đa ~15 dòng), "
+        "\n\nDỮ LIỆU ĐÃ ĐƯỢC LẤY SẴN từ Google Search Console + GA4 và đã nằm trong bảng trên. "
+        "KHÔNG được nói cần lấy thêm dữ liệu từ Google Search Console/GA4, KHÔNG được đề nghị chạy báo cáo "
+        "khi bảng có dòng dữ liệu. Nếu người dùng hỏi 'phân tích tháng gần nhất', hãy phân tích ngay tab này.\n\n"
+        "Trả lời câu hỏi dựa trên dữ liệu trên. Yêu cầu: TIẾNG VIỆT, ngắn gọn (tối đa ~15 dòng), "
         "nêu số liệu cụ thể, dùng **đậm** và gạch đầu dòng khi phù hợp. KHÔNG dùng LaTeX "
         "(mũi tên viết là →). Trả lời trực tiếp, không suy luận dài. /no_think"
         + _knowledge() + _persona()
+    )
+
+
+def _seo_deflected(text: str) -> bool:
+    t = (text or "").lower()
+    return (
+        ("cần" in t or "can " in t)
+        and ("google search console" in t or "gsc" in t or "ga4" in t)
+        and ("lấy dữ liệu" in t or "chạy báo cáo" in t or "run report" in t)
+    )
+
+
+def _seo_results_fallback(tab: str, headers: list, rows: list) -> str:
+    idx = {str(h).strip(): i for i, h in enumerate(headers)}
+
+    def num(r, col):
+        try:
+            return float(str(r[idx[col]]).replace(",", "").replace("%", ""))
+        except (KeyError, IndexError, TypeError, ValueError):
+            return 0.0
+
+    def cell(r, col, default=""):
+        try:
+            return str(r[idx[col]]).strip() or default
+        except (KeyError, IndexError):
+            return default
+
+    def fmt(n):
+        return f"{int(round(n)):,}".replace(",", ".")
+
+    total_views = sum(num(r, "views") for r in rows)
+    total_users = sum(num(r, "users") for r in rows)
+    total_clicks = sum(num(r, "clicks") for r in rows)
+    total_impr = sum(num(r, "impressions") for r in rows)
+    top = sorted(rows, key=lambda r: num(r, "clicks"), reverse=True)[:5]
+    drops = sorted(
+        [r for r in rows if num(r, "clicks_change_%") < 0],
+        key=lambda r: num(r, "clicks_change_%"),
+    )[:3]
+    top_txt = "; ".join(f"{_path_only(cell(r, 'url', '?'))}: {fmt(num(r, 'clicks'))} clicks" for r in top) or "chưa có"
+    drop_txt = "; ".join(
+        f"{_path_only(cell(r, 'url', '?'))}: {num(r, 'clicks_change_%'):.1f}%"
+        for r in drops
+    ) or "không thấy trang tụt clicks trong dữ liệu đã đọc"
+    return (
+        f"**SEO tháng {tab}**: đã đọc {len(rows)} URL từ SEO Sheet.\n"
+        f"- Tổng: **{fmt(total_views)} views**, **{fmt(total_users)} users**, "
+        f"**{fmt(total_clicks)} clicks**, **{fmt(total_impr)} impressions**.\n"
+        f"- Top clicks: {top_txt}.\n"
+        f"- Trang tụt clicks: {drop_txt}.\n\n"
+        "⚠️ **Cảnh báo**: ưu tiên kiểm tra các trang tụt clicks mạnh hoặc impressions cao nhưng clicks thấp.\n"
+        "👉 **Nên làm tiếp**: audit title/meta + SERP của nhóm trang tụt, rồi tối ưu nội dung/truy vấn đang mất CTR."
     )
 
 
@@ -2702,7 +2765,10 @@ async def seo_chat_stream(req: ChatStreamRequest, request: Request = None):
                             if rows:
                                 yield ev({"type": "step", "text": f"✅ {result}"})
                                 yield ev({"type": "step", "text": f"🧠 Phân tích {tab} ({model})..."})
-                                async for chunk in stream_analysis(_seo_results_prompt(tab, headers, rows) + _proactive_suffix()):
+                                async for chunk in stream_analysis(
+                                    _seo_results_prompt(tab, headers, rows) + _proactive_suffix(),
+                                    _seo_results_fallback(tab, headers, rows),
+                                ):
                                     yield chunk
                                 analyzed = True
                         except Exception as e:  # noqa: BLE001
@@ -2717,7 +2783,7 @@ async def seo_chat_stream(req: ChatStreamRequest, request: Request = None):
             yield ev({"type": "done"})
             return
 
-        async def stream_analysis(system_prompt: str):
+        async def stream_analysis(system_prompt: str, fallback_on_deflect: str | None = None):
             """Stream phân tích từ LLM: yield delta/final/error events."""
             payload = {"model": model, "stream": True, "temperature": 0.2, "max_tokens": 4096,
                        "messages": [{"role": "system", "content": system_prompt},
@@ -2762,6 +2828,8 @@ async def seo_chat_stream(req: ChatStreamRequest, request: Request = None):
             if not visible:
                 visible = think_re.sub("", "".join(reasoning_acc)).strip()
             if visible:
+                if fallback_on_deflect and _seo_deflected(visible):
+                    visible = fallback_on_deflect
                 if len(visible) > sent:
                     yield ev({"type": "delta", "delta": visible[sent:]})
                 yield ev({"type": "final", "text": visible})
@@ -2817,7 +2885,10 @@ async def seo_chat_stream(req: ChatStreamRequest, request: Request = None):
                 return
             yield ev({"type": "step", "text": f"📊 Đọc {len(rows)} dòng từ tab {tab}"})
             yield ev({"type": "step", "text": f"🧠 Phân tích dữ liệu ({model})..."})
-            async for chunk in stream_analysis(_seo_results_prompt(tab, headers, rows) + _proactive_suffix()):
+            async for chunk in stream_analysis(
+                _seo_results_prompt(tab, headers, rows) + _proactive_suffix(),
+                _seo_results_fallback(tab, headers, rows),
+            ):
                 yield chunk
             yield ev({"type": "done"})
             return

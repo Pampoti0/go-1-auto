@@ -32,6 +32,22 @@ input,textarea,[contenteditable=true],input:active,textarea:active{cursor:text!i
 .md th,.md td{border:1px solid rgba(120,130,150,.28);padding:4px 11px;text-align:right}
 .md th:first-child,.md td:first-child{text-align:left}
 .md thead th{background:rgba(120,130,150,.13);font-weight:700}
+.emoji-svg-icon{display:inline-block;width:1em;height:1em;vertical-align:-.16em;margin:0 .05em;fill:none;stroke:currentColor;stroke-width:2;stroke-linecap:round;stroke-linejoin:round}
+@media (max-width:767px){
+  .mobile-shell{height:100dvh}
+  .chat-chipbar{flex-wrap:nowrap!important;overflow-x:auto;overscroll-behavior-x:contain;padding:10px 12px!important;gap:8px!important}
+  .chat-chipbar::-webkit-scrollbar{display:none}
+  .chat-chipbar button{flex:0 0 auto;white-space:nowrap;font-size:12px!important;padding:7px 10px!important}
+  .chat-scroll-inner{padding:12px 10px 18px!important;gap:12px!important}
+  .chat-row{gap:8px!important}
+  .chat-avatar{width:28px!important;height:28px!important}
+  .chat-bubble-wrap{max-width:calc(100% - 42px)!important}
+  .chat-bubble{font-size:13.5px!important;line-height:1.55!important;padding:10px 12px!important;border-radius:16px!important}
+  .chat-composer-wrap{padding:8px 12px calc(10px + env(safe-area-inset-bottom))!important}
+  .chat-composer{gap:6px!important;padding:6px!important;border-radius:18px!important}
+  .composer-icon,.composer-send{width:38px!important;height:38px!important;border-radius:12px!important}
+  .composer-input{min-width:0!important;font-size:14px!important}
+}
 svg rect.bar{transition:width .6s cubic-bezier(.2,.8,.2,1)}
 @keyframes up{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:none}}
 .msg-in{animation:up .25s ease}
@@ -165,6 +181,7 @@ function md(s){
   s=s.replace(/(^|[\s(>])((?:https?:\/\/|www\.)[^\s<>"')\]]+[^\s<>"')\].,;:])/g,
     (m,pre,url)=>pre+'<a href="'+(url.startsWith('www.')?'https://'+url:url)+'" target="_blank" rel="noopener" class="text-violet-500 hover:underline break-all">'+url+'</a>');
   s=s.replace(/\n{3,}/g,'\n\n');
+  s=iconizeHtml(s);
   s=s.replace(/\x00CB(\d+)\x00/g,(m,i)=>_cb[+i]||'');  /* khôi phục code block */
   return s;
 }
@@ -196,6 +213,22 @@ const ICON_PATHS={
   warn:'M12 9v4M12 17h.01M10.3 3.9L1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z',
   zap:'M13 2L3 14h7l-1 8 10-12h-7l1-8z',down:'M3 7l6 6 4-4 8 8M21 13v6h-6',
   seoSheet:'M14 3v5h5M5 3h9l5 5v13H5V3zM9 13h6M9 17h6',
+  lock:'M7 10V7a5 5 0 0 1 10 0v3M5 10h14v11H5zM12 15v2',
+  check:'M20 6L9 17l-5-5',
+  x:'M18 6L6 18M6 6l12 12',
+  chart:'M4 20V10M10 20V4M16 20v-7M22 20H2',
+  brain:'M8.5 6.5A3.5 3.5 0 0 1 12 3a3.5 3.5 0 0 1 3.5 3.5A4.5 4.5 0 0 1 18 15a4 4 0 0 1-4 4h-1v-5M11 19h-1a4 4 0 0 1-4-4 4.5 4.5 0 0 1 2.5-8.5M8 11h8M9 15h4',
+  money:'M12 2v20M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6',
+  web:'M12 22a10 10 0 1 0 0-20 10 10 0 0 0 0 20zM2 12h20M12 2a15 15 0 0 1 0 20M12 2a15 15 0 0 0 0 20',
+  book:'M4 19.5A2.5 2.5 0 0 1 6.5 17H20M4 4.5A2.5 2.5 0 0 1 6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5z',
+  folder:'M3 7h6l2 2h10v10a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z',
+  eye:'M2 12s4-7 10-7 10 7 10 7-4 7-10 7S2 12 2 12zM12 15a3 3 0 1 0 0-6 3 3 0 0 0 0 6z',
+  rocket:'M4.5 16.5c-1.5 1.2-2 3-2 5 2 0 3.8-.5 5-2M9 15l-4-4 6-6c3-3 6-3 9-3 0 3 0 6-3 9l-6 6-4-4M15 9h.01',
+  trophy:'M8 21h8M12 17v4M7 4h10v4a5 5 0 0 1-10 0V4zM5 5H3v2a4 4 0 0 0 4 4M19 5h2v2a4 4 0 0 1-4 4',
+  stop:'M6 6h12v12H6z',
+  send:'M22 2L11 13M22 2l-7 20-4-9-9-4 20-7z',
+  turn:'M15 10l5 5-5 5M4 4v7a4 4 0 0 0 4 4h12',
+  bot:'M12 8V4M8 4h8M6 8h12v10H6zM9 13h.01M15 13h.01M9 17h6',
 };
 const NavIcon=({id,cls})=>(
   <svg viewBox="0 0 24 24" className={cls||"w-[17px] h-[17px] flex-none"} fill="none"
@@ -203,6 +236,24 @@ const NavIcon=({id,cls})=>(
     <path d={ICON_PATHS[id]||ICON_PATHS.home}/>
   </svg>
 );
+
+const EMOJI_ICON_IDS={
+  '🔒':'lock','❌':'x','✅':'check','⚠️':'warn','⚠':'warn','📊':'chart','🧠':'brain','💰':'money',
+  '🌐':'web','📖':'book','📚':'book','🗂️':'folder','🗂':'folder','⚙️':'config','⚙':'config',
+  '▶':'play','🚀':'rocket','🏆':'trophy','👁️':'eye','👁':'eye','👉':'send','⏹':'stop',
+  '📈':'trend','📉':'down','🔍':'urls','↪️':'turn','↪':'turn',
+  '🤖':'bot','🚨':'warn','🔴':'x','🟢':'check','🟡':'warn'
+};
+const EMOJI_ICON_RE=/⚠️|🗂️|⚙️|👁️|↪️|🔒|❌|✅|⚠|📊|📈|📉|🔍|🧠|💰|🌐|📖|📚|🗂|⚙|▶|🚀|🏆|👁|👉|⏹|↪|🤖|🚨|🔴|🟢|🟡/g;
+function inlineIconHtml(id){
+  return `<svg viewBox="0 0 24 24" class="emoji-svg-icon" aria-hidden="true" focusable="false"><path d="${ICON_PATHS[id]||ICON_PATHS.home}"/></svg>`;
+}
+function iconizeHtml(s){
+  return String(s??'').replace(EMOJI_ICON_RE,m=>inlineIconHtml(EMOJI_ICON_IDS[m]));
+}
+function IconText({text,className}){
+  return <span className={className} dangerouslySetInnerHTML={{__html:iconizeHtml(esc(String(text??''))).replace(/\n/g,'<br/>')}}/>;
+}
 
 /* ───────────────────────── shared bits ───────────────────────── */
 const Dots=()=> <span className="inline-flex gap-1"><i className="dot1 w-1.5 h-1.5 rounded-full bg-slate-400 inline-block"/><i className="dot2 w-1.5 h-1.5 rounded-full bg-slate-400 inline-block"/><i className="dot3 w-1.5 h-1.5 rounded-full bg-slate-400 inline-block"/></span>;
@@ -387,12 +438,12 @@ const QUIPS=[
   'Đại ca hỏi gì hỏi đi, Đệ đứng đây mãi cũng mỏi chân á.',
   'No cap, qua tab Dashboard xem điểm đi Đại ca, Đệ vẽ chart đẹp lắm.',
   'Cần gì cứ gọi Đệ: PageSpeed, SEO, Google Ads — chill thôi nhưng output xịn.',
-  'Lục bát tặng Đại ca:\nWeb nhanh thì khách mới vui,\nLCP chậm chạp thì lui khách liền 🫡',
+  'Lục bát tặng Đại ca:\nWeb nhanh thì khách mới vui,\nLCP chậm chạp thì lui khách liền.',
   'Lục bát nhắc Đại ca:\nTrang nhà tải chậm như rùa,\nkhách chờ mất kiên, lượt mua cũng rời.',
   'Lục bát SEO nè:\nTừ khoá lên top mỗi ngày,\nkhách vào nườm nượp, click bay đầy nhà.',
   'Lục bát động viên:\nĐiểm xanh chín chục trở lên,\nĐại ca cứ ngủ, Đệ nền tảng lo.',
   'Lục bát quảng cáo:\nTiền tiêu mỗi sáng mỗi giờ,\nchi mà đúng chỗ, lời chờ sẵn tay.',
-  'Haiku nè Đại ca:\nĐiểm xanh trên bảng,\nclicks về như lá mùa thu —\nSEO thắng lớn 🍂',
+  'Haiku nè Đại ca:\nĐiểm xanh trên bảng,\nclicks về như lá mùa thu —\nSEO thắng lớn.',
 ];
 /* Mặt tuỳ chỉnh của DeCho — lưu localStorage (data URL), đồng bộ qua event 'decho-face' */
 const FACE_KEY='decho_face';
@@ -897,29 +948,29 @@ function Lightbox(){
 function Bubble({m}){
   const face=useFace();
   return (
-    <div className={"msg-in flex gap-2.5 items-end "+(m.me?"flex-row-reverse":"")}>
+    <div className={"chat-row msg-in flex gap-2.5 items-end "+(m.me?"flex-row-reverse":"")}>
       {m.me
-        ?<div className={"w-8 h-8 rounded-full flex-none grid place-items-center text-slate-500 dark:text-slate-300 bg-gradient-to-br from-blue-100 to-indigo-100 dark:from-blue-900 dark:to-indigo-900 border border-slate-200 dark:border-slate-700 "+(m.ts?'mb-5':'')}><svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg></div>
-        :<div className={"w-8 h-8 rounded-full flex-none overflow-hidden grid place-items-center bg-gradient-to-br from-emerald-100 to-cyan-100 dark:from-emerald-900 dark:to-cyan-900 border border-slate-200 dark:border-slate-700 "+(m.ts?'mb-5':'')} title="DeCho">
+        ?<div className={"chat-avatar w-8 h-8 rounded-full flex-none grid place-items-center text-violet-600 dark:text-violet-200 bg-gradient-to-br from-violet-100 to-fuchsia-100 dark:from-violet-900 dark:to-fuchsia-900 border border-violet-200/70 dark:border-violet-700/70 "+(m.ts?'mb-5':'')}><svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg></div>
+        :<div className={"chat-avatar w-8 h-8 rounded-full flex-none overflow-hidden grid place-items-center bg-gradient-to-br from-emerald-100 to-cyan-100 dark:from-emerald-900 dark:to-cyan-900 border border-slate-200 dark:border-slate-700 "+(m.ts?'mb-5':'')} title="DeCho">
             <img src={face||"/static/decho-avatar.png"} alt="DeCho" className="w-full h-full object-cover"
               onError={e=>{e.currentTarget.style.display='none';e.currentTarget.nextSibling.style.display='block'}}/>
             <span className="text-[12px] font-extrabold text-emerald-600 dark:text-emerald-300" style={{display:'none'}}>Đệ</span>
           </div>}
-      <div className={"max-w-[82%] flex flex-col gap-0.5 "+(m.me?"items-end":"items-start")}>
-      <div className={"px-4 py-3 text-[14.5px] leading-relaxed whitespace-pre-wrap break-words rounded-2xl w-fit max-w-full "+(m.me?"bg-gradient-to-br from-blue-600 to-indigo-600 text-white rounded-br-md":"bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 shadow-sm rounded-bl-md")}>
+      <div className={"chat-bubble-wrap max-w-[82%] flex flex-col gap-0.5 "+(m.me?"items-end":"items-start")}>
+      <div className={"chat-bubble px-4 py-3 text-[14.5px] leading-relaxed whitespace-pre-wrap break-words rounded-2xl w-fit max-w-full "+(m.me?"bg-violet-500 text-white rounded-br-md shadow-sm":"bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 shadow-sm rounded-bl-md")}>
         {!m.me&&m.steps&&(
           <details open={m.streaming||m.stepsOpen} className="mb-2 border border-dashed border-slate-300 dark:border-slate-600 rounded-lg px-2.5 py-1.5 bg-slate-50 dark:bg-slate-800">
             <summary className="cursor-pointer text-[11.5px] font-semibold text-slate-500 select-none"><span className="inline-flex items-center gap-1.5 align-middle"><NavIcon id="config" cls="w-3.5 h-3.5"/>Actions</span></summary>
             <div className="mt-1.5 text-[12px] leading-relaxed text-slate-500 font-mono whitespace-pre-wrap max-h-72 overflow-y-auto"
-                 ref={el=>{if(el&&m.streaming)el.scrollTop=el.scrollHeight}}>{m.steps}</div>
+                 ref={el=>{if(el&&m.streaming)el.scrollTop=el.scrollHeight}}><IconText text={m.steps}/></div>
           </details>
         )}
         {m.image&&<img src={m.image} alt="ảnh" onClick={()=>window.dispatchEvent(new CustomEvent('view-image',{detail:m.image}))}
           className="mb-2 max-w-[200px] max-h-56 w-auto rounded-xl border border-white/40 cursor-zoom-in hover:opacity-90 transition"/>}
         {m.me
-          ? m.text
+          ? <IconText text={m.text}/>
           : m.error
-            ? <span className="text-red-500">{m.text}</span>
+            ? <span className="text-red-500"><IconText text={m.text}/></span>
             : m.text
               ? <span className="md" dangerouslySetInnerHTML={{__html:md(m.text)}}/>
               : <Dots/>}
@@ -1134,7 +1185,7 @@ function ChatView({cfg,model}){
   return (
     <div className="flex-1 flex flex-col min-h-0">
       <Lightbox/>
-      <div className="flex gap-1.5 flex-wrap items-center px-3 pt-3.5 pb-3 border-b border-slate-200 dark:border-slate-800 max-w-[1150px] w-full mx-auto">
+      <div className="chat-chipbar flex gap-1.5 flex-wrap items-center px-3 pt-3.5 pb-3 border-b border-slate-200 dark:border-slate-800 max-w-[1150px] w-full mx-auto">
         {cfg.chips.map(([ic,label,m])=>
           <button key={label} disabled={busy} className={chipCls+" !px-2.5 inline-flex items-center gap-1"} onClick={()=>send(m)}>
             <span className="text-violet-500"><NavIcon id={ic} cls="w-3.5 h-3.5"/></span>{label}
@@ -1142,14 +1193,14 @@ function ChatView({cfg,model}){
         <button disabled={busy} className={chipCls+" !px-2.5 inline-flex items-center gap-1"} onClick={clearHist}>
           <span className="text-slate-400"><NavIcon id="trash" cls="w-3.5 h-3.5"/></span>Xóa lịch sử
         </button>
-        {cfg.meta&&<span className="ml-auto text-xs text-slate-400">{cfg.meta}</span>}
+        {cfg.meta&&<span className="ml-auto text-xs text-slate-400"><IconText text={cfg.meta}/></span>}
       </div>
       <div ref={scrollRef} className="flex-1 min-h-0 overflow-y-auto scroll-smooth bg-transparent">
-        <div className="max-w-[1150px] mx-auto px-6 py-4 flex flex-col gap-3.5">
+        <div className="chat-scroll-inner max-w-[1150px] mx-auto px-6 py-4 flex flex-col gap-3.5">
           {msgs.map((m,i)=><Bubble key={i} m={m}/>)}
         </div>
       </div>
-      <div className="px-6 pb-4 pt-2">
+      <div className="chat-composer-wrap px-6 pb-4 pt-2">
         {img&&(
           <div className="max-w-[1150px] mx-auto mb-2"><div className="flex items-center gap-3 w-fit p-2 pr-4 rounded-xl bg-white/95 dark:bg-slate-900/95 backdrop-blur border border-slate-200 dark:border-slate-700 shadow-sm">
             <div className="relative flex-none">
@@ -1162,20 +1213,20 @@ function ChatView({cfg,model}){
             <span className="text-[13px] leading-snug text-slate-600 dark:text-slate-300">Đã đính ảnh — nhập câu hỏi<br/>(tùy chọn) rồi gửi để Đệ đọc.</span>
           </div></div>
         )}
-        <form onSubmit={submit} className={"max-w-[1150px] mx-auto flex gap-2.5 p-2 rounded-2xl transition focus-within:border-violet-400 focus-within:ring-2 focus-within:ring-violet-500/20 "+card}>
+        <form onSubmit={submit} className={"chat-composer max-w-[1150px] mx-auto flex gap-2.5 p-2 rounded-2xl transition focus-within:border-violet-400 focus-within:ring-2 focus-within:ring-violet-500/20 "+card}>
           <input ref={fileRef} type="file" accept="image/*" className="hidden"
                  onChange={e=>{pickImage(e.target.files[0]);e.target.value=''}}/>
           <button type="button" onClick={()=>fileRef.current&&fileRef.current.click()} disabled={busy} title="Đính ảnh"
-                  className="w-11 h-11 rounded-xl flex-none grid place-items-center text-slate-500 hover:text-violet-500 hover:bg-slate-100 dark:hover:bg-slate-800 transition disabled:opacity-40">
+                  className="composer-icon w-11 h-11 rounded-xl flex-none grid place-items-center text-slate-500 hover:text-violet-500 hover:bg-slate-100 dark:hover:bg-slate-800 transition disabled:opacity-40">
             <svg className="w-5 h-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="9" cy="9" r="2"/><path d="M21 15l-5-5L5 21"/></svg>
           </button>
           <button type="button" onClick={toggleMic} disabled={busy} title={rec?'Dừng ghi âm':'Nói (giọng nói → chữ)'}
-                  className={"w-11 h-11 rounded-xl flex-none grid place-items-center transition disabled:opacity-40 "+(rec?"text-white bg-red-500 hover:bg-red-600 animate-pulse":"text-slate-500 hover:text-violet-500 hover:bg-slate-100 dark:hover:bg-slate-800")}>
+                  className={"composer-icon w-11 h-11 rounded-xl flex-none grid place-items-center transition disabled:opacity-40 "+(rec?"text-white bg-red-500 hover:bg-red-600 animate-pulse":"text-slate-500 hover:text-violet-500 hover:bg-slate-100 dark:hover:bg-slate-800")}>
             <svg className="w-5 h-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="9" y="2" width="6" height="12" rx="3"/><path d="M5 10a7 7 0 0 0 14 0M12 17v4"/></svg>
           </button>
           <input ref={inpRef} value={inp} onChange={e=>setInp(e.target.value)} placeholder={img?'Hỏi gì về ảnh này…':cfg.placeholder}
-                 className="flex-1 bg-transparent outline-none pl-0 pr-2.5 text-[14.5px]"/>
-          <button className={"w-11 h-11 rounded-xl text-white grid place-items-center transition "+(busy?"bg-red-500 hover:bg-red-600":"bg-violet-500 hover:bg-violet-600")}
+                 className="composer-input flex-1 bg-transparent outline-none pl-0 pr-2.5 text-[14.5px]"/>
+          <button className={"composer-send w-11 h-11 rounded-xl text-white grid place-items-center transition "+(busy?"bg-red-500 hover:bg-red-600":"bg-violet-500 hover:bg-violet-600")}
                   title={busy?'Dừng':'Gửi'}>
             {busy
               ?<svg className="w-4 h-4" viewBox="0 0 24 24" fill="currentColor"><rect x="5" y="5" width="14" height="14" rx="3"/></svg>
@@ -1228,7 +1279,7 @@ function StatCard({label,value,sub,pill,pillColor,spark,sparkColor}){
             <span className="text-3xl font-bold text-slate-800 dark:text-slate-100">{value??'—'}</span>
             {pill!=null&&<span className={"text-xs font-semibold px-1.5 py-0.5 rounded-full "+pillColor}>{pill}</span>}
           </div>
-          <div className="text-[11.5px] text-slate-400 mt-1 truncate max-w-[180px] min-h-[17px]">{sub||''}</div>
+          <div className="text-[11.5px] text-slate-400 mt-1 truncate max-w-[180px] min-h-[17px]"><IconText text={sub||''}/></div>
         </div>
         {spark&&<Sparkline points={spark} color={sparkColor||VIOLET}/>}
       </div>
@@ -1385,7 +1436,7 @@ function Dashboard(){
     dechoCtx.info=`Dashboard PSI tháng ${data.tab}, lần chạy ${run}. Điểm TB mobile ${avg(sc('MOBILE'))}, desktop ${avg(sc('DESKTOP'))}. Chi tiết từng dòng:\n`+lines.join('\n');
   },[data,run]);
 
-  if(err)return <div className="p-8 text-red-500 text-sm">❌ {err}</div>;
+  if(err)return <div className="p-8 text-red-500 text-sm"><IconText text={'❌ '+err}/></div>;
   if(!data)return <Spinner/>;
 
   const runs=[...new Set(data.rows.map(x=>x[0]))].sort();
@@ -1735,7 +1786,7 @@ function Overview({go}){
                   <span className={"mt-0.5 flex-none "+(a.lv==='high'?'text-red-500':'text-amber-500')}><NavIcon id={a.icon} cls="w-4 h-4"/></span>
                   <span className={a.lv==='high'?'text-red-600 dark:text-red-400':'text-slate-600 dark:text-slate-300'}>{a.text}</span>
                 </button>
-              )):<div className="text-sm text-slate-400 py-6 text-center">Không có alert nào — Đệ canh kỹ rồi, chill đi Đại ca 🟢</div>}
+              )):<div className="text-sm text-slate-400 py-6 text-center"><IconText text="Không có alert nào — Đệ canh kỹ rồi, chill đi Đại ca 🟢"/></div>}
             </div>
           </div>
           <div className={"col-span-12 xl:col-span-5 "+mosaicCard}>
@@ -1774,7 +1825,7 @@ function AlertsView({go}){
     <div className="flex-1 min-h-0 overflow-y-auto px-6 py-5 bg-transparent">
       <div className="max-w-[900px] mx-auto flex flex-col gap-5">
         {alerts.length===0&&(
-          <div className={mosaicCard+" p-10 text-center text-slate-400 text-sm"}>Không có bất thường nào — hệ thống xanh, Đệ vẫn canh đều 🟢</div>
+          <div className={mosaicCard+" p-10 text-center text-slate-400 text-sm"}><IconText text="Không có bất thường nào — hệ thống xanh, Đệ vẫn canh đều 🟢"/></div>
         )}
         {groups.map(([lv,title,tc])=>{
           const list=alerts.filter(a=>a.lv===lv);
@@ -1975,8 +2026,8 @@ function CreateCampaignModal({onClose,onDone}){
         <p className="text-[12px] text-slate-400 -mt-1">Tạo ở trạng thái <b>PAUSED</b> — chưa tiêu tiền tới khi Đại ca tự bật trong Google Ads.</p>
         <label className="text-xs text-slate-500">Tên campaign<input value={name} onChange={e=>setName(e.target.value)} placeholder="vd: GG_Search_CloudServer" className={inp}/></label>
         <label className="text-xs text-slate-500">Ngân sách (VND/ngày)<input type="number" value={budget} onChange={e=>setBudget(e.target.value)} className={inp}/></label>
-        <label className="text-xs text-slate-500">Mật khẩu xác nhận 🔒<input type="password" autoComplete="off" value={pw} onChange={e=>setPw(e.target.value)} placeholder="nhập mật khẩu" onKeyDown={e=>{if(e.key==='Enter')submit()}} className={inp}/></label>
-        {msg&&<p className={"text-[12.5px] "+(msg.ok?'text-emerald-600 dark:text-emerald-400':'text-red-500')}>{msg.ok||msg.err}</p>}
+        <label className="text-xs text-slate-500"><span className="inline-flex items-center gap-1">Mật khẩu xác nhận <NavIcon id="lock" cls="w-3.5 h-3.5"/></span><input type="password" autoComplete="off" value={pw} onChange={e=>setPw(e.target.value)} placeholder="nhập mật khẩu" onKeyDown={e=>{if(e.key==='Enter')submit()}} className={inp}/></label>
+        {msg&&<p className={"text-[12.5px] "+(msg.ok?'text-emerald-600 dark:text-emerald-400':'text-red-500')}><IconText text={msg.ok||msg.err}/></p>}
         <div className="flex gap-2 justify-end mt-1">
           <button onClick={onClose} className="px-3.5 py-2 rounded-lg text-sm text-slate-500 hover:bg-slate-100 dark:hover:bg-slate-800">Huỷ</button>
           <button onClick={submit} disabled={busy} className="px-3.5 py-2 rounded-lg text-sm font-medium text-white bg-violet-500 hover:bg-violet-600 disabled:opacity-50">{busy?'Đang tạo…':'Tạo (PAUSED)'}</button>
@@ -2044,7 +2095,7 @@ function AdsView(){
 
   if(err)return (
     <div className="p-8 flex flex-col items-start gap-3">
-      <p className="text-sm text-red-500">❌ {err}</p>
+      <p className="text-sm text-red-500"><IconText text={'❌ '+err}/></p>
       <button onClick={()=>load(range)} className="px-3.5 py-2 rounded-lg text-sm font-medium text-white bg-violet-500 hover:bg-violet-600 shadow-xs inline-flex items-center gap-1.5"><NavIcon id="refresh" cls="w-4 h-4"/>Thử lại</button>
     </div>
   );
@@ -2325,7 +2376,7 @@ function ConfigView(){
         <MemoryCard/>
 
         <HeaderSlot>
-          {msg&&<span className="text-xs text-slate-400 max-w-[260px] truncate">{msg}</span>}
+          {msg&&<span className="text-xs text-slate-400 max-w-[260px] truncate"><IconText text={msg}/></span>}
           <button className={chipCls+" !text-sm !px-4 !py-2 !rounded-lg inline-flex items-center gap-1.5"} onClick={load}><NavIcon id="undo" cls="w-4 h-4"/>Hoàn tác</button>
           <button onClick={save} className="px-4 py-2 rounded-lg text-sm font-bold text-white bg-violet-500 hover:bg-violet-600 shadow-xs inline-flex items-center gap-1.5"><NavIcon id="save" cls="w-4 h-4"/>Lưu cấu hình</button>
         </HeaderSlot>
@@ -2442,11 +2493,11 @@ function ConfigPwModal({payload,onClose,onDone}){
   return ReactDOM.createPortal(
     <div className="fixed inset-0 z-[95] bg-black/50 backdrop-blur-sm grid place-items-center p-4" onClick={onClose}>
       <div className="w-full max-w-sm rounded-2xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 shadow-2xl p-5 flex flex-col gap-3" onClick={e=>e.stopPropagation()}>
-        <h3 className="font-bold text-[15px]">🔒 Xác nhận đổi cấu hình</h3>
+        <h3 className="font-bold text-[15px] inline-flex items-center gap-2"><NavIcon id="lock" cls="w-4 h-4"/>Xác nhận đổi cấu hình</h3>
         {payload.desc&&<p className="text-[12.5px] text-slate-500 dark:text-slate-400 -mt-1 md" dangerouslySetInnerHTML={{__html:md(payload.desc)}}/>}
         <label className="text-xs text-slate-500">Mật khẩu<input type="password" autoComplete="off" autoFocus value={pw} onChange={e=>setPw(e.target.value)} onKeyDown={e=>{if(e.key==='Enter')submit()}}
           className="mt-1 w-full text-sm px-3 py-2 rounded-lg bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 outline-none focus:border-violet-400"/></label>
-        {msg&&<p className={"text-[12.5px] "+(msg.ok?'text-emerald-600 dark:text-emerald-400':'text-red-500')}>{msg.ok||msg.err}</p>}
+        {msg&&<p className={"text-[12.5px] "+(msg.ok?'text-emerald-600 dark:text-emerald-400':'text-red-500')}><IconText text={msg.ok||msg.err}/></p>}
         <div className="flex gap-2 justify-end mt-1">
           <button onClick={onClose} className="px-3.5 py-2 rounded-lg text-sm text-slate-500 hover:bg-slate-100 dark:hover:bg-slate-800">Huỷ</button>
           <button onClick={submit} disabled={busy} className="px-3.5 py-2 rounded-lg text-sm font-medium text-white bg-violet-500 hover:bg-violet-600 disabled:opacity-50">{busy?'Đang lưu…':'Xác nhận'}</button>
@@ -2505,6 +2556,11 @@ function App(){
     chips:[['play','Kiểm tra PageSpeed','Chạy kiểm tra ngay'],['news','Kiểm tra SEO','Chạy báo cáo SEO tháng vừa rồi'],['dash','Phân tích PSI','Phân tích kết quả PageSpeed lần chạy gần nhất'],['trend','Phân tích SEO','Phân tích số liệu SEO tháng gần nhất'],['ads','Phân tích Ads','Phân tích hiệu suất Google Ads 30 ngày gần nhất'],['clipboard','Kế hoạch tuần','Tuần này nên làm gì?'],['chat','DeCho làm được gì?','DeCho làm được những gì? Hướng dẫn cách dùng nhanh đi']],
     placeholder:'Nhắn Đệ bất cứ gì: chạy check, báo cáo SEO, phân tích, thêm URL…',
   };
+  const MOBILE_CHAT={
+    ...DECHO_CHAT,
+    greeting:'Yo Đại ca! Đệ là DeCho — hỏi Đệ về PageSpeed, SEO, Ads hoặc kế hoạch tuần nhé.',
+    placeholder:'Nhắn Đệ...',
+  };
 
   useEffect(()=>{setPageSub_('')},[view]);
   useEffect(()=>{
@@ -2530,7 +2586,7 @@ function App(){
 
   /* ── Mobile: chỉ hiện khung Chat với DeCho ── */
   if(isMobile)return (
-    <div className="flex flex-col h-screen overflow-hidden">
+    <div className="mobile-shell flex flex-col overflow-hidden">
       <div className="fixed inset-0 -z-10 bg-cover bg-center" style={{backgroundImage:'url(/static/decho-background.jpeg)'}}/>
       <div className="fixed inset-0 -z-10 bg-white/35 dark:bg-slate-950/70"/>
       <header className="flex items-center gap-2 px-3 py-2.5 bg-white/85 dark:bg-slate-900/85 backdrop-blur border-b border-slate-200 dark:border-slate-800 flex-none">
@@ -2549,7 +2605,7 @@ function App(){
             :<svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/></svg>}
         </button>
       </header>
-      <ChatView cfg={DECHO_CHAT} model={model}/>
+      <ChatView cfg={MOBILE_CHAT} model={model}/>
     </div>
   );
 
@@ -2598,7 +2654,7 @@ function App(){
             <h1 className="text-[15px] font-bold">{TITLES[view]}</h1>
             <p className="text-[11.5px] text-slate-400 flex items-center gap-1.5 mt-0.5">
               <span className="w-1.5 h-1.5 rounded-full bg-accent shadow-[0_0_6px_#0ea371] flex-none"/>
-              <span className="truncate">{pageSub||meta}</span></p>
+              <span className="truncate"><IconText text={pageSub||meta}/></span></p>
           </div>
           <div className="flex items-center gap-2 justify-self-center relative z-10">
             <label className="text-xs text-slate-400">Model</label>

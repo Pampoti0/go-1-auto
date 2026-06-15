@@ -35,29 +35,37 @@ class SeoAuthError(RuntimeError):
     """Raised when the SEO OAuth user token is missing, revoked, or cannot refresh."""
 
 
-def _reauth_message(reason: str) -> str:
-    return (
-        f"{reason} "
+def _reauth_message(reason: str, source: str = "unknown") -> str:
+    hint = (
         "Tạo lại token SEO bằng: python generate_seo_token.py --token token.json "
-        "(hoặc thêm --client-secrets client_secret.json nếu chưa có token cũ). "
-        "Nếu deploy AgentBase, cập nhật lại env SEO_TOKEN_JSON bằng nội dung token.json mới và restart server."
+        "(hoặc thêm --client-secrets client_secret.json nếu chưa có token cũ)."
     )
+    if source == "file":
+        hint += " Server local sẽ đọc token.json mới ở lần gọi SEO kế tiếp."
+    elif source == "env":
+        hint += " Nếu deploy AgentBase, cập nhật lại env SEO_TOKEN_JSON bằng nội dung token.json mới và restart server."
+    return f"{reason} {hint}"
 
 
 def get_creds():
-    """OAuth user credentials: env SEO_TOKEN_JSON (deploy) hoặc file token.json (local)."""
+    """OAuth user credentials: file token.json (local) hoặc env SEO_TOKEN_JSON (deploy)."""
     from google.auth.transport.requests import Request
     from google.auth.exceptions import RefreshError
     from google.oauth2.credentials import Credentials
 
     token_json = os.getenv("SEO_TOKEN_JSON", "")
-    if token_json:
+    source = "unknown"
+    # Local mode: prefer token.json when present, even if .env has SEO_TOKEN_JSON.
+    # This lets a freshly generated local token take effect without editing .env.
+    if os.path.exists(TOKEN_FILE):
+        creds = Credentials.from_authorized_user_file(TOKEN_FILE, SCOPES)
+        source = "file"
+    elif token_json:
         try:
             creds = Credentials.from_authorized_user_info(json.loads(token_json), SCOPES)
         except Exception as e:  # noqa: BLE001
-            raise SeoAuthError(_reauth_message(f"SEO_TOKEN_JSON khong hop le ({type(e).__name__}).")) from e
-    elif os.path.exists(TOKEN_FILE):
-        creds = Credentials.from_authorized_user_file(TOKEN_FILE, SCOPES)
+            raise SeoAuthError(_reauth_message(f"SEO_TOKEN_JSON khong hop le ({type(e).__name__}).", "env")) from e
+        source = "env"
     else:
         raise SeoAuthError(
             "Thiếu OAuth token: đặt env SEO_TOKEN_JSON (nội dung token.json) hoặc file token.json. "
@@ -68,15 +76,15 @@ def get_creds():
                 creds.refresh(Request())
             except RefreshError as e:
                 msg = str(e)
-                reason = "OAuth token SEO đã hết hạn hoặc bị revoke."
+                reason = "Đã thử tự động refresh OAuth token SEO nhưng Google từ chối."
                 if "invalid_grant" in msg:
-                    reason = "OAuth refresh token SEO đã hết hạn/bị revoke (invalid_grant)."
-                raise SeoAuthError(_reauth_message(reason)) from e
-            if not token_json:  # cập nhật lại file local
+                    reason = "Đã thử tự động refresh, nhưng refresh token SEO đã hết hạn/bị revoke (invalid_grant)."
+                raise SeoAuthError(_reauth_message(reason, source)) from e
+            if source == "file":  # cập nhật lại file local
                 with open(TOKEN_FILE, "w", encoding="utf-8") as f:
                     f.write(creds.to_json())
         else:
-            raise SeoAuthError(_reauth_message("OAuth token SEO hết hạn và không có refresh_token."))
+            raise SeoAuthError(_reauth_message("OAuth token SEO hết hạn và không có refresh_token.", source))
     return creds
 
 
