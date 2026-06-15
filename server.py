@@ -126,6 +126,14 @@ __import__("logging").getLogger("seo_agent").addHandler(_SeoLogHandler())
 __import__("logging").getLogger("seo_agent").setLevel(__import__("logging").INFO)
 
 
+def _seo_exc_text(e: Exception) -> str:
+    return str(e) if type(e).__name__ == "SeoAuthError" else f"{type(e).__name__}: {e}"
+
+
+def _seo_sheet_error(e: Exception) -> str:
+    return f"❌ Không đọc được SEO Sheet: {_seo_exc_text(e)}"
+
+
 def _run_seo_safe(year: int | None = None, month: int | None = None, url_contains: str | None = None):
     with _seo_lock:
         if _seo_state["running"]:
@@ -141,8 +149,9 @@ def _run_seo_safe(year: int | None = None, month: int | None = None, url_contain
         flt = f" · lọc URL chứa '{url_contains}'" if url_contains else ""
         _seo_state["last_result"] = f"success: {result['rows']} URL → tab {result['label']}{flt}"
     except Exception as e:  # noqa: BLE001
-        _seo_state["last_result"] = f"error: {type(e).__name__}: {e}"
-        _seo_state["log"].append(f"[{datetime.now().strftime('%H:%M:%S')}] ❌ {type(e).__name__}: {e}")
+        msg = _seo_exc_text(e)
+        _seo_state["last_result"] = f"error: {msg}"
+        _seo_state["log"].append(f"[{datetime.now().strftime('%H:%M:%S')}] ❌ {msg}")
     finally:
         _seo_state["running"] = False
         _seo_state["last_run"] = datetime.now().isoformat(timespec="seconds")
@@ -186,8 +195,9 @@ def _run_seo_range_safe(start: str, end: str, url_contains: str | None = None):
                                      f"📊 So với kỳ trước: {summary}{top_txt}\n"
                                      f"Chi tiết %_change từng URL nằm trong sheet (cột tô màu xanh/đỏ).")
     except Exception as e:  # noqa: BLE001
-        _seo_state["last_result"] = f"error: {type(e).__name__}: {e}"
-        _seo_state["log"].append(f"[{datetime.now().strftime('%H:%M:%S')}] ❌ {type(e).__name__}: {e}")
+        msg = _seo_exc_text(e)
+        _seo_state["last_result"] = f"error: {msg}"
+        _seo_state["log"].append(f"[{datetime.now().strftime('%H:%M:%S')}] ❌ {msg}")
     finally:
         _seo_state["running"] = False
         _seo_state["last_run"] = datetime.now().isoformat(timespec="seconds")
@@ -236,7 +246,6 @@ def _build_schedule():
         if datetime.now().day == int(runtime_config.current().get("seo_run_day_of_month", 8)):
             _run_seo_safe()
     schedule.every().day.at(cfg.get("seo_run_time", "08:00")).do(seo_monthly)
-
 
 def _scheduler_loop():
     _build_schedule()
@@ -326,7 +335,7 @@ def api_seo_results(month: str | None = None):
     try:
         return _cached(f"seo:{month}", 120, fetch)
     except Exception as e:  # noqa: BLE001
-        return {"error": f"{type(e).__name__}: {e}", "tab": None, "tabs": [], "headers": [], "rows": []}
+        return {"error": _seo_exc_text(e), "tab": None, "tabs": [], "headers": [], "rows": []}
 
 
 @app.get("/api/seo/summary")
@@ -337,7 +346,7 @@ def api_seo_summary(limit: int = 6):
     try:
         return _cached(f"seosum:{limit}", 600, fetch)
     except Exception as e:  # noqa: BLE001
-        return {"error": f"{type(e).__name__}: {e}", "months": []}
+        return {"error": _seo_exc_text(e), "months": []}
 
 
 def _seo_summary_fetch(limit: int = 6):
@@ -371,7 +380,7 @@ def _seo_summary_fetch(limit: int = 6):
                                        for c in ("views", "users", "clicks", "impressions") if c in idx}})
         return {"months": out}
     except Exception as e:  # noqa: BLE001
-        return {"error": f"{type(e).__name__}: {e}", "months": []}
+        return {"error": _seo_exc_text(e), "months": []}
 
 
 @app.get("/api/ads/campaigns")
@@ -734,6 +743,7 @@ def _system_prompt() -> str:
 _KNOWN_ACTIONS = {
     "run_check", "query_results", "list_urls", "add_url", "remove_url", "set_schedule",
     "run_report", "seo_range", "confirm", "seo_query", "list_months", "ads_list", "ads_perf",
+    "ldp_perf", "clarity", "combined", "create_campaign",
     "status", "help", "web_search", "web_fetch", "priority_fix", "action_plan",
     "diagnose_drop", "fix_suggest", "remember", "reply",
 }
@@ -846,6 +856,26 @@ def _looks_confirm(msg: str) -> bool:
     if not m or len(m) > 16:
         return False
     return m in _CONFIRM_CUES or any(m == c or m.startswith(c + " ") for c in _CONFIRM_CUES)
+
+
+_INTENT_OVERRIDE_ACTIONS = {
+    "ads_list", "ads_perf",
+    "action_plan", "priority_fix", "diagnose_drop", "fix_suggest",
+}
+
+
+def _hard_intent_override(msg: str, current_action: str) -> dict | None:
+    """High-confidence keyword intent that should beat occasional LLM misroutes.
+
+    Keep this small: these phrases are operationally distinct, and routing them
+    to SEO report/query can trigger expensive or blocked work.
+    """
+    if current_action == "confirm":
+        return None
+    kw = _all_keyword_intent(msg)
+    if kw and kw.get("action") in _INTENT_OVERRIDE_ACTIONS and kw.get("action") != current_action:
+        return kw
+    return None
 
 
 def _proactive_suffix() -> str:
@@ -1335,6 +1365,11 @@ async def agent_chat_stream(req: ChatStreamRequest, request: Request = None):
             action = "seo_query"
         data = _validate_action(data)            # chặn action thiếu field → hỏi lại thay vì làm sai
         action = data.get("action", action)
+        override = _hard_intent_override(req.message, action)
+        if override:
+            data = _validate_action(override)
+            action = data.get("action", action)
+            yield ev({"type": "step", "text": "↪️ Sửa intent bằng keyword an toàn"})
         # Lưới an toàn: đang có đề xuất chờ xác nhận + user gõ 'ok/oke/chạy đi' → ép confirm (đừng hỏi lại hoài)
         if action != "confirm" and _looks_confirm(req.message) and (pend_range.get("start") or pend_op.get("data")):
             data = {"action": "confirm"}
@@ -1806,7 +1841,7 @@ async def agent_chat_stream(req: ChatStreamRequest, request: Request = None):
             try:
                 tabs = await asyncio.to_thread(_seo_list_tabs)
             except Exception as e:  # noqa: BLE001
-                yield ev({"type": "error", "text": f"❌ Không đọc được SEO Sheet: {type(e).__name__}: {e}"})
+                yield ev({"type": "error", "text": _seo_sheet_error(e)})
                 yield ev({"type": "done"})
                 return
             yield ev({"type": "final",
@@ -1967,7 +2002,7 @@ async def agent_chat_stream(req: ChatStreamRequest, request: Request = None):
                 try:
                     tabs_all = await asyncio.to_thread(_seo_list_tabs)
                 except Exception as e:  # noqa: BLE001
-                    yield ev({"type": "error", "text": f"❌ Không đọc được SEO Sheet: {type(e).__name__}: {e}"})
+                    yield ev({"type": "error", "text": _seo_sheet_error(e)})
                     yield ev({"type": "done"})
                     return
                 sel = tabs_all if months == "all" else [t for t in months if t in tabs_all]
@@ -1980,7 +2015,7 @@ async def agent_chat_stream(req: ChatStreamRequest, request: Request = None):
                 try:  # đọc tất cả tháng bằng 1 lệnh batchGet
                     data_map = await asyncio.to_thread(_seo_read_many, sel, 2000)
                 except Exception as e:  # noqa: BLE001
-                    yield ev({"type": "error", "text": f"❌ Không đọc được SEO Sheet: {type(e).__name__}: {e}"})
+                    yield ev({"type": "error", "text": _seo_sheet_error(e)})
                     yield ev({"type": "done"})
                     return
                 summaries = []
@@ -1996,7 +2031,7 @@ async def agent_chat_stream(req: ChatStreamRequest, request: Request = None):
             try:
                 tab, headers, rows = await asyncio.to_thread(_seo_read_results, data.get("month"))
             except Exception as e:  # noqa: BLE001
-                yield ev({"type": "error", "text": f"❌ Không đọc được SEO Sheet: {type(e).__name__}: {e}"})
+                yield ev({"type": "error", "text": _seo_sheet_error(e)})
                 yield ev({"type": "done"})
                 return
             if not rows:
@@ -2596,7 +2631,7 @@ async def seo_chat_stream(req: ChatStreamRequest, request: Request = None):
             try:
                 tabs = await asyncio.to_thread(_seo_list_tabs)
             except Exception as e:  # noqa: BLE001
-                yield ev({"type": "error", "text": f"❌ Không đọc được SEO Sheet: {type(e).__name__}: {e}"})
+                yield ev({"type": "error", "text": _seo_sheet_error(e)})
                 yield ev({"type": "done"})
                 return
             if tabs:
@@ -2742,7 +2777,7 @@ async def seo_chat_stream(req: ChatStreamRequest, request: Request = None):
                 try:
                     tabs_all = await asyncio.to_thread(_seo_list_tabs)
                 except Exception as e:  # noqa: BLE001
-                    yield ev({"type": "error", "text": f"❌ Không đọc được SEO Sheet: {type(e).__name__}: {e}"})
+                    yield ev({"type": "error", "text": _seo_sheet_error(e)})
                     yield ev({"type": "done"})
                     return
                 sel = tabs_all if months == "all" else [t for t in months if t in tabs_all]
@@ -2755,7 +2790,7 @@ async def seo_chat_stream(req: ChatStreamRequest, request: Request = None):
                 try:  # đọc tất cả tháng bằng 1 lệnh batchGet
                     data_map = await asyncio.to_thread(_seo_read_many, sel, 2000)
                 except Exception as e:  # noqa: BLE001
-                    yield ev({"type": "error", "text": f"❌ Không đọc được SEO Sheet: {type(e).__name__}: {e}"})
+                    yield ev({"type": "error", "text": _seo_sheet_error(e)})
                     yield ev({"type": "done"})
                     return
                 summaries = []
@@ -2773,7 +2808,7 @@ async def seo_chat_stream(req: ChatStreamRequest, request: Request = None):
             try:
                 tab, headers, rows = await asyncio.to_thread(_seo_read_results, data.get("month"))
             except Exception as e:  # noqa: BLE001
-                yield ev({"type": "error", "text": f"❌ Không đọc được SEO Sheet: {type(e).__name__}: {e}"})
+                yield ev({"type": "error", "text": _seo_sheet_error(e)})
                 yield ev({"type": "done"})
                 return
             if not rows:

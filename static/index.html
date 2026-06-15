@@ -2435,7 +2435,7 @@ function ConfigPwModal({payload,onClose,onDone}){
         r=await(await fetch('/api/config',{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify({...payload.body,password:pw})})).json();
       else
         r=await(await fetch('/api/config/apply',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({...payload.change,password:pw})})).json();
-      if(r.ok){setMsg({ok:r.text||'✅ Đã áp dụng cấu hình.'});setTimeout(()=>onDone(r),1100)}
+      if(r.ok){setMsg({ok:r.text||'✅ Đã lưu.'});setTimeout(()=>onDone(r),1100)}
       else setMsg({err:r.error||'Không áp dụng được.'});
     }catch(e){setMsg({err:e.message})}finally{setBusy(false)}
   };

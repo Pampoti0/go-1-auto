@@ -55,6 +55,14 @@ cp .env.example .env        # điền PSI_API_KEY, SHEET_ID, MAAS_*, SEO_*
 python server.py            # http://localhost:8000
 ```
 
+Nếu SEO báo `invalid_grant` / token expired-or-revoked, tạo lại OAuth token:
+
+```bash
+python generate_seo_token.py --token token.json
+```
+
+Nếu chưa có token cũ chứa `client_id/client_secret`, chạy thêm `--client-secrets client_secret.json`. `client_secret.json` là OAuth Desktop app trong Google Cloud Console. Cần enable Google Search Console API, Google Analytics Data API và Google Sheets API. Khi deploy, cập nhật lại secret `SEO_TOKEN_JSON` bằng nội dung `token.json` mới rồi restart runtime.
+
 ## Deploy (GreenNode AgentBase)
 
 ```bash

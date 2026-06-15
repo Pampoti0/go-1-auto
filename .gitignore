@@ -3,6 +3,7 @@
 service_account.json
 token.json
 oauth_credentials.json
+client_secret.json
 decho-sitemap-wireframe.docx
 
 # Skills / tool config
