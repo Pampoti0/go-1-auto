@@ -1103,6 +1103,7 @@ function ChatView({cfg,model}){
           else if(msg.type==='delta'){ansRaw+=msg.delta;finalText=ansRaw;upd({text:ansRaw})}
           else if(msg.type==='final'){finalText=msg.text;upd({text:msg.text})}
           else if(msg.type==='error'){finalText=msg.text;isErr=true;upd({text:msg.text,error:true})}
+          else if(msg.type==='ui'){window.dispatchEvent(new CustomEvent('decho-ui',{detail:msg.ui}))}
         }
       }
       if(!finalText){finalText='❌ Không nhận được phản hồi.';isErr=true;upd({text:finalText,error:true})}
@@ -2241,18 +2242,17 @@ function ConfigView(){
   const set=p=>setCfg(c=>({...c,...p}));
   const setUrl=(i,v)=>set({urls:cfg.urls.map((u,j)=>j===i?v:u)});
   const toggleStrat=s=>set({strategies:cfg.strategies.includes(s)?cfg.strategies.filter(x=>x!==s):[...cfg.strategies,s]});
-  async function save(){
+  function save(){
     const body={urls:cfg.urls.map(u=>u.trim()).filter(Boolean),strategies:cfg.strategies,
                 schedule_mode:cfg.mode,schedule_time:cfg.time,
                 schedule_day_of_month:parseInt(cfg.day)||4,schedule_weekday:cfg.weekday,
                 seo_run_day_of_month:parseInt(cfg.seoDay)||8,seo_run_time:cfg.seoTime,
                 seo_tracked_urls:cfg.seoTracked.split('\n').map(s=>s.trim()).filter(Boolean)};
-    const r=await(await fetch('/api/config',{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)})).json();
-    setMsg(r.ok?'✅ Đã lưu cấu hình':'❌ '+r.error);
-    if(r.ok){
-      dechoBus.act('nod');
-      dechoBus.say(`✅ Đệ lưu rồi: **${body.urls.length} URL**, lịch ${body.schedule_mode} lúc ${body.schedule_time}. Đệ đồng bộ lên Sheet luôn cho chắc.`);
-    }else dechoBus.say('❌ Lưu không được: '+r.error);
+    const desc=`Lưu cấu hình: **${body.urls.length} URL**, lịch ${body.schedule_mode} lúc ${body.schedule_time}${body.schedule_mode==='monthly'?' ngày '+body.schedule_day_of_month:''}.`;
+    window.dispatchEvent(new CustomEvent('decho-ui',{detail:{kind:'config_pw',payload:{kind:'config',body,desc,
+      onDone:()=>{setMsg('✅ Đã lưu cấu hình');dechoBus.act('nod');
+        dechoBus.say(`✅ Đệ lưu rồi: **${body.urls.length} URL**, lịch ${body.schedule_mode} lúc ${body.schedule_time}. Đệ đồng bộ lên Sheet luôn cho chắc.`);
+        load();}}}}));
   }
   const pill=on=>"px-4 py-2 rounded-lg text-[13px] border transition "+(on
     ?"bg-violet-500 border-violet-500 text-white font-semibold"
@@ -2423,9 +2423,42 @@ const TOPBAR_FX={
 };
 function TopbarParticles(){ const ref=useParticleCanvas(TOPBAR_FX); return <canvas ref={ref} className="absolute inset-0 pointer-events-none" style={{zIndex:0}}/>; }
 
+/* Popup nhập mật khẩu để đổi cấu hình — dùng cho cả chat (apply 1 thay đổi) lẫn trang Cấu hình (PUT full) */
+function ConfigPwModal({payload,onClose,onDone}){
+  const [pw,setPw]=useState(''),[busy,setBusy]=useState(false),[msg,setMsg]=useState(null);
+  const submit=async()=>{
+    if(!pw){setMsg({err:'Nhập mật khẩu.'});return}
+    setBusy(true);setMsg(null);
+    try{
+      let r;
+      if(payload.kind==='config')
+        r=await(await fetch('/api/config',{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify({...payload.body,password:pw})})).json();
+      else
+        r=await(await fetch('/api/config/apply',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({...payload.change,password:pw})})).json();
+      if(r.ok){setMsg({ok:r.text||'✅ Đã áp dụng cấu hình.'});setTimeout(()=>onDone(r),1100)}
+      else setMsg({err:r.error||'Không áp dụng được.'});
+    }catch(e){setMsg({err:e.message})}finally{setBusy(false)}
+  };
+  return ReactDOM.createPortal(
+    <div className="fixed inset-0 z-[95] bg-black/50 backdrop-blur-sm grid place-items-center p-4" onClick={onClose}>
+      <div className="w-full max-w-sm rounded-2xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 shadow-2xl p-5 flex flex-col gap-3" onClick={e=>e.stopPropagation()}>
+        <h3 className="font-bold text-[15px]">🔒 Xác nhận đổi cấu hình</h3>
+        {payload.desc&&<p className="text-[12.5px] text-slate-500 dark:text-slate-400 -mt-1 md" dangerouslySetInnerHTML={{__html:md(payload.desc)}}/>}
+        <label className="text-xs text-slate-500">Mật khẩu<input type="password" autoComplete="off" autoFocus value={pw} onChange={e=>setPw(e.target.value)} onKeyDown={e=>{if(e.key==='Enter')submit()}}
+          className="mt-1 w-full text-sm px-3 py-2 rounded-lg bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 outline-none focus:border-violet-400"/></label>
+        {msg&&<p className={"text-[12.5px] "+(msg.ok?'text-emerald-600 dark:text-emerald-400':'text-red-500')}>{msg.ok||msg.err}</p>}
+        <div className="flex gap-2 justify-end mt-1">
+          <button onClick={onClose} className="px-3.5 py-2 rounded-lg text-sm text-slate-500 hover:bg-slate-100 dark:hover:bg-slate-800">Huỷ</button>
+          <button onClick={submit} disabled={busy} className="px-3.5 py-2 rounded-lg text-sm font-medium text-white bg-violet-500 hover:bg-violet-600 disabled:opacity-50">{busy?'Đang lưu…':'Xác nhận'}</button>
+        </div>
+      </div>
+    </div>, document.body);
+}
+
 function App(){
   const [view,setView]=useState('chat');
   const face=useFace();
+  const [cfgPw,setCfgPw]=useState(null);
   const [theme,setTheme]=useLS('psi-theme','light');
   const [model,setModel]=useLS('psi-model','minimax/minimax-m2.5');
   const [meta,setMeta]=useState('Đang kết nối...');
@@ -2441,6 +2474,12 @@ function App(){
     const h=e=>setPageSub_(e.detail||'');
     window.addEventListener('page-sub',h);
     return()=>window.removeEventListener('page-sub',h);
+  },[]);
+  useEffect(()=>{
+    const h=e=>{const d=e.detail||{};if(d.kind!=='config_pw')return;
+      setCfgPw(d.payload||{kind:'apply',change:d.change,desc:d.desc});};
+    window.addEventListener('decho-ui',h);
+    return()=>window.removeEventListener('decho-ui',h);
   },[]);
   const [psiSheet,setPsiSheet]=useState('#');
   const [seoSheet,setSeoSheet]=useState('#');
@@ -2576,6 +2615,8 @@ function App(){
         {view==='dash'&&<Dashboard/>}
         {view==='config'&&<ConfigView/>}
       </div>
+      {cfgPw&&<ConfigPwModal payload={cfgPw} onClose={()=>setCfgPw(null)}
+                onDone={r=>{cfgPw.onDone&&cfgPw.onDone(r);setCfgPw(null)}}/>}
     </div>
   );
 }

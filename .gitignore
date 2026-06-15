@@ -17,5 +17,10 @@ __pycache__/
 .agentbase/
 .greennode.json
 
+# Node (chỉ dùng tạm khi verify babel cho static/index.html — không thuộc dự án)
+node_modules/
+package.json
+package-lock.json
+
 # macOS
 .DS_Store

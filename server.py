@@ -149,8 +149,12 @@ def _run_seo_safe(year: int | None = None, month: int | None = None, url_contain
         _invalidate_cache()
 
 
-_pending_range: dict = {}  # đề xuất date range đang chờ user xác nhận
-_pending_op: dict = {}     # thao tác config (xóa URL / đổi lịch) đang chờ xác nhận
+# Đề xuất đang chờ xác nhận — TÁCH theo session (tránh 'ok' của người này dính pending người khác)
+_pending_by_session: dict = {}   # session_id -> {"range": {...}, "op": {...}}
+
+
+def _pending_for(sid: str) -> dict:
+    return _pending_by_session.setdefault(sid or "_global", {"range": {}, "op": {}})
 
 
 def _run_seo_range_safe(start: str, end: str, url_contains: str | None = None):
@@ -570,11 +574,15 @@ class ConfigUpdate(BaseModel):
     seo_run_day_of_month: int | None = None
     seo_run_time: str | None = None
     seo_tracked_urls: list[str] | None = None
+    password: str | None = None
 
 
 @app.put("/api/config")
 def put_config(body: ConfigUpdate):
-    partial = {k: v for k, v in body.model_dump().items() if v is not None}
+    pw_env = os.getenv("CONFIG_EDIT_PASSWORD", "")
+    if pw_env and (body.password or "") != pw_env:
+        return {"ok": False, "error": "Sai mật khẩu — không đổi được cấu hình."}
+    partial = {k: v for k, v in body.model_dump().items() if v is not None and k != "password"}
     if not partial:
         return {"ok": False, "error": "Không có trường nào để cập nhật."}
     try:
@@ -584,6 +592,31 @@ def put_config(body: ConfigUpdate):
     if any(k.startswith("schedule") or k.startswith("seo_run") for k in partial):
         _build_schedule()  # áp lịch mới ngay
     return {"ok": True, "config": cfg}
+
+
+class ConfigApplyRequest(BaseModel):
+    password: str
+    action: str
+    url: str | None = None
+    schedule_mode: str | None = None
+    schedule_time: str | None = None
+    schedule_day_of_month: int | None = None
+    schedule_weekday: str | None = None
+
+
+@app.post("/api/config/apply")
+def api_config_apply(req: ConfigApplyRequest):
+    """Áp 1 thay đổi config (add/remove URL, đổi lịch) — yêu cầu CONFIG_EDIT_PASSWORD (nhập qua popup, không qua chat)."""
+    pw_env = os.getenv("CONFIG_EDIT_PASSWORD", "")
+    if pw_env and (req.password or "") != pw_env:
+        return {"ok": False, "error": "Sai mật khẩu."}
+    if req.action not in ("add_url", "remove_url", "set_schedule"):
+        return {"ok": False, "error": "Thao tác không hợp lệ."}
+    data = {k: v for k, v in req.model_dump().items() if v is not None and k != "password"}
+    try:
+        return {"ok": True, "text": _execute_action(data)}
+    except Exception as e:  # noqa: BLE001
+        return {"ok": False, "error": f"{type(e).__name__}: {e}"}
 
 
 @app.get("/api/status")
@@ -1253,6 +1286,8 @@ async def agent_chat_stream(req: ChatStreamRequest, request: Request = None):
     model = req.model if req.model in ALLOWED_MODELS else MAAS_MODEL
 
     final_parts: list[str] = []  # gom câu trả lời để ghi AgentBase Memory
+    _pend = _pending_for(req.session_id)
+    pend_range, pend_op = _pend["range"], _pend["op"]  # đề xuất chờ xác nhận — riêng theo phiên
 
     async def gen():
         def ev(obj):
@@ -1301,7 +1336,7 @@ async def agent_chat_stream(req: ChatStreamRequest, request: Request = None):
         data = _validate_action(data)            # chặn action thiếu field → hỏi lại thay vì làm sai
         action = data.get("action", action)
         # Lưới an toàn: đang có đề xuất chờ xác nhận + user gõ 'ok/oke/chạy đi' → ép confirm (đừng hỏi lại hoài)
-        if action != "confirm" and _looks_confirm(req.message) and (_pending_range.get("start") or _pending_op.get("data")):
+        if action != "confirm" and _looks_confirm(req.message) and (pend_range.get("start") or pend_op.get("data")):
             data = {"action": "confirm"}
             action = "confirm"
         # Lưới an toàn: hỏi năng lực/cách dùng → luôn ra help (model hay lười deflect 'đã trả lời rồi')
@@ -1547,17 +1582,19 @@ async def agent_chat_stream(req: ChatStreamRequest, request: Request = None):
             yield ev({"type": "done"})
             return
 
-        # ── PSI: đọc/thêm (an toàn) → làm ngay ──
-        if action in ("list_urls", "add_url"):
+        # ── Config: đọc URL → làm ngay; THAY ĐỔI (thêm/xóa URL, đổi lịch) → cần MẬT KHẨU qua popup ──
+        if action == "list_urls":
             yield ev({"type": "final", "text": _execute_action(data)})
             yield ev({"type": "done"})
             return
-        # ── PSI: xóa URL / đổi lịch (dễ ngoài ý muốn nếu model đoán sai) → XÁC NHẬN trước ──
-        if action in ("remove_url", "set_schedule"):
-            _pending_op.clear()
-            _pending_op.update({"data": data, "ts": time.time()})
-            yield ev({"type": "final", "text": "Đại ca xác nhận giúp Đệ: " + _describe_op(data)
-                      + "\nNhắn “ok”/“đồng ý” để Đệ làm, hoặc nói lại cho đúng nha."})
+        if action in ("add_url", "remove_url", "set_schedule"):
+            change = {"action": action}
+            for k in ("url", "schedule_mode", "schedule_time", "schedule_day_of_month", "schedule_weekday"):
+                if data.get(k) is not None:
+                    change[k] = data[k]
+            desc = (f"**thêm URL** {data.get('url')}" if action == "add_url" else _describe_op(data))
+            yield ev({"type": "ui", "ui": {"kind": "config_pw", "change": change, "desc": desc}})
+            yield ev({"type": "final", "text": "🔒 Đổi cấu hình cần **mật khẩu**. Đệ mở popup — Đại ca nhập mật khẩu để xác nhận nha."})
             yield ev({"type": "done"})
             return
 
@@ -1808,8 +1845,9 @@ async def agent_chat_stream(req: ChatStreamRequest, request: Request = None):
             p1 = d0 - _td(days=1)
             p0 = p1 - _td(days=days - 1)
             uc = str(data.get("url_contains") or "").strip() or _parse_url_contains(req.message) or ""
-            _pending_range.clear()
-            _pending_range.update({"start": d0.isoformat(), "end": d1.isoformat(),
+            pend_op.clear()    # hủy thao tác config đang chờ → 'ok' không lỡ chạy xóa URL/đổi lịch
+            pend_range.clear()
+            pend_range.update({"start": d0.isoformat(), "end": d1.isoformat(),
                                    "url_contains": uc, "ts": time.time()})
             flt_line = f"\n• **Lọc URL chứa**: `{uc}`" if uc else ""
             yield ev({"type": "step", "text": f"📅 Đã xác định khoảng: {d0} → {d1} ({days} ngày)" + (f" · lọc '{uc}'" if uc else "")})
@@ -1822,14 +1860,14 @@ async def agent_chat_stream(req: ChatStreamRequest, request: Request = None):
 
         # ── Bước 2: user xác nhận → chạy range đang chờ ──
         if action == "confirm":
-            if _pending_op.get("data") and time.time() - _pending_op.get("ts", 0) <= 600:
-                op = _pending_op["data"]
-                _pending_op.clear()
+            if pend_op.get("data") and time.time() - pend_op.get("ts", 0) <= 600 and pend_op.get("ts", 0) >= pend_range.get("ts", 0):
+                op = pend_op["data"]
+                pend_op.clear()
                 yield ev({"type": "step", "text": "✅ Đã xác nhận — Đệ thực thi"})
                 yield ev({"type": "final", "text": _execute_action(op)})
                 yield ev({"type": "done"})
                 return
-            if not _pending_range.get("start") or time.time() - _pending_range.get("ts", 0) > 600:
+            if not pend_range.get("start") or time.time() - pend_range.get("ts", 0) > 600:
                 yield ev({"type": "final", "text": "Hiện không có đề xuất nào đang chờ xác nhận (hoặc đã quá 10 phút). Đại ca nêu lại yêu cầu nhé."})
                 yield ev({"type": "done"})
                 return
@@ -1837,9 +1875,9 @@ async def agent_chat_stream(req: ChatStreamRequest, request: Request = None):
                 yield ev({"type": "final", "text": "Đang có báo cáo SEO chạy rồi — chờ xong đã nhé."})
                 yield ev({"type": "done"})
                 return
-            rs, re_ = _pending_range["start"], _pending_range["end"]
-            uc = _pending_range.get("url_contains") or ""
-            _pending_range.clear()
+            rs, re_ = pend_range["start"], pend_range["end"]
+            uc = pend_range.get("url_contains") or ""
+            pend_range.clear()
             yield ev({"type": "step", "text": f"▶ Chạy báo cáo SEO khoảng {rs} → {re_}" + (f" · lọc '{uc}'" if uc else "")})
             log_pos = len(_seo_state["log"])
             t = threading.Thread(target=_run_seo_range_safe, args=(rs, re_, uc or None), daemon=True)
