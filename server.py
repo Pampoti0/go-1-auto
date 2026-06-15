@@ -401,6 +401,61 @@ def api_ads_perf(days: int = 7, start: str | None = None, end: str | None = None
         return {"error": f"{type(e).__name__}: {e}", "rows": []}
 
 
+@app.get("/api/ads/ldp")
+def api_ads_ldp(days: int = 7, start: str | None = None, end: str | None = None):
+    """Hiệu suất theo landing page (cache 5 phút)."""
+    import re
+
+    import ads_agent
+
+    if not ads_agent.configured():
+        return {"error": "Chưa cấu hình Google Ads (GOOGLE_ADS_* trong env).", "rows": []}
+    if not (start and end and re.match(r"^\d{4}-\d{2}-\d{2}$", start) and re.match(r"^\d{4}-\d{2}-\d{2}$", end)):
+        start = end = None
+    try:
+        key = f"ads:ldp:{start}:{end}" if start else f"ads:ldp:{days}"
+        return _cached(key, 300, lambda: ads_agent.landing_page_perf(days, start, end))
+    except Exception as e:  # noqa: BLE001
+        return {"error": f"{type(e).__name__}: {e}", "rows": []}
+
+
+@app.get("/api/clarity")
+def api_clarity():
+    """Microsoft Clarity — LUÔN 3 ngày gần nhất; clarity_agent tự cache 1 ngày."""
+    import clarity_agent
+
+    if not clarity_agent.configured():
+        return {"configured": False}
+    out = clarity_agent.insights_safe()
+    return {"configured": True, "heatmap": clarity_agent.heatmap_url(),
+            "recordings": clarity_agent.recordings_url(), **out}
+
+
+class CreateCampaignRequest(BaseModel):
+    password: str
+    name: str | None = None
+    budget: int | None = None
+    final_url: str | None = None
+
+
+@app.post("/api/ads/create-campaign")
+def api_ads_create_campaign(req: CreateCampaignRequest):
+    """Tạo campaign (PAUSED) — nhận mật khẩu qua FORM riêng (không qua chat), kiểm CAMPAIGN_CREATE_PASSWORD."""
+    pw = os.getenv("CAMPAIGN_CREATE_PASSWORD", "")
+    if not pw:
+        return {"ok": False, "error": "Quyền tạo campaign chưa bật (thiếu CAMPAIGN_CREATE_PASSWORD trong .env)."}
+    if (req.password or "") != pw:
+        return {"ok": False, "error": "Sai mật khẩu."}
+    import ads_agent
+
+    if not ads_agent.configured():
+        return {"ok": False, "error": "Chưa cấu hình Google Ads (GOOGLE_ADS_*)."}
+    try:
+        return ads_agent.create_campaign(req.name or None, int(req.budget or 100000), req.final_url or None)
+    except Exception as e:  # noqa: BLE001
+        return {"ok": False, "error": f"{type(e).__name__}: {e}"}
+
+
 def _ads_prompt(perf: dict) -> str:
     rows = perf.get("rows", [])
     lines = [f"{r['date']} | {r['name']} ({r['status']}) | impr={r['impressions']} | clicks={r['clicks']} | "
@@ -412,6 +467,54 @@ def _ads_prompt(perf: dict) -> str:
         + "\n".join(lines) +
         "\n\nPhân tích theo câu hỏi: tổng chi tiêu, CTR/CPA bất thường, campaign nào hiệu quả/kém, đề xuất. "
         "TIẾNG VIỆT, ngắn gọn, số liệu cụ thể, **đậm** + gạch đầu dòng. KHÔNG dùng LaTeX. Trả lời trực tiếp. /no_think"
+    ) + _knowledge() + _persona()
+
+
+def _ldp_prompt(perf: dict) -> str:
+    rows = perf.get("rows", [])
+    lines = [f"{r['base_url']} | impr={r['impressions']} | clicks={r['clicks']} | CTR={r['ctr']}% | "
+             f"CPC={r['avg_cpc']} | cost={r['cost']} | conv={r['conversions']} | "
+             f"bounce={r['bounce_rate'] if r['bounce_rate'] is not None else 'N/A'}% | "
+             f"speed={r['speed_score'] if r['speed_score'] is not None else 'N/A'}/100"
+             for r in rows[:60]]
+    cl = (f"\nLink Clarity để soi hành vi: heatmap {perf['clarity_heatmap']} · recordings {perf['clarity_recordings']}"
+          if perf.get("clarity_heatmap") else "")
+    return (
+        f"Bạn là DeCho — module Paid Campaigns (AI). Hiệu suất theo LANDING PAGE từ {perf.get('start')} đến {perf.get('end')} "
+        "(cost theo đơn vị tiền tài khoản; speed_score 0-100 càng cao càng nhanh):\n\n"
+        + "\n".join(lines) + cl +
+        "\n\nPhân tích: landing page nào hút click/chi phí nhưng convert kém hoặc bounce cao/speed thấp (rò rỉ ngân sách); "
+        "trang nào nên tối ưu trước & cách làm (tốc độ, mobile, nội dung). Nếu có link Clarity thì nhắc Đại ca xem heatmap/recordings. "
+        "TIẾNG VIỆT, súc tích, **đậm** + gạch đầu dòng, KHÔNG LaTeX. /no_think"
+    ) + _knowledge() + _persona()
+
+
+def _clarity_prompt(ins: dict) -> str:
+    import json as _json
+
+    return (
+        "Bạn là DeCho — phân tích UX từ Microsoft Clarity (live insights):\n\n"
+        + _json.dumps(ins.get("data", ins), ensure_ascii=False)[:6000] +
+        "\n\nDựa DUY NHẤT trên số liệu trên: nêu chỉ số đáng chú ý (sessions, engagement, scroll depth, rage click, "
+        "dead click, quick back, bot). Chỉ dấu hiệu UX có vấn đề (rage/dead click cao = chỗ bấm hỏng; scroll thấp = nội dung "
+        "không giữ chân) và gợi ý kiểm tra/cải thiện. TIẾNG VIỆT, súc tích, **đậm** + gạch đầu dòng, KHÔNG LaTeX, KHÔNG bịa số. /no_think"
+    ) + _persona()
+
+
+def _combined_prompt(ads: dict, ldp: dict, clarity: dict) -> str:
+    import json as _json
+
+    def _short(o):
+        return _json.dumps(o, ensure_ascii=False)[:2500]
+
+    return (
+        "Bạn là DeCho — phân tích TỔNG HỢP user journey: Google Ads (chi tiêu/click) → Landing Page → hành vi Clarity.\n\n"
+        f"ADS (campaign×ngày):\n{_short(ads.get('rows', ads))}\n\n"
+        f"LANDING PAGE:\n{_short(ldp.get('rows', ldp))}\n\n"
+        f"CLARITY (UX):\n{_short(clarity.get('data', clarity))}\n\n"
+        "Nối các tầng: tiền đổ vào campaign nào → ra landing page nào → user hành xử ra sao (bounce, rage/dead click, scroll). "
+        "Chẩn đoán vì sao traffic trả tiền nhưng KHÔNG convert + đề xuất 3-5 việc ưu tiên (bám số liệu thật, không bịa). "
+        "TIẾNG VIỆT, súc tích, **đậm** + gạch đầu dòng, KHÔNG LaTeX. /no_think"
     ) + _knowledge() + _persona()
 
 
@@ -688,6 +791,30 @@ def _looks_external(msg: str) -> bool:
     return any(k in m for k in _EXTERNAL_CUES)
 
 
+_HELP_CUES = ("làm được gì", "làm được những gì", "hướng dẫn cách dùng", "hướng dẫn sử dụng",
+              "hướng dẫn dùng", "hướng dẫn nhanh", "cách dùng", "dùng thế nào", "dùng sao",
+              "dùng như thế nào", "có tính năng", "tính năng gì", "có những gì", "decho làm")
+
+
+def _looks_help(msg: str) -> bool:
+    """Hỏi về năng lực / cách dùng → luôn ra help (model hay deflect 'đã trả lời rồi')."""
+    m = (msg or "").lower()
+    return any(k in m for k in _HELP_CUES)
+
+
+_CONFIRM_CUES = ("ok", "oke", "okê", "okay", "okie", "k", "đồng ý", "dong y", "chạy đi", "chay di",
+                 "chạy luôn", "chạy", "chay", "chốt", "chot", "duyệt", "duyet", "làm đi", "lam di",
+                 "ừ", "uh", "ừm", "yes", "yep", "có", "co", "đúng", "dung", "đúng rồi", "xác nhận", "xac nhan", "go")
+
+
+def _looks_confirm(msg: str) -> bool:
+    """Câu đồng ý NGẮN (ok/oke/chạy đi/đồng ý...) — chỉ coi là xác nhận khi đang có đề xuất chờ."""
+    m = (msg or "").strip().lower().rstrip("!.~, ")
+    if not m or len(m) > 16:
+        return False
+    return m in _CONFIRM_CUES or any(m == c or m.startswith(c + " ") for c in _CONFIRM_CUES)
+
+
 def _proactive_suffix() -> str:
     """Bắt mọi phân tích kết thúc bằng cảnh báo + việc nên làm tiếp — BÁM SỐ LIỆU THẬT, không bịa."""
     return ("\n\nQUAN TRỌNG — sau phần phân tích, KẾT THÚC bằng (chỉ dựa trên số liệu thật ở trên, tuyệt đối không bịa):\n"
@@ -880,6 +1007,10 @@ def _unified_prompt() -> str:
         '- Hiệu suất/chi tiêu/CPA/CTR Google Ads, HOẶC "tình hình/hiệu quả campaigns", "ads ổn không", "quảng cáo thế nào": {"action":"ads_perf","days":<số ngày, mặc định 7>} '
         'hoặc khoảng thời gian tự nhiên ("ads tháng 5", "chi tiêu từ 01/05 đến 31/05", "quảng cáo quý 1"): '
         '{"action":"ads_perf","start":"YYYY-MM-DD","end":"YYYY-MM-DD"} — tự tính ngày như seo_range\n'
+        '- Hiệu suất theo LANDING PAGE / trang đích ("landing page nào hiệu quả", "trang đích tốn tiền mà không convert", "phân tích LDP", "trang nào bounce cao/tải chậm"): {"action":"ldp_perf","days":<mặc định 7>} (hoặc start/end)\n'
+        '- Microsoft CLARITY / hành vi người dùng trên web ("clarity", "user hành xử sao", "rage click", "dead click", "scroll depth", "UX trang web"): {"action":"clarity"}\n'
+        '- PHÂN TÍCH TỔNG HỢP Ads + landing page + Clarity (user journey, "vì sao traffic trả tiền mà không convert", "phân tích tổng hợp ads", "từ click tới hành vi"): {"action":"combined","days":<mặc định 7>}\n'
+        '- TẠO campaign Google Ads ("tạo campaign", "tạo chiến dịch mới"): {"action":"create_campaign"} — Đệ chỉ hướng dẫn mở form bảo mật ở tab Paid Campaigns (KHÔNG nhận mật khẩu qua chat, đừng hỏi/đọc mật khẩu trong chat).\n'
         '- Trạng thái hệ thống: {"action":"status"}\n'
         '- HƯỚNG DẪN / HỎI VỀ NĂNG LỰC ("DeCho làm được gì", "có tính năng nào", "làm sao thêm URL", "đổi lịch ở đâu", "LCP là gì", "score bao nhiêu là tốt", "lọc URL được không"): {"action":"help"}\n'
         '- GHI NHỚ theo yêu cầu ("nhớ giúp...", "ghi nhớ...", "DeCho nhớ là...", "lưu lại: ...", "từ giờ gọi tôi là...", "thông tin về anh/cửa hàng/brand là..."): {"action":"remember","fact":"<dữ kiện cô đọng, ngôi thứ 3 về Đại ca/doanh nghiệp>"}\n'
@@ -911,6 +1042,10 @@ def _capabilities() -> str:
         "- Bảng gộp traffic (GSC/GA4) + PageSpeed theo từng URL, click 1 dòng xem chi tiết + lịch sử điểm; sort theo mọi cột; ô tìm URL.\n"
         "## Paid Campaigns (Google Ads — chỉ ĐỌC, không tạo/sửa campaign, không tiêu tiền)\n"
         "- Danh sách campaign, hiệu suất/chi tiêu/CTR/CPA theo N ngày hoặc khoảng ngày tự nhiên: 'chi tiêu ads tháng 5', 'CPA 30 ngày'. Lọc ngày bằng lời hoặc bằng date picker.\n"
+        "- Hiệu suất theo từng LANDING PAGE (impr/clicks/CTR/CPC/cost/conv + bounce + speed score), kèm link Microsoft Clarity heatmap/recordings: 'phân tích landing page', 'trang đích nào tốn tiền mà không convert'.\n"
+        "- Microsoft Clarity (hành vi UX): sessions, engagement, scroll depth, rage/dead click, bot — 'clarity', 'user hành xử sao trên web'. Cần cấu hình CLARITY_PROJECT_ID/CLARITY_API_TOKEN.\n"
+        "- Phân tích TỔNG HỢP user journey: gộp Ads + landing page + Clarity để chẩn đoán vì sao traffic trả tiền nhưng không convert — 'phân tích tổng hợp ads', 'từ click tới hành vi'.\n"
+        "- TẠO campaign Search mới (GHI): chỉ tạo được khi nhập ĐÚNG MẬT KHẨU; campaign luôn ở trạng thái PAUSED (chưa tiêu tiền) để Đại ca review rồi tự bật. Mặc định budget 100k VND/ngày, target Việt Nam, có sẵn headline/mô tả/sitelink.\n"
         "## Cấu hình (menu Cấu hình)\n"
         "- Thêm/xóa URL theo dõi, đổi lịch PageSpeed (daily/weekly/monthly + giờ), đổi lịch & URL theo dõi SEO — chỉnh bằng lời ('thêm https://...', 'đổi lịch sang daily 8h') hoặc trong trang Cấu hình. Lưu là áp dụng ngay + đồng bộ Google Sheet.\n"
         "## Insight & hành động (gộp PSI + SEO)\n"
@@ -1165,6 +1300,14 @@ async def agent_chat_stream(req: ChatStreamRequest, request: Request = None):
             action = "seo_query"
         data = _validate_action(data)            # chặn action thiếu field → hỏi lại thay vì làm sai
         action = data.get("action", action)
+        # Lưới an toàn: đang có đề xuất chờ xác nhận + user gõ 'ok/oke/chạy đi' → ép confirm (đừng hỏi lại hoài)
+        if action != "confirm" and _looks_confirm(req.message) and (_pending_range.get("start") or _pending_op.get("data")):
+            data = {"action": "confirm"}
+            action = "confirm"
+        # Lưới an toàn: hỏi năng lực/cách dùng → luôn ra help (model hay lười deflect 'đã trả lời rồi')
+        if action == "reply" and _looks_help(req.message):
+            data = {"action": "help"}
+            action = "help"
         # Lưới an toàn web-aware: model lỡ trả 'reply' cho câu rõ ràng cần info ngoài → Đệ tự tra web
         if action == "reply" and _looks_external(req.message):
             data = {"action": "web_search", "query": req.message}
@@ -1177,6 +1320,8 @@ async def agent_chat_stream(req: ChatStreamRequest, request: Request = None):
                   "set_schedule": "Đổi lịch PageSpeed", "run_report": "Chạy báo cáo SEO", "seo_range": "Xác định khoảng thời gian SEO", "confirm": "Xác nhận & thực thi",
                   "seo_query": "Phân tích số liệu SEO", "list_months": "Các tháng có báo cáo SEO",
                   "ads_list": "Danh sách campaign Google Ads", "ads_perf": "Phân tích hiệu suất Google Ads",
+                  "ldp_perf": "Hiệu suất landing page", "clarity": "Microsoft Clarity (UX)", "combined": "Phân tích tổng hợp Ads + Clarity",
+                  "create_campaign": "Tạo campaign (PAUSED, cần mật khẩu)",
                   "status": "Trạng thái hệ thống", "help": "Hướng dẫn năng lực",
                   "web_search": "Tìm trên web", "web_fetch": "Đọc trang web",
                   "priority_fix": "Ưu tiên tối ưu", "action_plan": "Kế hoạch hành động",
@@ -1547,6 +1692,77 @@ async def agent_chat_stream(req: ChatStreamRequest, request: Request = None):
                 yield chunk
             yield ev({"type": "done"})
             return
+
+        # ── Ads: hiệu suất theo LANDING PAGE (read-only) ──
+        if action == "ldp_perf":
+            import ads_agent
+
+            if not ads_agent.configured():
+                yield ev({"type": "error", "text": "❌ Chưa cấu hình Google Ads (GOOGLE_ADS_* trong env)."})
+                yield ev({"type": "done"}); return
+            days = int(data.get("days") or 7)
+            a_start, a_end = str(data.get("start") or ""), str(data.get("end") or "")
+            if not (_re.match(r"^\d{4}-\d{2}-\d{2}$", a_start) and _re.match(r"^\d{4}-\d{2}-\d{2}$", a_end)):
+                a_start = a_end = ""
+            yield ev({"type": "step", "text": "🔗 Đọc hiệu suất theo landing page..."})
+            try:
+                key = f"ads:ldp:{a_start}:{a_end}" if a_start else f"ads:ldp:{days}"
+                ldp = await asyncio.to_thread(lambda: _cached(key, 300, lambda: ads_agent.landing_page_perf(days, a_start or None, a_end or None)))
+            except Exception as e:  # noqa: BLE001
+                yield ev({"type": "error", "text": f"❌ Lỗi Google Ads (LDP): {type(e).__name__}: {e}"})
+                yield ev({"type": "done"}); return
+            if not ldp.get("rows"):
+                yield ev({"type": "final", "text": "Không có dữ liệu landing page trong khoảng này."})
+                yield ev({"type": "done"}); return
+            yield ev({"type": "step", "text": f"📄 {len(ldp['rows'])} landing page ({ldp['start']} → {ldp['end']})"})
+            yield ev({"type": "step", "text": f"🧠 Phân tích ({model})..."})
+            async for chunk in stream_analysis(_ldp_prompt(ldp) + _proactive_suffix()):
+                yield chunk
+            yield ev({"type": "done"}); return
+
+        # ── Microsoft Clarity: UX insights ──
+        if action == "clarity":
+            import clarity_agent
+
+            if not clarity_agent.configured():
+                yield ev({"type": "error", "text": "❌ Chưa cấu hình Microsoft Clarity (CLARITY_PROJECT_ID / CLARITY_API_TOKEN trong env)."})
+                yield ev({"type": "done"}); return
+            yield ev({"type": "step", "text": "👁️ Đọc Microsoft Clarity insights..."})
+            ins = await asyncio.to_thread(clarity_agent.insights_safe, int(data.get("days") or 3))
+            if ins.get("error"):
+                yield ev({"type": "error", "text": f"❌ Clarity lỗi: {ins['error']}"})
+                yield ev({"type": "done"}); return
+            yield ev({"type": "step", "text": f"🧠 Phân tích hành vi ({model})..."})
+            async for chunk in stream_analysis(_clarity_prompt(ins)):
+                yield chunk
+            yield ev({"type": "done"}); return
+
+        # ── Combined: Ads + Landing Page + Clarity (user journey) ──
+        if action == "combined":
+            import ads_agent
+            import clarity_agent
+
+            if not ads_agent.configured():
+                yield ev({"type": "error", "text": "❌ Chưa cấu hình Google Ads (GOOGLE_ADS_*)."})
+                yield ev({"type": "done"}); return
+            days = int(data.get("days") or 7)
+            yield ev({"type": "step", "text": "📊 Gộp Ads + Landing Page + Clarity..."})
+            try:
+                ads = await asyncio.to_thread(lambda: _cached(f"ads:perf:{days}", 300, lambda: ads_agent.campaign_perf(days)))
+                ldp = await asyncio.to_thread(lambda: _cached(f"ads:ldp:{days}", 300, lambda: ads_agent.landing_page_perf(days)))
+            except Exception as e:  # noqa: BLE001
+                yield ev({"type": "error", "text": f"❌ Lỗi Google Ads: {type(e).__name__}: {e}"})
+                yield ev({"type": "done"}); return
+            clarity = clarity_agent.insights_safe(3) if clarity_agent.configured() else {"error": "Clarity chưa cấu hình"}
+            yield ev({"type": "step", "text": f"🧠 Phân tích user journey ({model})..."})
+            async for chunk in stream_analysis(_combined_prompt(ads, ldp, clarity) + _proactive_suffix()):
+                yield chunk
+            yield ev({"type": "done"}); return
+
+        # ── GHI: tạo campaign — KHÔNG nhận mật khẩu qua chat, hướng dẫn dùng form bảo mật ──
+        if action == "create_campaign":
+            yield ev({"type": "final", "text": "🔒 Để giữ **mật khẩu an toàn**, Đệ không tạo campaign qua chat. Đại ca mở tab **Paid Campaigns** → bấm **“+ Tạo campaign”**, điền tên/ngân sách và nhập **mật khẩu** trong ô riêng (không lưu vào lịch sử chat). Đúng mật khẩu là Đệ tạo ngay ở trạng thái **PAUSED** (chưa tiêu tiền)."})
+            yield ev({"type": "done"}); return
 
         # ── SEO: liệt kê tháng ──
         if action == "list_months":

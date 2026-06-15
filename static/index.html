@@ -1855,9 +1855,60 @@ function UrlIntel(){
   );
 }
 
+/* Trích metric Clarity (best-effort, không vỡ nếu shape lạ) */
+function clarityMetrics(data){
+  if(!Array.isArray(data))return [];
+  const out=[];
+  for(const m of data){
+    const name=m&&(m.metricName||m.name);if(!name)continue;
+    const info=m&&m.information;let val='—';
+    if(Array.isArray(info)&&info.length){
+      const f=info[0],k=Object.keys(f).find(k=>typeof f[k]==='number')||Object.keys(f)[0];
+      if(k)val=String(f[k]);
+    }
+    out.push({label:name,value:val});
+  }
+  return out.slice(0,8);
+}
+
+/* Modal tạo campaign — nhập MẬT KHẨU ở ô riêng (type=password), KHÔNG đi qua chat/không lưu lịch sử */
+function CreateCampaignModal({onClose,onDone}){
+  const [name,setName]=useState(''),[budget,setBudget]=useState('100000'),[pw,setPw]=useState('');
+  const [busy,setBusy]=useState(false),[msg,setMsg]=useState(null);
+  const submit=async()=>{
+    if(!pw){setMsg({err:'Nhập mật khẩu xác nhận.'});return}
+    setBusy(true);setMsg(null);
+    try{
+      const r=await(await fetch('/api/ads/create-campaign',{method:'POST',headers:{'Content-Type':'application/json'},
+        body:JSON.stringify({password:pw,name:name||undefined,budget:Number(budget)||undefined})})).json();
+      if(r.ok){setMsg({ok:`✅ Đã tạo "${r.name}" (PAUSED) · ${r.sitelinks} sitelink. Vào Google Ads review rồi bật.`});setTimeout(onDone,1600)}
+      else setMsg({err:r.error||'Tạo không được.'});
+    }catch(e){setMsg({err:e.message})}
+    finally{setBusy(false)}
+  };
+  const inp="mt-1 w-full text-sm px-3 py-2 rounded-lg bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 outline-none focus:border-violet-400";
+  return ReactDOM.createPortal(
+    <div className="fixed inset-0 z-[90] bg-black/50 backdrop-blur-sm grid place-items-center p-4" onClick={onClose}>
+      <div className="w-full max-w-md rounded-2xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 shadow-2xl p-5 flex flex-col gap-3" onClick={e=>e.stopPropagation()}>
+        <h3 className="font-bold text-[15px]">Tạo campaign mới (Google Ads)</h3>
+        <p className="text-[12px] text-slate-400 -mt-1">Tạo ở trạng thái <b>PAUSED</b> — chưa tiêu tiền tới khi Đại ca tự bật trong Google Ads.</p>
+        <label className="text-xs text-slate-500">Tên campaign<input value={name} onChange={e=>setName(e.target.value)} placeholder="vd: GG_Search_CloudServer" className={inp}/></label>
+        <label className="text-xs text-slate-500">Ngân sách (VND/ngày)<input type="number" value={budget} onChange={e=>setBudget(e.target.value)} className={inp}/></label>
+        <label className="text-xs text-slate-500">Mật khẩu xác nhận 🔒<input type="password" autoComplete="off" value={pw} onChange={e=>setPw(e.target.value)} placeholder="nhập mật khẩu" onKeyDown={e=>{if(e.key==='Enter')submit()}} className={inp}/></label>
+        {msg&&<p className={"text-[12.5px] "+(msg.ok?'text-emerald-600 dark:text-emerald-400':'text-red-500')}>{msg.ok||msg.err}</p>}
+        <div className="flex gap-2 justify-end mt-1">
+          <button onClick={onClose} className="px-3.5 py-2 rounded-lg text-sm text-slate-500 hover:bg-slate-100 dark:hover:bg-slate-800">Huỷ</button>
+          <button onClick={submit} disabled={busy} className="px-3.5 py-2 rounded-lg text-sm font-medium text-white bg-violet-500 hover:bg-violet-600 disabled:opacity-50">{busy?'Đang tạo…':'Tạo (PAUSED)'}</button>
+        </div>
+      </div>
+    </div>, document.body);
+}
+
 function AdsView(){
   const [camps,setCamps]=useState(null);
   const [perf,setPerf]=useState(null);
+  const [ldp,setLdp]=useState(null),[clarity,setClarity]=useState(null);
+  const [showCreate,setShowCreate]=useState(false);
   const [range,setRange]=useState(()=>{
     const iso=d=>d.toISOString().slice(0,10);
     const yest=new Date(Date.now()-864e5);
@@ -1865,17 +1916,21 @@ function AdsView(){
   });
   const [err,setErr]=useState('');
   const load=useCallback(async rng=>{
-    setErr('');setPerf(null);
+    setErr('');setPerf(null);setLdp(null);
     try{
-      const [c,p]=await Promise.all([
+      const [c,p,l]=await Promise.all([
         fetch('/api/ads/campaigns').then(r=>r.json()),
         fetch(`/api/ads/perf?start=${rng.start}&end=${rng.end}`).then(r=>r.json()),
+        fetch(`/api/ads/ldp?start=${rng.start}&end=${rng.end}`).then(r=>r.json()).catch(()=>({rows:[]})),
       ]);
       if(c.error||p.error){setErr(c.error||p.error);return}
-      setCamps(c.campaigns);setPerf(p);
+      setCamps(c.campaigns);setPerf(p);setLdp(l);
     }catch(e){setErr(e.message)}
   },[]);
   useEffect(()=>{load(range)},[]);
+  useEffect(()=>{ /* Clarity: luôn 3 ngày, fetch 1 lần — KHÔNG theo filter ngày */
+    fetch('/api/clarity').then(r=>r.json()).then(setClarity).catch(()=>setClarity({configured:false}));
+  },[]);
   useEffect(()=>{ /* DeCho chỉnh filter qua chat dock */
     const h=e=>{
       const a=e.detail||{};
@@ -1935,6 +1990,7 @@ function AdsView(){
       <div className="max-w-[1180px] mx-auto flex flex-col gap-5">
         <HeaderSlot>
           <DateRangePicker value={range} onApply={r=>{setRange(r);load(r)}}/>
+          <button onClick={()=>setShowCreate(true)} className="px-3.5 py-2 rounded-lg text-sm font-medium text-violet-600 dark:text-violet-400 border border-violet-300 dark:border-violet-700 hover:bg-violet-50 dark:hover:bg-violet-500/10 inline-flex items-center gap-1">+ Tạo campaign</button>
           <button onClick={()=>load(range)} className="px-3.5 py-2 rounded-lg text-sm font-medium text-white bg-violet-500 hover:bg-violet-600 shadow-xs inline-flex items-center gap-1.5"><NavIcon id="refresh" cls="w-4 h-4"/>Tải lại</button>
         </HeaderSlot>
 
@@ -1997,7 +2053,57 @@ function AdsView(){
             </table>
           </div>
         </div>
+
+        {ldp&&ldp.rows&&ldp.rows.length>0&&(
+        <div className={mosaicCard}>
+          <div className="px-5 pt-4 pb-3 border-b border-slate-100 dark:border-slate-800">
+            <h3 className="font-semibold text-[15px]">Theo landing page <span className="text-slate-400 font-normal">({ldp.start} → {ldp.end})</span></h3>
+          </div>
+          <div className="overflow-x-auto">
+            <table className="w-full text-[12.5px]">
+              <thead><tr className="text-[10.5px] uppercase tracking-wide text-slate-400 bg-slate-50 dark:bg-slate-800/60">
+                {['Landing page','Impr.','Clicks','CTR','Avg. CPC','Cost','Conv.','Bounce','Speed'].map(h=>
+                  <th key={h} className="px-3 py-2.5 text-right first:text-left font-semibold whitespace-nowrap">{h}</th>)}
+              </tr></thead>
+              <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
+                {ldp.rows.slice(0,40).map((r,i)=>(
+                  <tr key={i} className="hover:bg-slate-50 dark:hover:bg-slate-800/40">
+                    <td className="px-3 py-1.5 max-w-[340px] truncate"><a href={r.url} target="_blank" rel="noopener" className="text-violet-500 hover:underline" title={r.url}>{(r.base_url||'').replace(/^https?:\/\//,'')}</a></td>
+                    <td className="px-3 py-1.5 text-right">{fmtN(r.impressions)}</td>
+                    <td className="px-3 py-1.5 text-right">{fmtN(r.clicks)}</td>
+                    <td className="px-3 py-1.5 text-right">{r.ctr}%</td>
+                    <td className="px-3 py-1.5 text-right">{fmtN(r.avg_cpc)}</td>
+                    <td className="px-3 py-1.5 text-right font-semibold">{fmtN(r.cost)}</td>
+                    <td className="px-3 py-1.5 text-right">{r.conversions}</td>
+                    <td className="px-3 py-1.5 text-right">{r.bounce_rate!=null?r.bounce_rate+'%':'—'}</td>
+                    <td className="px-3 py-1.5 text-right">{r.speed_score!=null?r.speed_score:'—'}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+          {ldp.clarity_heatmap&&<div className="px-5 py-2.5 text-[11.5px] text-slate-400 border-t border-slate-100 dark:border-slate-800">Soi hành vi: <a href={ldp.clarity_heatmap} target="_blank" rel="noopener" className="text-violet-500 hover:underline">Clarity heatmap</a> · <a href={ldp.clarity_recordings} target="_blank" rel="noopener" className="text-violet-500 hover:underline">recordings</a></div>}
+        </div>)}
+
+        {clarity&&clarity.configured&&(
+        <div className={mosaicCard+" p-5 flex flex-col gap-3"}>
+          <div className="flex items-center gap-2 flex-wrap">
+            <h3 className="font-semibold text-[15px]">Microsoft Clarity <span className="text-slate-400 font-normal">(UX · 3 ngày gần nhất)</span></h3>
+            {clarity.stale&&<span className="text-[10.5px] px-1.5 py-0.5 rounded-full bg-amber-100 dark:bg-amber-900/40 text-amber-600 dark:text-amber-400">dữ liệu lưu tạm</span>}
+            {clarity.fetched_at&&<span className="ml-auto text-[11px] text-slate-400">Cập nhật {new Date(clarity.fetched_at*1000).toLocaleString('vi-VN',{hour:'2-digit',minute:'2-digit',day:'2-digit',month:'2-digit'})}</span>}
+            {clarity.heatmap&&<a href={clarity.heatmap} target="_blank" rel="noopener" className={(clarity.fetched_at?'':'ml-auto ')+'text-[12px] text-violet-500 hover:underline'}>Heatmap ↗</a>}
+            {clarity.recordings&&<a href={clarity.recordings} target="_blank" rel="noopener" className="text-[12px] text-violet-500 hover:underline">Recordings ↗</a>}
+          </div>
+          {clarity.error
+            ?<p className="text-xs text-slate-400">Không lấy được Clarity: {clarity.error}</p>
+            :clarityMetrics(clarity.data).length
+              ?<div className="grid gap-2.5" style={{gridTemplateColumns:'repeat(auto-fit,minmax(150px,1fr))'}}>
+                {clarityMetrics(clarity.data).map((m,i)=><div key={i} className="rounded-xl border border-slate-200 dark:border-slate-700 px-3 py-2"><div className="text-[10.5px] uppercase text-slate-400 truncate" title={m.label}>{m.label}</div><div className="text-[15px] font-bold truncate">{m.value}</div></div>)}
+              </div>
+              :<p className="text-xs text-slate-400">Đã kết nối Clarity. Hỏi DeCho “phân tích clarity” để xem chi tiết hành vi.</p>}
+        </div>)}
       </div>
+      {showCreate&&<CreateCampaignModal onClose={()=>setShowCreate(false)} onDone={()=>{setShowCreate(false);load(range)}}/>}
     </div>
   );
 }
