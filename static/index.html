@@ -511,6 +511,20 @@ function DechoScene3D({className}){
         f.m.scale.setScalar(f.r);f.m.material.opacity=0.95;f.m.visible=true;c++;
       }};
     let foamT=0;
+    /* ── Khói bốc lên khi bị giật ── */
+    const smoke=[];
+    for(let i=0;i<14;i++){
+      const m=new THREE.Mesh(foamGeo,new THREE.MeshBasicMaterial({color:0x9a9a9a,transparent:true,opacity:0,depthWrite:false}));
+      m.visible=false;scene.add(m);smoke.push({m,life:0,max:1,vx:0,vy:0,vz:0,r:0.08});
+    }
+    const emitSmoke=n=>{let c=0;const b=group.position;
+      for(const s of smoke){ if(c>=n)break; if(s.life>0)continue;
+        s.max=1.1+Math.random()*0.8;s.life=s.max;s.r=0.07+Math.random()*0.06;
+        s.m.position.set(b.x+(Math.random()-0.5)*0.5,b.y+0.6+Math.random()*0.3,b.z+(Math.random()-0.5)*0.4);
+        s.vx=(Math.random()-0.5)*0.18;s.vy=0.4+Math.random()*0.35;s.vz=(Math.random()-0.5)*0.18;
+        s.m.scale.setScalar(s.r);s.m.material.opacity=0;s.m.visible=true;c++;
+      }};
+    let smokeT=0;
     const clock=new THREE.Clock();
     let raf;
     const tick=()=>{
@@ -556,11 +570,20 @@ function DechoScene3D({className}){
         posY+=Math.sin(t*78)*0.05*k;sqY*=1+Math.sin(t*44)*0.10*k;
         sparks.visible=true;updateSparks(k);
         foamT-=dt;if(foamT<=0){emitFoam(2);foamT=0.06}
+        smokeT-=dt;if(smokeT<=0){emitSmoke(1);smokeT=0.12}
       }else if(sparks.visible)sparks.visible=false;
       for(const f of foam){ if(f.life<=0)continue; f.life-=dt;
         if(f.life<=0){f.m.visible=false;continue;}
         f.m.position.x+=f.vx*dt;f.m.position.y+=f.vy*dt;f.m.position.z+=f.vz*dt;  /* không rơi: chỉ lăn tăn rồi mờ */
         f.m.material.opacity=Math.min(0.92,f.life*2.5);
+      }
+      for(const s of smoke){ if(s.life<=0)continue; s.life-=dt;
+        if(s.life<=0){s.m.visible=false;continue;}
+        s.vy*=(1-0.4*dt);                                   /* bốc lên chậm dần */
+        s.m.position.x+=s.vx*dt;s.m.position.y+=s.vy*dt;s.m.position.z+=s.vz*dt;
+        const age=1-s.life/s.max;
+        s.m.scale.setScalar(s.r*(1+age*3.5));               /* nở to dần */
+        s.m.material.opacity=Math.sin(Math.min(1,age*1.1)*Math.PI)*0.5;  /* mờ vào rồi mờ ra */
       }
       const sxz=1/Math.sqrt(Math.max(sqY,0.2));   /* squash-and-stretch giữ thể tích */
       group.position.y=1+posY;
@@ -581,7 +604,7 @@ function DechoScene3D({className}){
       el.removeEventListener('pointermove',onMove);el.removeEventListener('pointerleave',onLeave);
       el.removeEventListener('pointerdown',onPress);window.removeEventListener('pointerup',onRelease);
       controls.dispose();renderer.dispose();
-      foamGeo.dispose();sparkGeo.dispose();sparkMat.dispose();foam.forEach(f=>f.m.material.dispose());
+      foamGeo.dispose();sparkGeo.dispose();sparkMat.dispose();foam.forEach(f=>f.m.material.dispose());smoke.forEach(s=>s.m.material.dispose());
       el.contains(renderer.domElement)&&el.removeChild(renderer.domElement)};
   },[]);
 
@@ -1894,15 +1917,17 @@ function AdsView(){
   /* aggregate theo campaign + theo ngày */
   const byCamp={},byDate={};
   perf.rows.forEach(r=>{
-    const a=byCamp[r.name]=byCamp[r.name]||{name:r.name,status:r.status,impressions:0,clicks:0,cost:0,conversions:0};
+    const a=byCamp[r.name]=byCamp[r.name]||{name:r.name,status:r.status,impressions:0,clicks:0,cost:0,conversions:0,absTopImpr:0,topImpr:0};
     a.impressions+=r.impressions;a.clicks+=r.clicks;a.cost+=r.cost;a.conversions+=r.conversions;
+    a.absTopImpr+=(r.absTopPct||0)/100*r.impressions;a.topImpr+=(r.topPct||0)/100*r.impressions;  /* gộp % có trọng số */
     const d=byDate[r.date]=byDate[r.date]||{cost:0,clicks:0};
     d.cost+=r.cost;d.clicks+=r.clicks;
   });
   const campRows=Object.values(byCamp).sort((a,b)=>b.cost-a.cost);
   const dates=Object.keys(byDate).sort();
   const totCost=campRows.reduce((p,c)=>p+c.cost,0),totClicks=campRows.reduce((p,c)=>p+c.clicks,0),
-        totConv=campRows.reduce((p,c)=>p+c.conversions,0);
+        totConv=campRows.reduce((p,c)=>p+c.conversions,0),totImpr=campRows.reduce((p,c)=>p+c.impressions,0),
+        totAbsTop=campRows.reduce((p,c)=>p+c.absTopImpr,0),totTop=campRows.reduce((p,c)=>p+c.topImpr,0);
   const fmtN=v=>v>=1e6?(v/1e6).toFixed(1)+'M':v>=1e3?(v/1e3).toFixed(1)+'k':Math.round(v).toLocaleString();
 
   return (
@@ -1913,12 +1938,15 @@ function AdsView(){
           <button onClick={()=>load(range)} className="px-3.5 py-2 rounded-lg text-sm font-medium text-white bg-violet-500 hover:bg-violet-600 shadow-xs inline-flex items-center gap-1.5"><NavIcon id="refresh" cls="w-4 h-4"/>Tải lại</button>
         </HeaderSlot>
 
-        <div className="grid gap-4" style={{gridTemplateColumns:'repeat(auto-fit,minmax(170px,1fr))'}}>
-          <StatCard label="Tổng chi tiêu" value={fmtN(totCost)} sub={range.label||(perf.start+' → '+perf.end)}/>
-          <StatCard label="Clicks" value={fmtN(totClicks)} sub={'CTR phụ thuộc từng campaign'}/>
-          <StatCard label="Conversions" value={totConv.toFixed(1)} sub=""/>
-          <StatCard label="CPA trung bình" value={totConv?fmtN(totCost/totConv):'—'} sub={totConv?'':'chưa có conversion'}/>
-          <StatCard label="Campaigns" value={camps.length} sub={campRows.length+' có hoạt động'}/>
+        <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+          <StatCard label="CTR" value={totImpr?(totClicks/totImpr*100).toFixed(2)+'%':'—'} sub="clicks / impressions"/>
+          <StatCard label="Impressions" value={fmtN(totImpr)} sub={range.label||(perf.start+' → '+perf.end)}/>
+          <StatCard label="Impr. (Abs.Top) %" value={totImpr?(totAbsTop/totImpr*100).toFixed(1)+'%':'—'} sub="ở vị trí top tuyệt đối"/>
+          <StatCard label="Impr. (Top) %" value={totImpr?(totTop/totImpr*100).toFixed(1)+'%':'—'} sub="ở khu vực top"/>
+          <StatCard label="Avg. CPC" value={totClicks?fmtN(totCost/totClicks):'—'} sub="cost / click"/>
+          <StatCard label="Cost / conv." value={totConv?fmtN(totCost/totConv):'—'} sub={totConv?'':'chưa có conversion'}/>
+          <StatCard label="Conv. rate" value={totClicks?(totConv/totClicks*100).toFixed(2)+'%':'—'} sub="conv / click"/>
+          <StatCard label="Avg. CPM" value={totImpr?fmtN(totCost/totImpr*1000):'—'} sub="cost / 1000 impr"/>
         </div>
 
         <div className={mosaicCard}>
@@ -1945,7 +1973,7 @@ function AdsView(){
           <div className="overflow-x-auto">
             <table className="w-full text-[12.5px]">
               <thead><tr className="text-[10.5px] uppercase tracking-wide text-slate-400 bg-slate-50 dark:bg-slate-800/60">
-                {['Campaign','Status','Impressions','Clicks','CTR','Cost','Conv.','CPA'].map(c=>
+                {['Campaign','Status','Impr.','CTR','Impr. (Abs.Top)%','Impr. (Top)%','Avg. CPC','Cost','Cost/conv','Conv. rate'].map(c=>
                   <th key={c} className="px-3 py-2.5 text-right first:text-left font-semibold whitespace-nowrap">{c}</th>)}
               </tr></thead>
               <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
@@ -1956,11 +1984,13 @@ function AdsView(){
                       <span className={"px-1.5 py-0.5 rounded-full text-[11px] font-semibold "+(c.status==='ENABLED'?'bg-emerald-500/20 text-emerald-700 dark:text-emerald-400':'bg-slate-200 dark:bg-slate-700 text-slate-500')}>{c.status}</span>
                     </td>
                     <td className="px-3 py-1.5 text-right">{fmtN(c.impressions)}</td>
-                    <td className="px-3 py-1.5 text-right">{fmtN(c.clicks)}</td>
                     <td className="px-3 py-1.5 text-right">{c.impressions?(c.clicks/c.impressions*100).toFixed(2)+'%':'—'}</td>
+                    <td className="px-3 py-1.5 text-right">{c.impressions?(c.absTopImpr/c.impressions*100).toFixed(1)+'%':'—'}</td>
+                    <td className="px-3 py-1.5 text-right">{c.impressions?(c.topImpr/c.impressions*100).toFixed(1)+'%':'—'}</td>
+                    <td className="px-3 py-1.5 text-right">{c.clicks?fmtN(c.cost/c.clicks):'—'}</td>
                     <td className="px-3 py-1.5 text-right font-semibold">{fmtN(c.cost)}</td>
-                    <td className="px-3 py-1.5 text-right">{c.conversions.toFixed(1)}</td>
                     <td className="px-3 py-1.5 text-right">{c.conversions?fmtN(c.cost/c.conversions):'—'}</td>
+                    <td className="px-3 py-1.5 text-right">{c.clicks?(c.conversions/c.clicks*100).toFixed(2)+'%':'—'}</td>
                   </tr>
                 ))}
               </tbody>
@@ -2305,8 +2335,8 @@ function App(){
       {/* Sidebar */}
       <aside className="w-60 flex-none relative flex flex-col bg-white/80 dark:bg-slate-900/80 backdrop-blur border-r border-slate-200 dark:border-slate-800">
         <SidebarParticles/>
-        <div className="relative z-10 flex-1 flex flex-col gap-1 p-3">
-        <div className="flex items-center gap-2.5 px-2.5 pb-3">
+        <div className="relative z-10 flex-1 min-h-0 flex flex-col gap-1 p-3">
+        <div className="flex items-center gap-2.5 px-2.5 pb-3 flex-none">
           <div className="w-9 h-9 rounded-xl grid place-items-center overflow-hidden bg-gradient-to-br from-emerald-100 to-cyan-100 dark:from-emerald-900 dark:to-cyan-900 border border-slate-200 dark:border-slate-700">
             <img src="/static/decho.png" alt="DeCho" className="w-full h-full object-cover"
                  onError={e=>{e.currentTarget.style.display='none';e.currentTarget.nextSibling.style.display='block'}}/>
@@ -2320,15 +2350,16 @@ function App(){
               :<svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/></svg>}
           </button>
         </div>
+        <nav className="flex-1 min-h-0 overflow-y-auto flex flex-col gap-1 -mr-2 pr-2">
         {NAV.map((n,i)=>n.sec
-          ?<div key={i} className="text-[10.5px] font-bold tracking-widest uppercase text-slate-400 px-3.5 pt-3 pb-1">{n.sec}</div>
+          ?<div key={i} className="text-[10.5px] font-bold tracking-widest uppercase text-slate-400 px-3.5 pt-3 pb-1 flex-none">{n.sec}</div>
           :n.link
-            ?<a key={n.id} href={n.id==='seoSheet'?seoSheet:psiSheet} target="_blank" className="flex items-center gap-2.5 px-3.5 py-2.5 rounded-xl text-sm text-slate-500 hover:bg-slate-100 dark:hover:bg-slate-800 hover:text-inherit transition"><NavIcon id={n.id}/>{n.label}</a>
+            ?<a key={n.id} href={n.id==='seoSheet'?seoSheet:psiSheet} target="_blank" className="flex-none flex items-center gap-2.5 px-3.5 py-2.5 rounded-xl text-sm text-slate-500 hover:bg-slate-100 dark:hover:bg-slate-800 hover:text-inherit transition"><NavIcon id={n.id}/>{n.label}</a>
             :<button key={n.id} onClick={()=>setView(n.id)}
-               className={"flex items-center gap-2.5 px-3.5 py-2.5 rounded-xl text-sm text-left transition "+(view===n.id
+               className={"flex-none flex items-center gap-2.5 px-3.5 py-2.5 rounded-xl text-sm text-left transition "+(view===n.id
                  ?"bg-violet-500/10 text-violet-600 dark:text-violet-400 font-semibold"
                  :"text-slate-500 hover:bg-slate-100 dark:hover:bg-slate-800 hover:text-inherit")}><NavIcon id={n.id}/>{n.label}</button>)}
-        <div className="flex-1"/>
+        </nav>
         <DechoDock showAsk={view!=='chat'}/>
         </div>
       </aside>

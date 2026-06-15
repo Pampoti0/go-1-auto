@@ -125,7 +125,8 @@ def campaign_perf(days: int = 7, start: str | None = None, end: str | None = Non
     q = f"""
         SELECT campaign.id, campaign.name, campaign.status, segments.date,
                metrics.impressions, metrics.clicks, metrics.ctr,
-               metrics.cost_micros, metrics.conversions, metrics.average_cpc
+               metrics.cost_micros, metrics.conversions, metrics.average_cpc,
+               metrics.absolute_top_impression_percentage, metrics.top_impression_percentage
         FROM campaign
         WHERE segments.date BETWEEN '{start}' AND '{end}'
         ORDER BY segments.date
@@ -141,6 +142,8 @@ def campaign_perf(days: int = 7, start: str | None = None, end: str | None = Non
             "ctr": round(m.ctr * 100, 2), "cost": round(cost, 2),
             "conversions": round(m.conversions, 1),
             "cpa": round(cost / m.conversions) if m.conversions else None,
+            "absTopPct": round(m.absolute_top_impression_percentage * 100, 2),
+            "topPct": round(m.top_impression_percentage * 100, 2),
         })
     log.info(f"Ads perf {start}→{end}: {len(rows)} dòng")
     return {"start": start, "end": end, "rows": rows}
