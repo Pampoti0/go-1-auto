@@ -22,7 +22,7 @@ Marketer, content creator, growth team quản lý website nhiều trang (case th
 - **DeCho mascot + memory**: nhân vật 3D/2D phản ứng theo trạng thái hệ thống, hỏi nhanh theo bối cảnh màn hình; long-term memory chỉ lưu fact khi user chủ động "ghi nhớ" và có nút reset actor local
 
 ## Value
-Một nơi duy nhất thay cho 4 tool; cảnh báo chủ động thay vì phát hiện muộn; thao tác bằng ngôn ngữ tự nhiên — không cần biết kỹ thuật.
+Một nơi duy nhất thay cho PageSpeed Insights, Search Console, GA4, Google Ads, Microsoft Clarity và Sheets; cảnh báo chủ động thay vì phát hiện muộn; thao tác bằng ngôn ngữ tự nhiên — không cần biết kỹ thuật.
 
 ## Kiến trúc
 
