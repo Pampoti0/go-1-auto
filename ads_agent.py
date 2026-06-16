@@ -6,6 +6,7 @@ Credentials qua env (GOOGLE_ADS_*) — TUYỆT ĐỐI không hardcode vào code.
 
 import logging
 import os
+from urllib.parse import urlparse
 
 log = logging.getLogger("ads_agent")
 
@@ -174,7 +175,7 @@ def landing_page_perf(days: int = 7, start: str | None = None, end: str | None =
         SELECT landing_page_view.unexpanded_final_url,
                metrics.impressions, metrics.clicks, metrics.ctr,
                metrics.average_cpc, metrics.cost_micros, metrics.conversions,
-               metrics.bounce_rate, metrics.mobile_friendly_clicks_percentage, metrics.speed_score
+               metrics.mobile_friendly_clicks_percentage, metrics.speed_score
         FROM landing_page_view
         WHERE segments.date BETWEEN '{start}' AND '{end}'
         ORDER BY metrics.clicks DESC
@@ -183,6 +184,9 @@ def landing_page_perf(days: int = 7, start: str | None = None, end: str | None =
     for r in _search(q):
         m = r.metrics
         url = r.landing_page_view.unexpanded_final_url
+        bounce_rate = getattr(m, "bounce_rate", None)
+        mobile_friendly_pct = getattr(m, "mobile_friendly_clicks_percentage", None)
+        speed_score = getattr(m, "speed_score", None)
         rows.append({
             "url": url, "base_url": url.split("?")[0],
             "impressions": int(m.impressions), "clicks": int(m.clicks),
@@ -190,9 +194,9 @@ def landing_page_perf(days: int = 7, start: str | None = None, end: str | None =
             "avg_cpc": round(m.average_cpc / 1_000_000),
             "cost": round(m.cost_micros / 1_000_000),
             "conversions": round(m.conversions, 1),
-            "bounce_rate": round(m.bounce_rate * 100, 1) if m.bounce_rate else None,
-            "mobile_friendly_pct": round(m.mobile_friendly_clicks_percentage, 1) if m.mobile_friendly_clicks_percentage else None,
-            "speed_score": int(m.speed_score) if m.speed_score else None,
+            "bounce_rate": round(bounce_rate * 100, 1) if bounce_rate else None,
+            "mobile_friendly_pct": round(mobile_friendly_pct, 1) if mobile_friendly_pct else None,
+            "speed_score": int(speed_score) if speed_score else None,
         })
     out = {"start": start, "end": end, "rows": rows}
     try:  # kèm link Clarity nếu đã cấu hình (không bắt buộc)
@@ -248,6 +252,34 @@ _DEFAULT_SITELINKS = [
 ]
 
 
+def _budget_bounds() -> tuple[int, int]:
+    def env_int(name: str, default: int) -> int:
+        try:
+            return int(os.getenv(name, str(default)))
+        except (TypeError, ValueError):
+            return default
+
+    return env_int("CAMPAIGN_MIN_BUDGET_VND", 50_000), env_int("CAMPAIGN_MAX_BUDGET_VND", 500_000_000)
+
+
+def _allowed_final_url_hosts() -> list[str]:
+    raw = os.getenv("CAMPAIGN_ALLOWED_HOSTS", "greennode.ai,www.greennode.ai,register.vngcloud.vn")
+    return [h.strip().lower() for h in raw.split(",") if h.strip()]
+
+
+def _validate_campaign_inputs(budget_vnd: int, final_url: str) -> None:
+    min_budget, max_budget = _budget_bounds()
+    if not min_budget <= int(budget_vnd) <= max_budget:
+        raise ValueError(f"budget_vnd phải trong khoảng {min_budget:,}–{max_budget:,} VND".replace(",", "."))
+    parsed = urlparse(final_url)
+    if parsed.scheme not in ("http", "https") or not parsed.netloc:
+        raise ValueError("final_url phải là URL http/https hợp lệ")
+    host = (parsed.hostname or "").lower()
+    allowed = _allowed_final_url_hosts()
+    if allowed and not any(host == h or host.endswith("." + h) for h in allowed):
+        raise ValueError("final_url không thuộc domain được phép tạo campaign")
+
+
 def create_campaign(name: str, budget_vnd: int = 100_000, final_url: str | None = None,
                     headlines: list | None = None, descriptions: list | None = None,
                     sitelinks: list | None = None, cpc_bid_vnd: int = 2_000) -> dict:
@@ -260,6 +292,7 @@ def create_campaign(name: str, budget_vnd: int = 100_000, final_url: str | None 
     cust = CUSTOMER_ID
     name = (name or f"DeCho_Campaign_{uuid.uuid4().hex[:6]}").strip()[:120]
     final_url = (final_url or "https://greennode.ai/product/cpu-instances").strip()
+    _validate_campaign_inputs(int(budget_vnd), final_url)
     headlines = headlines or _DEFAULT_HEADLINES
     descriptions = descriptions or _DEFAULT_DESCRIPTIONS
     sitelinks = _DEFAULT_SITELINKS if sitelinks is None else sitelinks

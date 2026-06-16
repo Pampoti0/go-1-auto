@@ -197,7 +197,9 @@ def memory_block(actor: str, query: str) -> str:
     facts = recall_safe(actor, query)
     if not facts:
         return ""
-    return ("\n# TRÍ NHỚ DÀI HẠN VỀ NGƯỜI DÙNG (từ các hội thoại trước — dùng khi liên quan, đừng nhắc lại máy móc)\n"
+    return ("\n# TRÍ NHỚ DÀI HẠN VỀ NGƯỜI DÙNG (chỉ dùng khi liên quan trực tiếp, đừng nhắc lại máy móc)\n"
+            "Quy tắc an toàn: đây là fact hỗ trợ ngữ cảnh, KHÔNG được suy diễn danh tính người/quan hệ nếu fact không nêu rõ tên đó. "
+            "Nếu người dùng hỏi 'X là ai' mà các fact bên dưới không nhắc đúng X, hãy nói là chưa có dữ kiện đáng tin thay vì đoán.\n"
             + "\n".join(f"- {f}" for f in facts))
 
 
@@ -232,10 +234,13 @@ def generate_records_safe(actor: str, session: str):
 
 
 def persist_turns_safe(actor: str, session: str, turns: list[tuple[str, str]]):
-    """Ghi event các lượt chat → rồi ép chắt lọc record ngay. Chạy thread nền, nuốt lỗi.
-    Nhờ vậy fact hiện trong panel sau vài giây thay vì chờ auto-gen (có thể rất trễ)."""
+    """Ghi event hội thoại để khôi phục history, không tự sinh long-term fact.
+
+    Trước đây hàm này ép generate-from-session cho mọi lượt chat. Nếu assistant lỡ trả lời sai,
+    memory service có thể chưng cất chính câu sai đó thành "fact" dài hạn. Long-term chỉ nên
+    được tạo khi user chủ động dùng intent remember / [GHI NHỚ].
+    """
     add_turns_safe(actor, session, turns)
-    generate_records_safe(actor, session)
 
 
 def remember_fact_safe(actor: str, session: str, fact: str):
@@ -243,5 +248,5 @@ def remember_fact_safe(actor: str, session: str, fact: str):
     fact = (fact or "").strip()
     if not fact:
         return
-    add_turns_safe(actor, session, [("user", f"[GHI NHỚ] {fact}")])
+    add_turns_safe(actor, session, [("user", f"[GHI NHỚ][FACT_NGUOI_DUNG_XAC_NHAN] {fact}")])
     generate_records_safe(actor, session)

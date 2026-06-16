@@ -19,6 +19,7 @@ import os
 import threading
 import time
 from datetime import datetime
+from urllib.parse import urlparse
 
 import schedule
 from contextlib import asynccontextmanager
@@ -444,11 +445,67 @@ def api_clarity():
             "recordings": clarity_agent.recordings_url(), **out}
 
 
+@app.get("/api/opportunities")
+def api_opportunities(limit: int = 20):
+    """Opportunity Score: PSI + SEO + Ads + Clarity, kèm evidence/confidence."""
+    try:
+        limit = max(1, min(int(limit or 20), 50))
+        return _cached(f"opportunities:{limit}", 300, lambda: _opportunity_report(limit))
+    except Exception as e:  # noqa: BLE001
+        return {"error": f"{type(e).__name__}: {e}", "opportunities": []}
+
+
+@app.get("/api/alerts")
+def api_alerts(limit: int = 50):
+    """Alert monitor hợp nhất: PSI, SEO, Ads, Clarity."""
+    try:
+        limit = max(1, min(int(limit or 50), 100))
+        return _cached(f"alerts:{limit}", 300, lambda: _alert_report(limit))
+    except Exception as e:  # noqa: BLE001
+        return {"error": f"{type(e).__name__}: {e}", "alerts": []}
+
+
 class CreateCampaignRequest(BaseModel):
     password: str
     name: str | None = None
     budget: int | None = None
     final_url: str | None = None
+
+
+def _campaign_budget_bounds() -> tuple[int, int]:
+    def env_int(name: str, default: int) -> int:
+        try:
+            return int(os.getenv(name, str(default)))
+        except (TypeError, ValueError):
+            return default
+
+    return env_int("CAMPAIGN_MIN_BUDGET_VND", 50_000), env_int("CAMPAIGN_MAX_BUDGET_VND", 500_000_000)
+
+
+def _campaign_allowed_hosts() -> list[str]:
+    raw = os.getenv("CAMPAIGN_ALLOWED_HOSTS", "greennode.ai,www.greennode.ai,register.vngcloud.vn")
+    return [h.strip().lower() for h in raw.split(",") if h.strip()]
+
+
+def _validate_campaign_request(req: CreateCampaignRequest) -> tuple[int, str | None, str | None]:
+    try:
+        budget = 100_000 if req.budget is None else int(req.budget)
+    except (TypeError, ValueError):
+        return 0, None, "Ngân sách phải là số nguyên VND."
+    min_budget, max_budget = _campaign_budget_bounds()
+    if not min_budget <= budget <= max_budget:
+        return 0, None, f"Ngân sách phải trong khoảng {min_budget:,}–{max_budget:,} VND.".replace(",", ".")
+
+    final_url = (req.final_url or "").strip() or None
+    if final_url:
+        parsed = urlparse(final_url)
+        if parsed.scheme not in ("http", "https") or not parsed.netloc:
+            return 0, None, "Final URL phải là URL http/https hợp lệ."
+        host = (parsed.hostname or "").lower()
+        allowed = _campaign_allowed_hosts()
+        if allowed and not any(host == h or host.endswith("." + h) for h in allowed):
+            return 0, None, "Final URL không thuộc domain được phép tạo campaign."
+    return budget, final_url, None
 
 
 @app.post("/api/ads/create-campaign")
@@ -463,8 +520,11 @@ def api_ads_create_campaign(req: CreateCampaignRequest):
 
     if not ads_agent.configured():
         return {"ok": False, "error": "Chưa cấu hình Google Ads (GOOGLE_ADS_*)."}
+    budget, final_url, validation_error = _validate_campaign_request(req)
+    if validation_error:
+        return {"ok": False, "error": validation_error}
     try:
-        return ads_agent.create_campaign(req.name or None, int(req.budget or 100000), req.final_url or None)
+        return ads_agent.create_campaign(req.name or None, budget, final_url)
     except Exception as e:  # noqa: BLE001
         return {"ok": False, "error": f"{type(e).__name__}: {e}"}
 
@@ -479,6 +539,7 @@ def _ads_prompt(perf: dict) -> str:
         "(mỗi dòng = 1 campaign × 1 ngày; cost tính theo đơn vị tiền tài khoản):\n\n"
         + "\n".join(lines) +
         "\n\nPhân tích theo câu hỏi: tổng chi tiêu, CTR/CPA bất thường, campaign nào hiệu quả/kém, đề xuất. "
+        "Mọi khuyến nghị phải kèm Evidence (số liệu/campaign/ngày) và Confidence (high/medium/low). "
         "TIẾNG VIỆT, ngắn gọn, số liệu cụ thể, **đậm** + gạch đầu dòng. KHÔNG dùng LaTeX. Trả lời trực tiếp. /no_think"
     ) + _knowledge() + _persona()
 
@@ -498,6 +559,7 @@ def _ldp_prompt(perf: dict) -> str:
         + "\n".join(lines) + cl +
         "\n\nPhân tích: landing page nào hút click/chi phí nhưng convert kém hoặc bounce cao/speed thấp (rò rỉ ngân sách); "
         "trang nào nên tối ưu trước & cách làm (tốc độ, mobile, nội dung). Nếu có link Clarity thì nhắc Đại ca xem heatmap/recordings. "
+        "Mọi khuyến nghị phải kèm Evidence (landing page + metric) và Confidence (high/medium/low). "
         "TIẾNG VIỆT, súc tích, **đậm** + gạch đầu dòng, KHÔNG LaTeX. /no_think"
     ) + _knowledge() + _persona()
 
@@ -510,7 +572,8 @@ def _clarity_prompt(ins: dict) -> str:
         + _json.dumps(ins.get("data", ins), ensure_ascii=False)[:6000] +
         "\n\nDựa DUY NHẤT trên số liệu trên: nêu chỉ số đáng chú ý (sessions, engagement, scroll depth, rage click, "
         "dead click, quick back, bot). Chỉ dấu hiệu UX có vấn đề (rage/dead click cao = chỗ bấm hỏng; scroll thấp = nội dung "
-        "không giữ chân) và gợi ý kiểm tra/cải thiện. TIẾNG VIỆT, súc tích, **đậm** + gạch đầu dòng, KHÔNG LaTeX, KHÔNG bịa số. /no_think"
+        "không giữ chân) và gợi ý kiểm tra/cải thiện. Mọi khuyến nghị phải kèm Evidence và Confidence. "
+        "TIẾNG VIỆT, súc tích, **đậm** + gạch đầu dòng, KHÔNG LaTeX, KHÔNG bịa số. /no_think"
     ) + _persona()
 
 
@@ -527,6 +590,7 @@ def _combined_prompt(ads: dict, ldp: dict, clarity: dict) -> str:
         f"CLARITY (UX):\n{_short(clarity.get('data', clarity))}\n\n"
         "Nối các tầng: tiền đổ vào campaign nào → ra landing page nào → user hành xử ra sao (bounce, rage/dead click, scroll). "
         "Chẩn đoán vì sao traffic trả tiền nhưng KHÔNG convert + đề xuất 3-5 việc ưu tiên (bám số liệu thật, không bịa). "
+        "Mỗi việc phải kèm Evidence (nguồn số liệu cụ thể) và Confidence (high/medium/low). "
         "TIẾNG VIỆT, súc tích, **đậm** + gạch đầu dòng, KHÔNG LaTeX. /no_think"
     ) + _knowledge() + _persona()
 
@@ -586,11 +650,27 @@ class ConfigUpdate(BaseModel):
     password: str | None = None
 
 
+_CONFIG_MUTATION_ACTIONS = {"add_url", "remove_url", "set_schedule"}
+
+
+def _config_password_error(password: str | None) -> str | None:
+    pw_env = os.getenv("CONFIG_EDIT_PASSWORD", "")
+    if not pw_env:
+        return "Quyền đổi cấu hình chưa bật (thiếu CONFIG_EDIT_PASSWORD trong .env)."
+    if (password or "") != pw_env:
+        return "Sai mật khẩu — không đổi được cấu hình."
+    return None
+
+
+def _config_locked_text() -> str:
+    return "🔒 Đổi cấu hình cần mật khẩu. Đại ca dùng popup/form cấu hình để xác nhận, Đệ không đổi trực tiếp qua endpoint chat cũ."
+
+
 @app.put("/api/config")
 def put_config(body: ConfigUpdate):
-    pw_env = os.getenv("CONFIG_EDIT_PASSWORD", "")
-    if pw_env and (body.password or "") != pw_env:
-        return {"ok": False, "error": "Sai mật khẩu — không đổi được cấu hình."}
+    err = _config_password_error(body.password)
+    if err:
+        return {"ok": False, "error": err}
     partial = {k: v for k, v in body.model_dump().items() if v is not None and k != "password"}
     if not partial:
         return {"ok": False, "error": "Không có trường nào để cập nhật."}
@@ -616,14 +696,14 @@ class ConfigApplyRequest(BaseModel):
 @app.post("/api/config/apply")
 def api_config_apply(req: ConfigApplyRequest):
     """Áp 1 thay đổi config (add/remove URL, đổi lịch) — yêu cầu CONFIG_EDIT_PASSWORD (nhập qua popup, không qua chat)."""
-    pw_env = os.getenv("CONFIG_EDIT_PASSWORD", "")
-    if pw_env and (req.password or "") != pw_env:
-        return {"ok": False, "error": "Sai mật khẩu."}
+    err = _config_password_error(req.password)
+    if err:
+        return {"ok": False, "error": err}
     if req.action not in ("add_url", "remove_url", "set_schedule"):
         return {"ok": False, "error": "Thao tác không hợp lệ."}
     data = {k: v for k, v in req.model_dump().items() if v is not None and k != "password"}
     try:
-        return {"ok": True, "text": _execute_action(data)}
+        return {"ok": True, "text": _execute_action(data, allow_config_mutation=True)}
     except Exception as e:  # noqa: BLE001
         return {"ok": False, "error": f"{type(e).__name__}: {e}"}
 
@@ -745,7 +825,7 @@ _KNOWN_ACTIONS = {
     "run_report", "seo_range", "confirm", "seo_query", "list_months", "ads_list", "ads_perf",
     "ldp_perf", "clarity", "combined", "create_campaign",
     "status", "help", "web_search", "web_fetch", "priority_fix", "action_plan",
-    "diagnose_drop", "fix_suggest", "remember", "reply",
+    "diagnose_drop", "fix_suggest", "alerts", "remember", "reply",
 }
 _TOOL_ALIAS = {"search": "web_search", "websearch": "web_search", "fetch": "web_fetch",
                "read_url": "web_fetch", "readurl": "web_fetch", "open_url": "web_fetch", "browse": "web_fetch"}
@@ -860,7 +940,7 @@ def _looks_confirm(msg: str) -> bool:
 
 _INTENT_OVERRIDE_ACTIONS = {
     "ads_list", "ads_perf",
-    "action_plan", "priority_fix", "diagnose_drop", "fix_suggest",
+    "action_plan", "priority_fix", "diagnose_drop", "fix_suggest", "alerts",
 }
 
 
@@ -882,10 +962,11 @@ def _proactive_suffix() -> str:
     """Bắt mọi phân tích kết thúc bằng cảnh báo + việc nên làm tiếp — BÁM SỐ LIỆU THẬT, không bịa."""
     return ("\n\nQUAN TRỌNG — sau phần phân tích, KẾT THÚC bằng (chỉ dựa trên số liệu thật ở trên, tuyệt đối không bịa):\n"
             "⚠️ **Cảnh báo**: 1-2 bất thường đáng lưu ý (sụt mạnh, điểm thấp, chi phí tăng…) — KHÔNG có thì bỏ hẳn phần này.\n"
-            "👉 **Nên làm tiếp**: 1-3 việc ưu tiên cao, cụ thể & actionable, bám đúng dữ liệu vừa phân tích.")
+            "👉 **Nên làm tiếp**: 1-3 việc ưu tiên cao, cụ thể & actionable, bám đúng dữ liệu vừa phân tích. "
+            "Mỗi việc nên có Evidence: <số liệu/URL/campaign> và Confidence: high/medium/low.")
 
 
-def _execute_action(data: dict) -> str:
+def _execute_action(data: dict, *, allow_config_mutation: bool = False) -> str:
     action = data.get("action")
     if action == "run_check":
         return _do_trigger()
@@ -893,6 +974,8 @@ def _execute_action(data: dict) -> str:
         return _status_text()
     if action == "list_urls":
         return _list_urls_text()
+    if action in _CONFIG_MUTATION_ACTIONS and not allow_config_mutation:
+        return _config_locked_text()
     if action == "add_url" and data.get("url"):
         return _add_url(data["url"].strip())
     if action == "remove_url" and data.get("url"):
@@ -928,7 +1011,8 @@ def _results_prompt(tab: str, headers: list, rows: list) -> str:
         "Performance Score 0–100 càng cao càng tốt; FCP/LCP/TBT/INP/TTFB (ms) và CLS càng thấp càng tốt.\n\n"
         + "\n".join(lines) +
         "\n\nTrả lời câu hỏi dựa trên dữ liệu trên. Yêu cầu: TIẾNG VIỆT, ngắn gọn (tối đa ~15 dòng), "
-        "nêu số liệu cụ thể, có thể dùng **đậm** và gạch đầu dòng. KHÔNG dùng ký hiệu LaTeX "
+        "nêu số liệu cụ thể, có thể dùng **đậm** và gạch đầu dòng. Với mọi khuyến nghị, kèm "
+        "Evidence (URL + metric) và Confidence (high/medium/low). KHÔNG dùng ký hiệu LaTeX "
         "(viết mũi tên là →, không viết $\\rightarrow$). Trả lời trực tiếp, không suy luận dài. /no_think"
         + _knowledge() + _persona()
     )
@@ -1074,13 +1158,14 @@ def _unified_prompt() -> str:
         '- Microsoft CLARITY / hành vi người dùng trên web ("clarity", "user hành xử sao", "rage click", "dead click", "scroll depth", "UX trang web"): {"action":"clarity"}\n'
         '- PHÂN TÍCH TỔNG HỢP Ads + landing page + Clarity (user journey, "vì sao traffic trả tiền mà không convert", "phân tích tổng hợp ads", "từ click tới hành vi"): {"action":"combined","days":<mặc định 7>}\n'
         '- TẠO campaign Google Ads ("tạo campaign", "tạo chiến dịch mới"): {"action":"create_campaign"} — Đệ chỉ hướng dẫn mở form bảo mật ở tab Paid Campaigns (KHÔNG nhận mật khẩu qua chat, đừng hỏi/đọc mật khẩu trong chat).\n'
+        '- ALERT MONITOR / cảnh báo bất thường ("có alert gì", "monitor hôm nay", "cảnh báo nào cần xử lý"): {"action":"alerts"}\n'
         '- Trạng thái hệ thống: {"action":"status"}\n'
         '- HƯỚNG DẪN / HỎI VỀ NĂNG LỰC ("DeCho làm được gì", "có tính năng nào", "làm sao thêm URL", "đổi lịch ở đâu", "LCP là gì", "score bao nhiêu là tốt", "lọc URL được không"): {"action":"help"}\n'
         '- GHI NHỚ theo yêu cầu ("nhớ giúp...", "ghi nhớ...", "DeCho nhớ là...", "lưu lại: ...", "từ giờ gọi tôi là...", "thông tin về anh/cửa hàng/brand là..."): {"action":"remember","fact":"<dữ kiện cô đọng, ngôi thứ 3 về Đại ca/doanh nghiệp>"}\n'
         '- TÌM TRÊN WEB (thông tin NGOÀI dữ liệu nội bộ: tin tức/cập nhật mới, đối thủ, xu hướng thị trường, "best practice mới nhất", giá dịch vụ bên ngoài, sự kiện sau tháng 5/2025): {"action":"web_search","query":"<từ khoá tìm kiếm súc tích>"}. CHỦ ĐỘNG chọn web_search khi câu cần thông tin CẬP NHẬT/ngoài hệ thống — đừng trả lời chung chung từ trí nhớ rồi thôi.\n'
         '- ĐỌC 1 URL cụ thể (người dùng dán link hoặc nói "đọc/tóm tắt trang này"): {"action":"web_fetch","url":"<url>"}\n'
-        '- ƯU TIÊN TỐI ƯU / trang nào nên fix trước ("nên tối ưu trang nào", "trang nào vừa chậm vừa nhiều traffic", "ưu tiên fix"): {"action":"priority_fix"}\n'
-        '- KẾ HOẠCH HÀNH ĐỘNG ("tuần này nên làm gì", "cần làm gì", "lên kế hoạch", "to-do", "ưu tiên công việc"): {"action":"action_plan"}\n'
+        '- ƯU TIÊN TỐI ƯU / Opportunity Score ("nên tối ưu trang nào", "trang nào vừa chậm vừa nhiều traffic", "ưu tiên fix"): {"action":"priority_fix"}\n'
+        '- KẾ HOẠCH HÀNH ĐỘNG từ Opportunity Score + alerts ("tuần này nên làm gì", "cần làm gì", "lên kế hoạch", "to-do", "ưu tiên công việc"): {"action":"action_plan"}\n'
         '- CHẨN ĐOÁN SỤT GIẢM ("tại sao clicks/traffic/views giảm", "vì sao tụt", "trang nào kéo xuống", "phân tích nguyên nhân giảm"): {"action":"diagnose_drop"}\n'
         '- GỢI Ý CÁCH SỬA trang chậm ("làm sao tăng tốc", "cách tối ưu trang X", "fix LCP/CLS thế nào", "trang chậm sửa sao"): {"action":"fix_suggest","url":"<path nếu có>"}\n'
         '- Còn lại: {"action":"reply","text":"<trả lời ngắn>"}\n'
@@ -1111,9 +1196,10 @@ def _capabilities() -> str:
         "- TẠO campaign Search mới (GHI): chỉ tạo được khi nhập ĐÚNG MẬT KHẨU; campaign luôn ở trạng thái PAUSED (chưa tiêu tiền) để Đại ca review rồi tự bật. Mặc định budget 100k VND/ngày, target Việt Nam, có sẵn headline/mô tả/sitelink.\n"
         "## Cấu hình (menu Cấu hình)\n"
         "- Thêm/xóa URL theo dõi, đổi lịch PageSpeed (daily/weekly/monthly + giờ), đổi lịch & URL theo dõi SEO — chỉnh bằng lời ('thêm https://...', 'đổi lịch sang daily 8h') hoặc trong trang Cấu hình. Lưu là áp dụng ngay + đồng bộ Google Sheet.\n"
-        "## Insight & hành động (gộp PSI + SEO)\n"
-        "- Ưu tiên tối ưu: 'nên tối ưu trang nào trước' → danh sách trang vừa chậm vừa nhiều traffic.\n"
-        "- Kế hoạch tuần: 'tuần này nên làm gì' → to-do xếp ưu tiên từ alerts + xu hướng.\n"
+        "## Insight & hành động (gộp PSI + SEO + Ads + Clarity)\n"
+        "- Ưu tiên tối ưu: 'nên tối ưu trang nào trước' → Opportunity Score gộp PSI + SEO + Ads + Clarity, kèm Evidence/Confidence.\n"
+        "- Kế hoạch tuần: 'tuần này nên làm gì' → to-do xếp ưu tiên từ Opportunity Score + alerts + xu hướng.\n"
+        "- Alert monitor: 'có alert gì không' → cảnh báo PSI/SEO/Ads/Clarity kèm Evidence/Confidence.\n"
         "- Chẩn đoán sụt giảm: 'tại sao clicks/traffic giảm' → trang nào kéo xuống + nguyên nhân khả dĩ.\n"
         "- Gợi ý cách sửa trang chậm: 'cách tăng tốc trang X' → hành động cụ thể theo LCP/CLS/TBT.\n"
         "## Tìm & đọc web\n"
@@ -1209,6 +1295,8 @@ def _all_keyword_intent(message: str) -> dict | None:
     _health = any(k in m for k in ("ổn không", "on khong", "tốt không", "tot khong", "khoẻ không", "khoe khong",
                                    "tình hình", "tinh hinh", "thế nào", "the nao", "ra sao", "ổn chứ", "hiệu quả"))
     # Insight xuyên mảng
+    if any(k in m for k in ("alert", "alerts", "cảnh báo", "canh bao", "bất thường", "bat thuong", "monitor")):
+        return {"action": "alerts"}
     if any(k in m for k in ("ưu tiên", "uu tien", "nên tối ưu", "nen toi uu", "fix trước", "fix truoc", "trang nào nên")):
         return {"action": "priority_fix"}
     if any(k in m for k in ("nên làm gì", "nen lam gi", "kế hoạch", "ke hoach", "to-do", "todo", "việc tuần", "cần làm gì", "can lam gi", "ưu tiên công việc")):
@@ -1305,6 +1393,67 @@ def _all_keyword_intent(message: str) -> dict | None:
     return kw_psi or kw_seo
 
 
+def _norm_identity_text(text: str) -> str:
+    import re
+    import unicodedata
+
+    raw = unicodedata.normalize("NFD", text or "")
+    raw = "".join(ch for ch in raw if unicodedata.category(ch) != "Mn")
+    return re.sub(r"\s+", " ", re.sub(r"[^\w\s]", " ", raw.lower())).strip()
+
+
+def _identity_query_name(message: str) -> str | None:
+    """Bắt câu hỏi high-risk kiểu 'X là ai' để không để model tự suy diễn danh tính."""
+    import re
+
+    raw = (message or "").strip()
+    if not raw:
+        return None
+    patterns = (
+        r"^\s*(?:anh|chị|chi|ông|ong|bà|ba|cô|co|chú|chu|mr\.?|ms\.?)?\s*([^?!.\n]{2,80}?)\s+(?:là|la)\s+ai\s*[?!.]*\s*$",
+        r"^\s*(?:có\s+biết|co\s+biet|biết|biet|nhớ|nho)\s+(?:anh|chị|chi|ông|ong|bà|ba|cô|co|chú|chu)?\s*([^?!.\n]{2,80}?)\s+(?:không|khong|ko|hông|hong|chưa|chua)\s*[?!.]*\s*$",
+    )
+    for pat in patterns:
+        m = re.search(pat, raw, re.I)
+        if not m:
+            continue
+        name = re.sub(r"^(anh|chị|chi|ông|ong|bà|ba|cô|co|chú|chu|mr\.?|ms\.?)\s+", "", m.group(1).strip(), flags=re.I)
+        norm = _norm_identity_text(name)
+        blocked = {
+            "ban", "ban la", "de", "decho", "dai ca", "toi", "minh", "agent", "app",
+            "seo", "psi", "pagespeed", "lcp", "cls", "fcp", "tbt", "ctr", "cpa", "ads", "ga4", "gsc",
+        }
+        if norm and norm not in blocked and len(norm) >= 2:
+            return name
+    return None
+
+
+def _identity_fact_matches(facts: list[str], name: str, *, trusted_only: bool = True) -> list[str]:
+    target = _norm_identity_text(name)
+    out, seen = [], set()
+    for fact in facts or []:
+        text = str(fact or "").strip()
+        norm = _norm_identity_text(text)
+        if not text or target not in norm:
+            continue
+        if trusted_only and not any(tag in norm for tag in ("ghi nho", "fact nguoi dung xac nhan", "user cung cap", "nguoi dung xac nhan")):
+            continue
+        key = norm[:220]
+        if key not in seen:
+            seen.add(key)
+            out.append(text)
+    return out[:3]
+
+
+def _identity_memory_answer(name: str, matches: list[str]) -> str:
+    if matches:
+        ev = "\n".join(f"- {m}" for m in matches)
+        return (f"Theo fact **đã được Đại ca ghi nhớ rõ ràng** trong memory, Đệ có dữ kiện về **{name}**:\n"
+                f"{ev}\n\nNếu fact này sai, Đại ca vào **Cấu hình → Đệ nhớ gì về Đại ca → Reset trí nhớ** rồi ghi nhớ lại fact đúng.")
+    return (f"Đệ chưa có fact đáng tin về **{name}** trong memory, nên Đệ không dám gán bừa là founder/đối tác/người quen của Đại ca.\n\n"
+            f"Nếu muốn lưu đúng: gõ **ghi nhớ: {name} là ...**. Nếu muốn tra ngoài memory, bảo Đệ **tìm trên web {name}**.")
+
+
 @app.post("/api/agent/chat/stream")
 async def agent_chat_stream(req: ChatStreamRequest, request: Request = None):
     """DeCho all-in-one: một chat xử lý mọi action của cả PageSpeed lẫn SEO."""
@@ -1339,6 +1488,21 @@ async def agent_chat_stream(req: ChatStreamRequest, request: Request = None):
                 facts = memory_agent.recall_safe(req.user_id, req.message)  # cache hit từ memory_block ở trên
                 preview = "; ".join(f[:60] for f in facts[:3])
                 yield ev({"type": "step", "text": "🧠 Đệ nhớ: " + (preview or "vài điều về Đại ca")})
+        identity_name = _identity_query_name(req.message)
+        if identity_name:
+            yield ev({"type": "step", "text": f"🧠 Kiểm tra memory theo đúng tên: {identity_name}"})
+            facts = []
+            if memory_agent.configured() and req.user_id:
+                try:
+                    recalled = await asyncio.to_thread(memory_agent.recall_safe, req.user_id, identity_name, 8)
+                    listed = await asyncio.to_thread(memory_agent.list_records, req.user_id, 80)
+                    facts = list(dict.fromkeys([*recalled, *listed]))
+                except Exception as e:  # noqa: BLE001
+                    log.warning("Memory identity lookup lỗi (bỏ qua): %s: %s", type(e).__name__, e)
+            matches = _identity_fact_matches(facts, identity_name, trusted_only=True)
+            yield ev({"type": "final", "text": _identity_memory_answer(identity_name, matches)})
+            yield ev({"type": "done"})
+            return
         yield ev({"type": "step", "text": f"🧠 Phân tích yêu cầu ({model})..."})
         try:
             data = await _call_llm_stream(model, req.message, history, system=_unified_prompt() + mem_block)
@@ -1393,7 +1557,7 @@ async def agent_chat_stream(req: ChatStreamRequest, request: Request = None):
                   "ldp_perf": "Hiệu suất landing page", "clarity": "Microsoft Clarity (UX)", "combined": "Phân tích tổng hợp Ads + Clarity",
                   "create_campaign": "Tạo campaign (PAUSED, cần mật khẩu)",
                   "status": "Trạng thái hệ thống", "help": "Hướng dẫn năng lực",
-                  "web_search": "Tìm trên web", "web_fetch": "Đọc trang web",
+                  "web_search": "Tìm trên web", "web_fetch": "Đọc trang web", "alerts": "Alert monitor",
                   "priority_fix": "Ưu tiên tối ưu", "action_plan": "Kế hoạch hành động",
                   "diagnose_drop": "Chẩn đoán sụt giảm", "fix_suggest": "Gợi ý cách sửa",
                   "remember": "Ghi nhớ", "reply": "Trả lời"}
@@ -1404,6 +1568,7 @@ async def agent_chat_stream(req: ChatStreamRequest, request: Request = None):
                        "messages": [{"role": "system", "content": system_prompt + mem_block},
                                     *history, {"role": "user", "content": req.message}]}
             think_re = _re.compile(r"<think>.*?(?:</think>|$)", _re.S)
+            buffer_until_final = fallback_on_deflect is not None
             raw_acc, sent, reasoning_acc = "", 0, []
             try:
                 async with httpx.AsyncClient(timeout=300) as client:
@@ -1432,7 +1597,7 @@ async def agent_chat_stream(req: ChatStreamRequest, request: Request = None):
                             raw_acc += c
                             visible = think_re.sub("", raw_acc)
                             safe = max(0, len(visible) - 12)
-                            if safe > sent:
+                            if safe > sent and not buffer_until_final:
                                 yield ev({"type": "delta", "delta": visible[sent:safe]})
                                 sent = safe
             except Exception as e:  # noqa: BLE001
@@ -1442,6 +1607,7 @@ async def agent_chat_stream(req: ChatStreamRequest, request: Request = None):
             if visible:
                 if fallback_on_deflect and _seo_deflected(visible):
                     visible = fallback_on_deflect
+                    sent = 0
                 if len(visible) > sent:
                     yield ev({"type": "delta", "delta": visible[sent:]})
                 yield ev({"type": "final", "text": visible})
@@ -1552,27 +1718,44 @@ async def agent_chat_stream(req: ChatStreamRequest, request: Request = None):
             yield ev({"type": "done"})
             return
 
+        # ── Alert monitor hợp nhất: PSI + SEO + Ads + Clarity ──
+        if action == "alerts":
+            yield ev({"type": "step", "text": "🚨 Đọc alert monitor PSI + SEO + Ads + Clarity..."})
+            report = await asyncio.to_thread(_alert_report, 50)
+            yield ev({"type": "final", "text": _alerts_text(report)})
+            yield ev({"type": "done"})
+            return
+
         # ── Insight xuyên mảng: ưu tiên tối ưu / kế hoạch / chẩn đoán / gợi ý sửa ──
         if action in ("priority_fix", "action_plan", "diagnose_drop", "fix_suggest"):
-            yield ev({"type": "step", "text": "📊 Đọc & gộp dữ liệu PSI + SEO..."})
+            yield ev({"type": "step", "text": "📊 Đọc & gộp dữ liệu PSI + SEO + Ads + Clarity..."})
             j = await asyncio.to_thread(_insight_join)
+            opp_report = await asyncio.to_thread(_opportunity_report, 25)
+            alert_report = await asyncio.to_thread(_alert_report, 20)
             rows = j["rows"]
-            if not rows:
-                yield ev({"type": "final", "text": "Đệ chưa có đủ dữ liệu PSI/SEO để phân tích — chạy 'kiểm tra PageSpeed' và 'báo cáo SEO' trước nha Đại ca."})
+            opps = opp_report.get("opportunities") or []
+            alerts = alert_report.get("alerts") or []
+            if not rows and not opps:
+                yield ev({"type": "final", "text": "Đệ chưa có đủ dữ liệu để phân tích — chạy PageSpeed/SEO và cấu hình Ads/Clarity nếu muốn score đa kênh nha Đại ca."})
                 yield ev({"type": "done"})
                 return
             fr = lambda v: ("" if v == "" or v is None else str(v))
-            ctxhdr = f"(PSI lần chạy {j['run'] or '—'} · SEO tháng {j['month'] or '—'})"
+            ctxhdr = f"(PSI lần chạy {j['run'] or '—'} · SEO tháng {j['month'] or '—'} · Ads/Clarity best-effort)"
+            opp_tbl = "\n".join(
+                f"{o['path']} | score {o['score']} | sources {','.join(o.get('sources') or [])} | "
+                f"confidence {o.get('confidence')} | evidence {'; '.join((o.get('evidence') or [])[:4])}"
+                for o in opps[:18]
+            )
+            alert_tbl = "\n".join(
+                f"[{a.get('lv')}] {a.get('text')} | confidence {a.get('confidence')} | evidence {'; '.join((a.get('evidence') or [])[:2])}"
+                for a in alerts[:10]
+            ) or "(không có alert đáng kể)"
 
             if action == "priority_fix":
-                cand = [r for r in rows if isinstance(r["psiM"], (int, float))]
-                cand.sort(key=lambda r: r["priority"], reverse=True)
-                tbl = "\n".join(f"{r['path']} | PSI mobile {fr(r['psiM'])}/desktop {fr(r['psiD'])} | "
-                                f"views {int(r['views'])} | clicks {int(r['clicks'])} | LCP {fr(r['lcp'])} CLS {fr(r['cls'])} | ưu_tiên {r['priority']}"
-                                for r in cand[:18])
-                instr = ("Dựa DUY NHẤT trên bảng dưới, lập DANH SÁCH ƯU TIÊN TỐI ƯU: trang nào vừa CHẬM (PSI thấp) "
-                         "vừa NHIỀU traffic thì xếp trước (cột ưu_tiên = traffic × độ chậm, càng cao càng nên fix sớm). "
-                         "Nêu 5-8 trang đầu kèm lý do ngắn (điểm + traffic) và việc nên làm gọn.")
+                tbl = opp_tbl or "(chưa có opportunity đủ tín hiệu)"
+                instr = ("Dựa DUY NHẤT trên bảng Opportunity Score dưới, lập DANH SÁCH ƯU TIÊN TỐI ƯU. "
+                         "Score đã gộp PSI slowness + SEO drop/traffic + Ads cost/friction + Clarity signal. "
+                         "Mỗi mục PHẢI có Evidence và Confidence.")
             elif action == "diagnose_drop":
                 def chnum(x):
                     try:
@@ -1585,7 +1768,8 @@ async def agent_chat_stream(req: ChatStreamRequest, request: Request = None):
                                 for r in drops[:18]) or "(không có trang nào tụt so với kỳ trước)"
                 instr = ("Dựa DUY NHẤT trên bảng dưới (Δ% = so với tháng trước), CHẨN ĐOÁN vì sao traffic/clicks giảm: "
                          "chỉ ra 3-6 trang kéo xuống mạnh nhất (tụt nhiều × lưu lượng lớn), nhận định khả năng nguyên nhân "
-                         "(mất thứ hạng, giảm hiển thị, mùa vụ...) và gợi ý kiểm tra. Nếu không có trang tụt thì nói traffic ổn định/tăng.")
+                         "(mất thứ hạng, giảm hiển thị, mùa vụ...) và gợi ý kiểm tra. Mỗi nhận định PHẢI có Evidence và Confidence. "
+                         "Nếu không có trang tụt thì nói traffic ổn định/tăng.")
             elif action == "fix_suggest":
                 want = _path_only(str(data.get("url") or "")) if data.get("url") else ""
                 sel = [r for r in rows if want and want in r["path"]] if want else []
@@ -1596,24 +1780,17 @@ async def agent_chat_stream(req: ChatStreamRequest, request: Request = None):
                                 for r in sel[:12]) or "(không có trang nào dưới ngưỡng — web đang khá ổn)"
                 instr = ("Dựa trên chỉ số dưới, GỢI Ý CÁCH SỬA cụ thể cho từng trang chậm: chỉ rõ chỉ số nào đang tệ "
                          "(LCP cao → tối ưu ảnh/hero, preload; CLS cao → set kích thước ảnh/khung, tránh layout shift; "
-                         "TBT cao → giảm/defer JS, code-split). Mỗi trang 1-2 hành động ưu tiên. Bám số liệu, đừng bịa.")
+                         "TBT cao → giảm/defer JS, code-split). Mỗi trang 1-2 hành động ưu tiên. Mỗi hành động PHẢI có Evidence và Confidence.")
             else:  # action_plan
-                slow = sorted([r for r in rows if isinstance(r["psiM"], (int, float))], key=lambda r: r["psiM"])[:6]
-                def chnum(x):
-                    try:
-                        return float(str(x).replace("%", ""))
-                    except (ValueError, TypeError):
-                        return 0.0
-                drops = sorted([r for r in rows if chnum(r["clicksCh"]) < 0], key=lambda r: chnum(r["clicksCh"]))[:6]
-                tbl = ("TRANG CHẬM NHẤT:\n" + ("\n".join(f"- {r['path']}: PSI {fr(r['psiM'])}, traffic {int(r['views']+r['clicks'])}" for r in slow) or "- (không có)")
-                       + "\n\nTRANG TỤT TRAFFIC:\n" + ("\n".join(f"- {r['path']}: clicks Δ {fr(r['clicksCh'])}%, views Δ {fr(r['viewsCh'])}%" for r in drops) or "- (không có)"))
+                tbl = "OPPORTUNITY SCORE:\n" + (opp_tbl or "(chưa có)") + "\n\nALERT MONITOR:\n" + alert_tbl
                 instr = ("Dựa DUY NHẤT trên dữ liệu dưới, lập KẾ HOẠCH HÀNH ĐỘNG TUẦN cho marketer: 4-6 việc xếp theo ƯU TIÊN "
-                         "(việc tác động lớn — trang chậm mà nhiều traffic, hoặc trang tụt mạnh — làm trước), mỗi việc kèm lý do "
-                         "ngắn dựa số liệu. Cuối cùng 1 câu nhắc lịch tự động nếu hợp lý. Không bịa số.")
+                         "(score cao/alert high làm trước), mỗi việc kèm lý do ngắn dựa số liệu. Mỗi việc PHẢI có Evidence và Confidence. "
+                         "Cuối cùng 1 câu nhắc lịch tự động nếu hợp lý. Không bịa số.")
 
             yield ev({"type": "step", "text": f"🧠 Tổng hợp {ctxhdr} ({model})..."})
             prompt = (f"Bạn là DeCho — agent marketing all-in-one. {instr}\n\nDỮ LIỆU {ctxhdr}:\n{tbl}\n\n"
-                      "TIẾNG VIỆT, súc tích, **đậm** + gạch đầu dòng, KHÔNG LaTeX, trả lời trực tiếp. /no_think") + _knowledge() + _persona()
+                      "TIẾNG VIỆT, súc tích, **đậm** + gạch đầu dòng, KHÔNG LaTeX, trả lời trực tiếp. "
+                      "Không đưa khuyến nghị nào thiếu Evidence/Confidence. /no_think") + _knowledge() + _persona()
             async for chunk in stream_analysis(prompt):
                 yield chunk
             yield ev({"type": "done"})
@@ -2140,6 +2317,23 @@ def decho_ask(req: DechoAskRequest, request: Request = None):
                                  args=(req.user_id, req.session_id,
                                        [("user", req.question), ("assistant", reply)]), daemon=True).start()
             return {"reply": reply, "action": {"type": "ads_range", **rng}}
+    identity_name = _identity_query_name(req.question)
+    if identity_name:
+        facts = []
+        if memory_agent.configured() and req.user_id:
+            try:
+                facts = list(dict.fromkeys([
+                    *memory_agent.recall_safe(req.user_id, identity_name, 8),
+                    *memory_agent.list_records(req.user_id, 80),
+                ]))
+            except Exception as e:  # noqa: BLE001
+                log.warning("Memory identity lookup lỗi (dock, bỏ qua): %s: %s", type(e).__name__, e)
+        reply = _identity_memory_answer(identity_name, _identity_fact_matches(facts, identity_name, trusted_only=True))
+        if memory_agent.configured() and req.user_id and req.session_id:
+            threading.Thread(target=memory_agent.persist_turns_safe,
+                             args=(req.user_id, req.session_id,
+                                   [("user", req.question), ("assistant", reply)]), daemon=True).start()
+        return {"reply": reply}
     mem_block = ""
     if memory_agent.configured() and req.user_id:
         mem_block = memory_agent.memory_block(req.user_id, req.question)
@@ -2303,18 +2497,34 @@ def memory_records(user_id: str):
 
 # ── SEO endpoints ─────────────────────────────────────────────────────────────
 
+
+def _seo_token_health() -> dict:
+    import seo_agent
+
+    present = bool(os.getenv("SEO_TOKEN_JSON") or os.path.exists(seo_agent.TOKEN_FILE))
+    if not present:
+        return {"token_present": False, "token_usable": False, "token_error": ""}
+    try:
+        seo_agent.get_creds()
+        return {"token_present": True, "token_usable": True, "token_error": ""}
+    except Exception as e:  # noqa: BLE001
+        return {"token_present": True, "token_usable": False, "token_error": _seo_exc_text(e)}
+
+
 @app.get("/api/seo/config")
 def seo_config():
     import seo_agent
 
     cfg = runtime_config.current()
+    token_health = _seo_token_health()
     return {
         "site": seo_agent.SITE_URL,
         "ga4_property": seo_agent.GA4_PROPERTY_ID,
         "sheet_url": f"https://docs.google.com/spreadsheets/d/{seo_agent.SEO_SHEET_ID}",
         "schedule": f"ngày {cfg.get('seo_run_day_of_month', 8)} hàng tháng lúc {cfg.get('seo_run_time', '08:00')}",
         "tracked_urls": cfg.get("seo_tracked_urls") or "tất cả",
-        "token_configured": bool(os.getenv("SEO_TOKEN_JSON") or os.path.exists(seo_agent.TOKEN_FILE)),
+        "token_configured": bool(token_health["token_usable"]),
+        **token_health,
     }
 
 
@@ -2418,7 +2628,8 @@ def _seo_trend_prompt(summaries: list[str]) -> str:
         + "\n\n".join(summaries) +
         "\n\nPhân tích xu hướng qua các tháng theo câu hỏi của người dùng: tổng thể tăng/giảm thế nào, "
         "tháng nào tốt/kém nhất, trang nào nổi bật. Yêu cầu: TIẾNG VIỆT, ngắn gọn, số liệu cụ thể, "
-        "dùng **đậm** và gạch đầu dòng. KHÔNG dùng LaTeX (mũi tên viết là →). Trả lời trực tiếp. /no_think"
+        "dùng **đậm** và gạch đầu dòng. Với mọi khuyến nghị, kèm Evidence và Confidence. "
+        "KHÔNG dùng LaTeX (mũi tên viết là →). Trả lời trực tiếp. /no_think"
     ) + _knowledge() + _persona()
 
 
@@ -2455,7 +2666,8 @@ def _seo_results_prompt(tab: str, headers: list, rows: list) -> str:
         "KHÔNG được nói cần lấy thêm dữ liệu từ Google Search Console/GA4, KHÔNG được đề nghị chạy báo cáo "
         "khi bảng có dòng dữ liệu. Nếu người dùng hỏi 'phân tích tháng gần nhất', hãy phân tích ngay tab này.\n\n"
         "Trả lời câu hỏi dựa trên dữ liệu trên. Yêu cầu: TIẾNG VIỆT, ngắn gọn (tối đa ~15 dòng), "
-        "nêu số liệu cụ thể, dùng **đậm** và gạch đầu dòng khi phù hợp. KHÔNG dùng LaTeX "
+        "nêu số liệu cụ thể, dùng **đậm** và gạch đầu dòng khi phù hợp. Với mọi khuyến nghị, kèm "
+        "Evidence (URL + metric) và Confidence (high/medium/low). KHÔNG dùng LaTeX "
         "(mũi tên viết là →). Trả lời trực tiếp, không suy luận dài. /no_think"
         + _knowledge() + _persona()
     )
@@ -2509,6 +2721,8 @@ def _seo_results_fallback(tab: str, headers: list, rows: list) -> str:
         f"- Top clicks: {top_txt}.\n"
         f"- Trang tụt clicks: {drop_txt}.\n\n"
         "⚠️ **Cảnh báo**: ưu tiên kiểm tra các trang tụt clicks mạnh hoặc impressions cao nhưng clicks thấp.\n"
+        f"Evidence: SEO Sheet tab {tab}, {len(rows)} URL; Top clicks: {top_txt}; Drops: {drop_txt}.\n"
+        "Confidence: medium.\n"
         "👉 **Nên làm tiếp**: audit title/meta + SERP của nhóm trang tụt, rồi tối ưu nội dung/truy vấn đang mất CTR."
     )
 
@@ -2518,6 +2732,40 @@ def _seo_results_fallback(tab: str, headers: list, rows: list) -> str:
 def _path_only(u: str) -> str:
     import re
     return re.sub(r"^https?://[^/]+", "", str(u or "")) or "/"
+
+
+def _num_value(x, default: float = 0.0) -> float:
+    try:
+        s = str(x).strip().replace(",", "").replace("%", "")
+        if not s or s.upper() in {"N/A", "NONE", "NULL", "—"}:
+            return default
+        return float(s)
+    except (TypeError, ValueError):
+        return default
+
+
+def _pct_value(x) -> float | None:
+    s = str(x).strip()
+    if not s or s.upper() in {"N/A", "NONE", "NULL", "—"}:
+        return None
+    return _num_value(s)
+
+
+def _fmt_num(n) -> str:
+    return f"{int(round(_num_value(n))):,}".replace(",", ".")
+
+
+def _fmt_money(n) -> str:
+    return f"{int(round(_num_value(n))):,} VND".replace(",", ".")
+
+
+def _confidence(sources: list[str], evidence: list[str]) -> str:
+    nsrc = len(set(sources))
+    if nsrc >= 3 and len(evidence) >= 3:
+        return "high"
+    if nsrc >= 2 and len(evidence) >= 2:
+        return "medium"
+    return "low"
 
 
 def _psi_latest_by_path() -> tuple[dict, str | None]:
@@ -2596,6 +2844,241 @@ def _insight_join() -> dict:
     return {"run": run, "month": month, "rows": rows}
 
 
+def _ads_latest_by_path(days: int = 14) -> tuple[dict, dict]:
+    import ads_agent
+
+    if not ads_agent.configured():
+        return {}, {"configured": False, "error": "Google Ads chưa cấu hình"}
+    try:
+        perf = _cached(f"ads:ldp:{days}", 300, lambda: ads_agent.landing_page_perf(days))
+    except Exception as e:  # noqa: BLE001
+        return {}, {"configured": True, "error": f"{type(e).__name__}: {e}"}
+    out: dict = {}
+    for r in perf.get("rows") or []:
+        p = _path_only(r.get("base_url") or r.get("url") or "")
+        cur = out.setdefault(p, {"cost": 0.0, "clicks": 0.0, "impr": 0.0, "conv": 0.0,
+                                 "ctr": 0.0, "bounce": None, "speed": None})
+        cur["cost"] += _num_value(r.get("cost"))
+        cur["clicks"] += _num_value(r.get("clicks"))
+        cur["impr"] += _num_value(r.get("impressions"))
+        cur["conv"] += _num_value(r.get("conversions"))
+        if r.get("bounce_rate") is not None:
+            b = _num_value(r.get("bounce_rate"))
+            cur["bounce"] = b if cur["bounce"] is None else max(cur["bounce"], b)
+        speeds = [_num_value(v) for v in (cur["speed"], r.get("speed_score")) if v is not None]
+        cur["speed"] = min(speeds) if speeds else None
+    for cur in out.values():
+        cur["ctr"] = round((cur["clicks"] / cur["impr"] * 100), 2) if cur["impr"] else 0.0
+    return out, {"configured": True, "start": perf.get("start"), "end": perf.get("end"), "error": perf.get("error")}
+
+
+def _ads_campaign_alerts(days: int = 7) -> list[dict]:
+    import ads_agent
+    from datetime import date, timedelta
+
+    if not ads_agent.configured():
+        return []
+    today = date.today()
+    cur_start, cur_end = today - timedelta(days=days), today - timedelta(days=1)
+    prev_start, prev_end = today - timedelta(days=days * 2), today - timedelta(days=days + 1)
+    try:
+        cur = _cached(f"ads:perf:{cur_start}:{cur_end}", 300,
+                      lambda: ads_agent.campaign_perf(start=cur_start.isoformat(), end=cur_end.isoformat()))
+        prev = _cached(f"ads:perf:{prev_start}:{prev_end}", 300,
+                       lambda: ads_agent.campaign_perf(start=prev_start.isoformat(), end=prev_end.isoformat()))
+    except Exception:
+        return []
+
+    def group(rows):
+        out: dict = {}
+        for r in rows or []:
+            g = out.setdefault(r.get("name") or str(r.get("id")), {"cost": 0.0, "clicks": 0.0, "impr": 0.0, "conv": 0.0})
+            g["cost"] += _num_value(r.get("cost"))
+            g["clicks"] += _num_value(r.get("clicks"))
+            g["impr"] += _num_value(r.get("impressions"))
+            g["conv"] += _num_value(r.get("conversions"))
+        for g in out.values():
+            g["ctr"] = g["clicks"] / g["impr"] * 100 if g["impr"] else 0.0
+            g["cpa"] = g["cost"] / g["conv"] if g["conv"] else None
+        return out
+
+    cost_floor = _num_value(os.getenv("ALERT_ADS_COST_VND", "500000"))
+    cur_g, prev_g, alerts = group(cur.get("rows")), group(prev.get("rows")), []
+    for name, c in cur_g.items():
+        p = prev_g.get(name, {})
+        if c["cost"] >= cost_floor and not c["conv"]:
+            alerts.append({"lv": "high", "icon": "money", "go": "ads", "source": "Ads",
+                           "text": f"{name}: tiêu {_fmt_money(c['cost'])} trong {days} ngày nhưng 0 conversion",
+                           "evidence": [f"Ads {cur.get('start')} → {cur.get('end')}: cost={_fmt_money(c['cost'])}, conversions=0"],
+                           "confidence": "high", "score": 90})
+        if p.get("cost") and c["cost"] >= cost_floor and c["cost"] / p["cost"] >= 1.5:
+            alerts.append({"lv": "med", "icon": "trend", "go": "ads", "source": "Ads",
+                           "text": f"{name}: chi tiêu tăng {round((c['cost'] / p['cost'] - 1) * 100)}% so với kỳ trước",
+                           "evidence": [f"Kỳ này {_fmt_money(c['cost'])}; kỳ trước {_fmt_money(p['cost'])}"],
+                           "confidence": "medium", "score": 70})
+        if c["impr"] >= 1000 and c["ctr"] < 1:
+            alerts.append({"lv": "med", "icon": "down", "go": "ads", "source": "Ads",
+                           "text": f"{name}: CTR thấp {round(c['ctr'], 2)}% với {_fmt_num(c['impr'])} impressions",
+                           "evidence": [f"Ads CTR={round(c['ctr'], 2)}%, impressions={_fmt_num(c['impr'])}"],
+                           "confidence": "medium", "score": 65})
+        if c.get("cpa") and p.get("cpa") and c["cpa"] / p["cpa"] >= 1.5:
+            alerts.append({"lv": "med", "icon": "trend", "go": "ads", "source": "Ads",
+                           "text": f"{name}: CPA tăng {round((c['cpa'] / p['cpa'] - 1) * 100)}%",
+                           "evidence": [f"CPA kỳ này {_fmt_money(c['cpa'])}; kỳ trước {_fmt_money(p['cpa'])}"],
+                           "confidence": "medium", "score": 68})
+    return alerts
+
+
+def _clarity_signals() -> dict:
+    import clarity_agent
+
+    if not clarity_agent.configured():
+        return {"configured": False, "signals": [], "score": 0}
+    raw = clarity_agent.insights_safe(3)
+    if raw.get("error"):
+        return {"configured": True, "signals": [], "score": 0, "error": raw.get("error")}
+    items: list[tuple[str, float]] = []
+
+    def visit(o, label=""):
+        if isinstance(o, dict):
+            name = str(o.get("metricName") or o.get("name") or o.get("metric") or o.get("title") or label)
+            for key in ("value", "count", "sessions", "percentage", "percent", "score"):
+                if key in o:
+                    items.append((name, _num_value(o.get(key))))
+                    break
+            for k, v in o.items():
+                visit(v, f"{label}.{k}" if label else str(k))
+        elif isinstance(o, list):
+            for v in o:
+                visit(v, label)
+
+    visit(raw.get("data"))
+    signals = []
+    for name, val in items:
+        n = name.lower()
+        if any(k in n for k in ("rage", "dead", "error click", "quick back")) and val >= 5:
+            signals.append(f"{name}: {round(val, 1)}")
+        elif "scroll" in n and 0 < val < 50:
+            signals.append(f"{name}: {round(val, 1)}")
+        elif "bot" in n and val >= 10:
+            signals.append(f"{name}: {round(val, 1)}")
+    return {"configured": True, "signals": signals[:5], "score": min(15, len(signals) * 5),
+            "heatmap": clarity_agent.heatmap_url(), "recordings": clarity_agent.recordings_url()}
+
+
+def _opportunity_report(limit: int = 20) -> dict:
+    import math
+
+    joined = _insight_join()
+    ads_by_path, ads_meta = _ads_latest_by_path(14)
+    clarity = _clarity_signals()
+    opps = []
+    for r in joined["rows"]:
+        p = r["path"]
+        ad = ads_by_path.get(p, {})
+        sources, evidence = [], []
+        score = 0.0
+
+        psi_m = r.get("psiM")
+        if isinstance(psi_m, (int, float)):
+            sources.append("PSI")
+            slow = max(0.0, 100.0 - float(psi_m))
+            score += min(35, slow * 0.6)
+            if psi_m < 60:
+                evidence.append(f"PSI mobile {psi_m}/100")
+        lcp = _num_value(r.get("lcp"))
+        cls = _num_value(r.get("cls"))
+        if lcp >= 2500:
+            score += 8 if lcp < 4000 else 14
+            evidence.append(f"LCP {round(lcp)}ms")
+        if cls > 0.1:
+            score += 6
+            evidence.append(f"CLS {cls}")
+
+        traffic = _num_value(r.get("views")) + _num_value(r.get("clicks"))
+        if traffic > 0:
+            sources.append("SEO")
+            score += min(20, math.log1p(traffic) * 2.8)
+            evidence.append(f"SEO traffic {_fmt_num(traffic)} (views+clicks)")
+        clicks_ch = _pct_value(r.get("clicksCh"))
+        if clicks_ch is not None and clicks_ch < 0:
+            score += min(24, abs(clicks_ch) * 0.55)
+            evidence.append(f"Clicks change {round(clicks_ch, 1)}%")
+        seo_ctr = (_num_value(r.get("clicks")) / _num_value(r.get("impr")) * 100) if _num_value(r.get("impr")) else None
+        if seo_ctr is not None and _num_value(r.get("impr")) >= 500 and seo_ctr < 1:
+            score += 8
+            evidence.append(f"SEO CTR {round(seo_ctr, 2)}% trên {_fmt_num(r.get('impr'))} impressions")
+
+        if ad:
+            sources.append("Ads")
+            score += min(22, ad.get("cost", 0) / 100_000)
+            if ad.get("cost", 0) >= _num_value(os.getenv("ALERT_ADS_COST_VND", "500000")) and not ad.get("conv"):
+                score += 16
+                evidence.append(f"Ads cost {_fmt_money(ad.get('cost'))}, 0 conversion")
+            if ad.get("ctr", 0) < 1 and ad.get("impr", 0) >= 1000:
+                score += 8
+                evidence.append(f"Ads CTR {ad.get('ctr')}%")
+            if ad.get("bounce") is not None and ad["bounce"] >= 70:
+                score += 7
+                evidence.append(f"Ads landing bounce {ad['bounce']}%")
+            if ad.get("speed") is not None and ad["speed"] < 50:
+                score += 7
+                evidence.append(f"Ads landing speed score {ad['speed']}/100")
+
+        if clarity.get("signals"):
+            sources.append("Clarity")
+            score += clarity.get("score", 0)
+            evidence.append("Clarity: " + "; ".join(clarity["signals"][:2]))
+
+        if score >= 10 and evidence:
+            sources = sorted(set(sources))
+            opps.append({"path": p, "score": round(min(100, score)), "sources": sources,
+                         "evidence": evidence[:6], "confidence": _confidence(sources, evidence)})
+    opps.sort(key=lambda x: x["score"], reverse=True)
+    return {"run": joined.get("run"), "month": joined.get("month"), "ads": ads_meta,
+            "clarity": clarity, "opportunities": opps[:max(1, min(int(limit or 20), 50))]}
+
+
+def _alert_report(limit: int = 50) -> dict:
+    opp = _opportunity_report(50)
+    alerts = []
+    for o in opp.get("opportunities", []):
+        lv = "high" if o["score"] >= 75 else "med"
+        if o["score"] < 45:
+            continue
+        src = "+".join(o.get("sources") or [])
+        alerts.append({"lv": lv, "icon": "warn" if lv == "high" else "trend", "go": "urls", "source": src,
+                       "text": f"{o['path']}: opportunity score {o['score']} ({src})",
+                       "evidence": o.get("evidence", []), "confidence": o.get("confidence", "low"),
+                       "score": o["score"]})
+    alerts.extend(_ads_campaign_alerts(7))
+    for s in (opp.get("clarity") or {}).get("signals") or []:
+        alerts.append({"lv": "med", "icon": "eye", "go": "ads", "source": "Clarity",
+                       "text": f"Clarity phát hiện friction: {s}",
+                       "evidence": [s], "confidence": "low", "score": 55})
+    alerts.sort(key=lambda a: (0 if a.get("lv") == "high" else 1, -a.get("score", 0)))
+    return {"alerts": alerts[:max(1, min(int(limit or 50), 100))], "opportunities": opp.get("opportunities", [])[:10],
+            "run": opp.get("run"), "month": opp.get("month")}
+
+
+def _alerts_text(report: dict, max_items: int = 8) -> str:
+    alerts = report.get("alerts") or []
+    if not alerts:
+        return "Không có alert đáng kể trong dữ liệu hiện tại. Confidence: medium — đã kiểm tra PSI/SEO và các nguồn Ads/Clarity nếu được cấu hình."
+    lines = [f"**Alert monitor** — {len(alerts)} cảnh báo (PSI/SEO/Ads/Clarity nếu có cấu hình):"]
+    for a in alerts[:max_items]:
+        sev = "HIGH" if a.get("lv") == "high" else "MED"
+        evidence = "; ".join((a.get("evidence") or [])[:2]) or "không có evidence chi tiết"
+        lines.append(
+            f"- **[{sev}] {a.get('text')}**\n"
+            f"  Evidence: {evidence}\n"
+            f"  Confidence: {a.get('confidence', 'low')}"
+        )
+    if len(alerts) > max_items:
+        lines.append(f"- Còn {len(alerts) - max_items} alert khác trong trang Alerts.")
+    return "\n".join(lines)
+
+
 def _seo_keyword_intent(message: str) -> dict | None:
     import re
 
@@ -2649,6 +3132,9 @@ def _seo_status_text() -> str:
 @app.post("/api/seo/chat/stream")
 async def seo_chat_stream(req: ChatStreamRequest, request: Request = None):
     """SSE chat cho SEO Agent: chạy báo cáo, đọc & phân tích số liệu từ SEO Sheet."""
+    # Legacy alias: giữ URL cũ nhưng chạy chung unified agent để tránh lệch logic/fix.
+    return await agent_chat_stream(req, request)
+
     import asyncio
     import re as _re
 
@@ -2790,6 +3276,7 @@ async def seo_chat_stream(req: ChatStreamRequest, request: Request = None):
                                     *history,
                                     {"role": "user", "content": req.message}]}
             think_re = _re.compile(r"<think>.*?(?:</think>|$)", _re.S)
+            buffer_until_final = fallback_on_deflect is not None
             raw_acc, sent, reasoning_acc = "", 0, []
             try:
                 async with httpx.AsyncClient(timeout=300) as client:
@@ -2818,7 +3305,7 @@ async def seo_chat_stream(req: ChatStreamRequest, request: Request = None):
                             raw_acc += c
                             visible = think_re.sub("", raw_acc)
                             safe = max(0, len(visible) - 12)
-                            if safe > sent:
+                            if safe > sent and not buffer_until_final:
                                 yield ev({"type": "delta", "delta": visible[sent:safe]})
                                 sent = safe
             except Exception as e:  # noqa: BLE001
@@ -2830,6 +3317,7 @@ async def seo_chat_stream(req: ChatStreamRequest, request: Request = None):
             if visible:
                 if fallback_on_deflect and _seo_deflected(visible):
                     visible = fallback_on_deflect
+                    sent = 0
                 if len(visible) > sent:
                     yield ev({"type": "delta", "delta": visible[sent:]})
                 yield ev({"type": "final", "text": visible})
@@ -2999,11 +3487,14 @@ async def _call_llm_stream(model: str, message: str, history: list[dict] | None 
 
 
 @app.post("/api/chat/stream")
-async def chat_stream(req: ChatStreamRequest):
+async def chat_stream(req: ChatStreamRequest, request: Request = None):
     """SSE: hiển thị các bước hành động của agent + tiến trình check real-time.
 
     Events: {"type":"step","text"} | {"type":"final","text"} | {"type":"error","text"} | {"type":"done"}
     """
+    # Legacy alias: giữ URL cũ nhưng chạy chung unified agent để tránh lệch logic/fix.
+    return await agent_chat_stream(req, request)
+
     import asyncio
 
     model = req.model if req.model in ALLOWED_MODELS else MAAS_MODEL
@@ -3183,11 +3674,11 @@ def chat(req: ChatRequest):
         m = req.message.lower()
         url_match = re.search(r"https?://\S+", req.message)
         if any(k in m for k in ("thêm", "add")) and url_match:
-            reply = _add_url(url_match.group(0).rstrip(".,;"))
+            reply = _execute_action({"action": "add_url", "url": url_match.group(0).rstrip(".,;")})
         elif any(k in m for k in ("xóa", "xoá", "remove", "delete", "bỏ")) and (url_match or True) and any(
                 k in m for k in ("url", "http", "trang", "link")):
             target = url_match.group(0).rstrip(".,;") if url_match else req.message.split()[-1]
-            reply = _remove_url(target)
+            reply = _execute_action({"action": "remove_url", "url": target})
         elif any(k in m for k in ("danh sách", "list", "url nào", "những url")):
             reply = _list_urls_text()
         elif any(k in m for k in ("chạy", "check", "kiểm tra", "run", "trigger", "start")):

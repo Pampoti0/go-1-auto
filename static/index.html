@@ -106,7 +106,8 @@ const esc=s=>s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
 const memIds={
   uid:(()=>{try{return localStorage.decho_uid||(localStorage.decho_uid=crypto.randomUUID())}catch(e){return 'anon'}})(),
   sid:(()=>{try{return localStorage.decho_sid||(localStorage.decho_sid=crypto.randomUUID())}catch(e){return 'sess'}})(),
-  newSession(){try{localStorage.decho_sid=crypto.randomUUID();this.sid=localStorage.decho_sid}catch(e){}}
+  newSession(){try{localStorage.decho_sid=crypto.randomUUID();this.sid=localStorage.decho_sid}catch(e){}},
+  resetActor(){try{localStorage.decho_uid=crypto.randomUUID();localStorage.decho_sid=crypto.randomUUID();this.uid=localStorage.decho_uid;this.sid=localStorage.decho_sid}catch(e){}}
 };
 
 /* Subtitle theo trang — header đọc qua event, thay cho dòng Online mặc định */
@@ -1589,22 +1590,42 @@ function Dashboard(){
 }
 
 /* ──────────────── Overview / Alerts / URL Intelligence (wireframe phase 1) ──────────────── */
-const _agentCache={t:0,data:null,promise:null};
+const _agentCache={t:0,data:null,promise:null,alertsPromise:null};
 function useAgentData(){
-  const [d,setD]=useState(_agentCache.data||{psi:null,seo:null,sum:null});
+  const [d,setD]=useState(_agentCache.data||{psi:null,seo:null,sum:null,alerts:null});
   useEffect(()=>{
+    let on=true;
+    const get=async u=>{try{return await(await fetch(u)).json()}catch(e){return null}};
+    const loadAlerts=()=>{
+      if(!_agentCache.alertsPromise){
+        _agentCache.alertsPromise=get('/api/alerts').then(alerts=>{
+          _agentCache.alertsPromise=null;
+          _agentCache.data={...(_agentCache.data||{psi:null,seo:null,sum:null}),alerts};
+          return _agentCache.data;
+        }).catch(()=>{
+          _agentCache.alertsPromise=null;
+          return _agentCache.data;
+        });
+      }
+      return _agentCache.alertsPromise;
+    };
     const fresh=_agentCache.data&&Date.now()-_agentCache.t<60000;
-    if(fresh){setD(_agentCache.data);return}
+    if(fresh){
+      setD(_agentCache.data);
+      if(!_agentCache.data.alerts)loadAlerts().then(data=>{if(on&&data)setD(data)});
+      return()=>{on=false};
+    }
     if(!_agentCache.promise){
-      const get=async u=>{try{return await(await fetch(u)).json()}catch(e){return null}};
       _agentCache.promise=Promise.all([get('/api/results'),get('/api/seo/results'),get('/api/seo/summary')])
         .then(([psi,seo,sum])=>{
-          _agentCache.data={psi,seo,sum};_agentCache.t=Date.now();_agentCache.promise=null;
+          _agentCache.data={psi,seo,sum,alerts:_agentCache.data&&_agentCache.data.alerts};_agentCache.t=Date.now();_agentCache.promise=null;
           return _agentCache.data;
         });
     }
-    let on=true;
-    _agentCache.promise.then(data=>{if(on)setD(data)});
+    _agentCache.promise.then(data=>{
+      if(on)setD(data);
+      loadAlerts().then(next=>{if(on&&next)setD(next)});
+    });
     return()=>{on=false};
   },[]);
   return d;
@@ -1613,7 +1634,13 @@ const lastRun=psi=>{if(!psi||!psi.rows||!psi.rows.length)return null;const runs=
 const avgOf=a=>a.length?Math.round(a.reduce((p,c)=>p+c,0)/a.length):null;
 const psiRunRows=(psi,run)=>psi.rows.filter(x=>x[0]===run);
 
-function computeAlerts(psi,seo){
+function computeAlerts(psi,seo,serverAlerts){
+  if(serverAlerts&&Array.isArray(serverAlerts.alerts)){
+    return serverAlerts.alerts.map(a=>({
+      lv:a.lv||a.level||'med',icon:a.icon||'warn',text:a.text||'',go:a.go||'alerts',
+      evidence:a.evidence||[],confidence:a.confidence||'low',score:a.score||0,source:a.source||''
+    })).filter(a=>a.text);
+  }
   const alerts=[];
   if(psi&&psi.rows&&psi.rows.length){
     const runs=[...new Set(psi.rows.map(x=>x[0]))].sort();
@@ -1702,7 +1729,7 @@ function MiniLine({labels,series}){
 }
 
 function Overview({go}){
-  const {psi,seo,sum}=useAgentData();
+  const {psi,seo,sum,alerts:serverAlerts}=useAgentData();
   const [cfg,setCfg]=useState(null);
   useEffect(()=>{(async()=>{try{setCfg(await(await fetch('/api/config')).json())}catch(e){}})()},[]);
   useEffect(()=>{
@@ -1712,10 +1739,10 @@ function Overview({go}){
     const sc=s=>rows.filter(x=>x[2]===s).map(x=>parseFloat(x[3])).filter(n=>!isNaN(n));
     const avg=a=>a.length?Math.round(a.reduce((p,c)=>p+c,0)/a.length):'—';
     const ms=(sum.months||[]).map(m=>`${m.month}: clicks=${m.clicks??'—'}, views=${m.views??'—'}, users=${m.users??'—'}`).join('; ');
-    const al=computeAlerts(psi,seo).slice(0,8).map(a=>`[${a.lv}] ${a.text}`).join('\n');
+    const al=computeAlerts(psi,seo,serverAlerts).slice(0,8).map(a=>`[${a.lv}] ${a.text}`).join('\n');
     setPageSub('DeCho đang theo dõi PageSpeed + GSC + GA4');
     dechoCtx.info=`Màn hình Tổng quan. PSI lần chạy ${run||'—'}: điểm TB mobile ${avg(sc('MOBILE'))}, desktop ${avg(sc('DESKTOP'))}. SEO theo tháng: ${ms||'chưa có'}. Alerts:\n${al||'không có'}`;
-  },[psi,seo,sum]);
+  },[psi,seo,sum,serverAlerts]);
   if(!psi||!seo||!sum)return <Spinner/>;
 
   const run=lastRun(psi);
@@ -1724,7 +1751,7 @@ function Overview({go}){
   const months=sum.months||[];
   const curM=months[months.length-1],prevM=months[months.length-2];
   const clicksPct=curM&&prevM&&prevM.clicks?Math.round((curM.clicks-prevM.clicks)/prevM.clicks*100):null;
-  const alerts=computeAlerts(psi,seo);
+  const alerts=computeAlerts(psi,seo,serverAlerts);
   const high=alerts.filter(a=>a.lv==='high').length;
   const runs=[...new Set((psi.rows||[]).map(x=>x[0]))].sort();
   const sAvg=rn=>avgOf(psiRunRows(psi,rn).map(x=>parseFloat(x[3])).filter(n=>!isNaN(n)));
@@ -1809,17 +1836,17 @@ function Overview({go}){
 }
 
 function AlertsView({go}){
-  const {psi,seo}=useAgentData();
+  const {psi,seo,alerts:serverAlerts}=useAgentData();
   useEffect(()=>{
     if(psi&&seo){
-      const a=computeAlerts(psi,seo);
-      setPageSub(`${a.length} cảnh báo · phát hiện tự động từ PSI + SEO (score<50, tụt ≥10 điểm, clicks giảm ≥20%)`);
+      const a=computeAlerts(psi,seo,serverAlerts);
+      setPageSub(`${a.length} cảnh báo · phát hiện tự động từ PSI + SEO + Ads + Clarity`);
       dechoCtx.info=`Màn hình Alerts: ${a.length} cảnh báo.\n`+a.map(x=>`[${x.lv}] ${x.text}`).join('\n');
       if(a.filter(x=>x.lv==='high').length)dechoBus.say(`🚨 Có ${a.filter(x=>x.lv==='high').length} alert ưu tiên cao đó Đại ca, xử sớm nha.`,7000);
     }
-  },[psi,seo]);
+  },[psi,seo,serverAlerts]);
   if(!psi||!seo)return <Spinner/>;
-  const alerts=computeAlerts(psi,seo);
+  const alerts=computeAlerts(psi,seo,serverAlerts);
   const groups=[['high','High priority','text-red-500'],['med','Medium priority','text-amber-500']];
   return (
     <div className="flex-1 min-h-0 overflow-y-auto px-6 py-5 bg-transparent">
@@ -1839,8 +1866,12 @@ function AlertsView({go}){
                 {list.map((a,i)=>(
                   <button key={i} onClick={()=>go(a.go)} className="flex items-start gap-2.5 text-left text-[13.5px] px-3 py-2.5 rounded-lg hover:bg-slate-50 dark:hover:bg-slate-800/50">
                     <span className={"mt-0.5 flex-none "+(a.lv==='high'?'text-red-500':'text-amber-500')}><NavIcon id={a.icon} cls="w-4 h-4"/></span>
-                    <span className={lv==='high'?'text-red-600 dark:text-red-400':''}>{a.text}</span>
-                    <span className="ml-auto text-[11px] text-slate-400 flex-none">{a.go==='dash'?'PageSpeed →':'URL Intel →'}</span>
+                    <span className={lv==='high'?'text-red-600 dark:text-red-400':''}>
+                      <span>{a.text}</span>
+                      {(a.evidence&&a.evidence.length>0)&&<span className="block mt-0.5 text-[11.5px] text-slate-400">Evidence: {a.evidence.slice(0,2).join('; ')}</span>}
+                      {a.confidence&&<span className="block mt-0.5 text-[11.5px] text-slate-400">Confidence: {a.confidence}</span>}
+                    </span>
+                    <span className="ml-auto text-[11px] text-slate-400 flex-none">{a.go==='dash'?'PageSpeed →':(a.go==='ads'?'Ads →':'URL Intel →')}</span>
                   </button>
                 ))}
               </div>
@@ -2251,19 +2282,30 @@ function MemoryCard(){
   };
   useEffect(()=>{load();const id=setInterval(load,15000);return()=>clearInterval(id)},[]); // tự làm mới mỗi 15s
   const fmtTime=d=>d?d.toLocaleTimeString('vi-VN',{hour:'2-digit',minute:'2-digit',second:'2-digit'}):'';
+  const resetMemory=()=>{
+    if(!confirm('Reset trí nhớ dài hạn trên máy này? DeCho sẽ dùng actor mới và không kéo các fact cũ nữa.'))return;
+    memIds.resetActor();
+    try{localStorage.removeItem('decho-chat')}catch(e){}
+    setSt({loading:true,loaded:false,configured:false,facts:[],at:null});
+    load();
+    dechoBus.say('Đệ đã đổi actor memory mới. Fact cũ sẽ không còn được kéo vào chat nữa.',6000);
+  };
   return (
     <div className={mosaicCard+" p-5 flex flex-col gap-3"} style={{gridColumn:'1/-1'}}>
       <div className="flex items-center gap-2">
         <h3 className="text-sm font-bold flex items-center gap-2 flex-none"><span className="text-violet-500"><NavIcon id="chat"/></span>Đệ nhớ gì về Đại ca</h3>
-        <span className="text-[11px] text-slate-400 truncate hidden md:inline">AgentBase Memory — fact dài hạn tự chưng cất từ hội thoại</span>
+        <span className="text-[11px] text-slate-400 truncate hidden md:inline">AgentBase Memory — fact dài hạn chỉ lưu khi Đại ca bảo ghi nhớ</span>
         {st.at&&<span className="ml-auto text-[11px] text-slate-400 flex-none">Cập nhật {fmtTime(st.at)}</span>}
         <button onClick={load} disabled={st.loading} className={chipCls+(st.at?"":" ml-auto")+" inline-flex items-center gap-1.5 flex-none"}>
           <NavIcon id="refresh" cls={"w-3.5 h-3.5"+(st.loading?" animate-spin":"")}/>Tải lại
         </button>
+        <button onClick={resetMemory} className={chipCls+" inline-flex items-center gap-1.5 flex-none text-red-500 border-red-200 dark:border-red-900/60"}>
+          <NavIcon id="trash" cls="w-3.5 h-3.5"/>Reset trí nhớ
+        </button>
       </div>
       {!st.loaded?<Spinner/>
         :!st.configured?<p className="text-xs text-slate-400">Chưa bật memory — cần env <code>MEMORY_ID</code> (xem .env.example).</p>
-        :st.facts.length===0?<p className="text-xs text-slate-400">Chưa có fact nào — chat thêm với Đệ, vài giây sau fact sẽ tự xuất hiện ở đây.{st.error?` (${st.error})`:''}</p>
+        :st.facts.length===0?<p className="text-xs text-slate-400">Chưa có fact nào — nói “ghi nhớ: ...” để Đệ lưu fact dài hạn.{st.error?` (${st.error})`:''}</p>
         :<ul className="text-[13px] text-slate-600 dark:text-slate-300 flex flex-col gap-1.5">
           {st.facts.map((f,i)=><li key={i} className="flex gap-2"><span className="text-violet-400 flex-none mt-0.5"><NavIcon id="zap" cls="w-3.5 h-3.5"/></span><span>{f}</span></li>)}
         </ul>}
@@ -2545,7 +2587,8 @@ function App(){
     }catch(e){setMeta('Không kết nối được server')}
     try{
       const c=await(await fetch('/api/seo/config')).json();
-      setSeoMeta(`${c.site} · GA4 ${c.ga4_property} · lịch ${c.schedule}${c.token_configured?'':' · ⚠️ thiếu token'}`);
+      const tokenNote=c.token_usable?'':(c.token_present?' · ⚠️ token lỗi':' · ⚠️ thiếu token');
+      setSeoMeta(`${c.site} · GA4 ${c.ga4_property} · lịch ${c.schedule}${tokenNote}`);
       if(c.sheet_url)setSeoSheet(c.sheet_url);
     }catch(e){}
   })()},[]);

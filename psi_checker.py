@@ -8,10 +8,13 @@ import time
 import requests
 import schedule
 import logging
+import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 
 WORKERS = int(os.getenv("PSI_WORKERS", "3"))  # số luồng check song song
+_rate_lock = threading.Lock()
+_last_request_at = 0.0
 
 from config import (
     PSI_API_KEY, SHEET_ID, SHEET_TAB, SERVICE_ACCOUNT_FILE, SERVICE_ACCOUNT_JSON,
@@ -217,16 +220,33 @@ def fetch_psi(url: str, strategy: str) -> tuple[dict | None, str | None]:
         return None, reason
 
 
+def _wait_for_request_slot(delay: int | float):
+    """Throttle toàn cục giữa các lần gọi PSI, kể cả khi chạy nhiều worker."""
+    global _last_request_at
+    try:
+        delay = max(0.0, float(delay or 0))
+    except (TypeError, ValueError):
+        delay = 0.0
+    if delay <= 0:
+        return
+    with _rate_lock:
+        now = time.time()
+        wait = max(0.0, _last_request_at + delay - now)
+        if wait:
+            time.sleep(wait)
+        _last_request_at = time.time()
+
+
 def check_one(url: str, strategy: str, timestamp: str, delay: int,
               retries: int = 3) -> dict:
     """Check 1 URL+strategy với retry. Trả về dict kết quả (row + metadata)."""
     t0 = time.time()
     err = None
     for attempt in range(1, retries + 1):
+        _wait_for_request_slot(delay)
         data, err = fetch_psi(url, strategy)
         if data:
             row = parse_result(data, url, strategy, timestamp)
-            time.sleep(delay)
             return {"row": row, "score": row[3], "error": None, "attempts": attempt,
                     "elapsed": round(time.time() - t0, 1)}
         if attempt < retries:
@@ -234,7 +254,6 @@ def check_one(url: str, strategy: str, timestamp: str, delay: int,
             log.info(f"  Retry {attempt + 1}/{retries} cho {url} [{strategy}] sau {wait}s...")
             time.sleep(wait)
     row = [timestamp, url, strategy.upper()] + ["ERROR"] * (len(HEADERS) - 3)
-    time.sleep(delay)
     return {"row": row, "score": None, "error": err, "attempts": retries,
             "elapsed": round(time.time() - t0, 1)}
 
