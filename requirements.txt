@@ -11,11 +11,11 @@ python-dotenv
 pandas
 python-dateutil
 gspread
-google-auth-oauthlib
 google-analytics-data
 
 # Paid Campaigns
 google-ads
+google-auth-oauthlib
 
 # Speech-to-Text (upload audio)
 python-multipart

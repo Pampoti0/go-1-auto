@@ -18,7 +18,6 @@ import json
 import os
 import threading
 import time
-from datetime import datetime
 from urllib.parse import urlparse
 
 import schedule
@@ -28,6 +27,7 @@ from fastapi import FastAPI, File, Request, UploadFile
 from fastapi.responses import HTMLResponse, StreamingResponse
 from pydantic import BaseModel
 
+import app_time
 import config
 import memory_agent
 import psi_checker
@@ -119,7 +119,7 @@ _seo_lock = threading.Lock()
 
 class _SeoLogHandler(__import__("logging").Handler):
     def emit(self, record):
-        _seo_state["log"].append(f"[{datetime.now().strftime('%H:%M:%S')}] {record.getMessage()}")
+        _seo_state["log"].append(f"[{app_time.time_label()}] {record.getMessage()}")
         del _seo_state["log"][:-200]
 
 
@@ -131,11 +131,20 @@ def _seo_exc_text(e: Exception) -> str:
     return str(e) if type(e).__name__ == "SeoAuthError" else f"{type(e).__name__}: {e}"
 
 
+def _ads_exc_text(e: Exception) -> str:
+    try:
+        import ads_agent
+
+        return ads_agent.ads_error_text(e)
+    except Exception:  # noqa: BLE001
+        return str(e) if type(e).__name__ == "AdsAuthError" else f"{type(e).__name__}: {e}"
+
+
 def _seo_sheet_error(e: Exception) -> str:
     return f"❌ Không đọc được SEO Sheet: {_seo_exc_text(e)}"
 
 
-def _run_seo_safe(year: int | None = None, month: int | None = None, url_contains: str | None = None):
+def _run_seo_safe(year: int | None = None, month: int | None = None, url_contains: str | None = None, filter_label: str | None = None):
     with _seo_lock:
         if _seo_state["running"]:
             return
@@ -147,15 +156,15 @@ def _run_seo_safe(year: int | None = None, month: int | None = None, url_contain
             result = seo_agent.run_for_month(year, month, url_contains or None)
         else:
             result = seo_agent.run()
-        flt = f" · lọc URL chứa '{url_contains}'" if url_contains else ""
+        flt = f" · {filter_label or ('lọc URL chứa ' + repr(url_contains))}" if url_contains else ""
         _seo_state["last_result"] = f"success: {result['rows']} URL → tab {result['label']}{flt}"
     except Exception as e:  # noqa: BLE001
         msg = _seo_exc_text(e)
         _seo_state["last_result"] = f"error: {msg}"
-        _seo_state["log"].append(f"[{datetime.now().strftime('%H:%M:%S')}] ❌ {msg}")
+        _seo_state["log"].append(f"[{app_time.time_label()}] ❌ {msg}")
     finally:
         _seo_state["running"] = False
-        _seo_state["last_run"] = datetime.now().isoformat(timespec="seconds")
+        _seo_state["last_run"] = app_time.iso_now()
         _invalidate_cache()
 
 
@@ -167,7 +176,7 @@ def _pending_for(sid: str) -> dict:
     return _pending_by_session.setdefault(sid or "_global", {"range": {}, "op": {}})
 
 
-def _run_seo_range_safe(start: str, end: str, url_contains: str | None = None):
+def _run_seo_range_safe(start: str, end: str, url_contains: str | None = None, filter_label: str | None = None):
     with _seo_lock:
         if _seo_state["running"]:
             return
@@ -185,7 +194,7 @@ def _run_seo_range_safe(start: str, end: str, url_contains: str | None = None):
             pct = f" ({'+' if v['pct'] and v['pct'] > 0 else ''}{v['pct']}%)" if v["pct"] is not None else " (kỳ trước = 0)"
             return f"{k} **{v['cur']:,}**{pct}"
         summary = " · ".join(_fmt(k) for k in ("views", "users", "clicks", "impressions"))
-        flt = f" · lọc URL chứa '{url_contains}'" if url_contains else ""
+        flt = f" · {filter_label or ('lọc URL chứa ' + repr(url_contains))}" if url_contains else ""
         top = result.get("top") or []
         top_txt = ""
         if top:
@@ -198,10 +207,10 @@ def _run_seo_range_safe(start: str, end: str, url_contains: str | None = None):
     except Exception as e:  # noqa: BLE001
         msg = _seo_exc_text(e)
         _seo_state["last_result"] = f"error: {msg}"
-        _seo_state["log"].append(f"[{datetime.now().strftime('%H:%M:%S')}] ❌ {msg}")
+        _seo_state["log"].append(f"[{app_time.time_label()}] ❌ {msg}")
     finally:
         _seo_state["running"] = False
-        _seo_state["last_run"] = datetime.now().isoformat(timespec="seconds")
+        _seo_state["last_run"] = app_time.iso_now()
         _invalidate_cache()
 
 
@@ -223,7 +232,7 @@ def _run_check_safe(source: str = "schedule"):
         _state["last_result"] = f"error: {e}"
     finally:
         _state["running"] = False
-        _state["last_run"] = datetime.now().isoformat(timespec="seconds")
+        _state["last_run"] = app_time.iso_now()
         _invalidate_cache()
 
 
@@ -238,13 +247,13 @@ def _build_schedule():
         getattr(schedule.every(), cfg["schedule_weekday"]).at(at).do(_run_check_safe)
     elif mode == "monthly":
         def monthly():
-            if datetime.now().day == cfg["schedule_day_of_month"]:
+            if app_time.today().day == cfg["schedule_day_of_month"]:
                 _run_check_safe()
         schedule.every().day.at(at).do(monthly)
 
     # SEO agent: chạy hàng tháng — ngày/giờ chỉnh được qua UI (runtime_config)
     def seo_monthly():
-        if datetime.now().day == int(runtime_config.current().get("seo_run_day_of_month", 8)):
+        if app_time.today().day == int(runtime_config.current().get("seo_run_day_of_month", 8)):
             _run_seo_safe()
     schedule.every().day.at(cfg.get("seo_run_time", "08:00")).do(seo_monthly)
 
@@ -269,6 +278,7 @@ def _startup():
     # 3) Khởi động scheduler theo config (có thể vừa khôi phục)
     if os.getenv("RUN_SCHEDULER", "true").lower() == "true":
         threading.Thread(target=_scheduler_loop, daemon=True).start()
+
     # 4) Warm-up Google Ads client ở nền — request đầu tiên khỏi chờ init 2-3s
     def _ads_warmup():
         try:
@@ -394,7 +404,7 @@ def api_ads_campaigns():
     try:
         return _cached("ads:camps", 300, lambda: {"campaigns": ads_agent.list_campaigns()})
     except Exception as e:  # noqa: BLE001
-        return {"error": f"{type(e).__name__}: {e}", "campaigns": []}
+        return {"error": _ads_exc_text(e), "campaigns": []}
 
 
 @app.get("/api/ads/perf")
@@ -412,7 +422,7 @@ def api_ads_perf(days: int = 7, start: str | None = None, end: str | None = None
         key = f"ads:perf:{start}:{end}" if start else f"ads:perf:{days}"
         return _cached(key, 300, lambda: ads_agent.campaign_perf(days, start, end))
     except Exception as e:  # noqa: BLE001
-        return {"error": f"{type(e).__name__}: {e}", "rows": []}
+        return {"error": _ads_exc_text(e), "rows": []}
 
 
 @app.get("/api/ads/ldp")
@@ -430,7 +440,7 @@ def api_ads_ldp(days: int = 7, start: str | None = None, end: str | None = None)
         key = f"ads:ldp:{start}:{end}" if start else f"ads:ldp:{days}"
         return _cached(key, 300, lambda: ads_agent.landing_page_perf(days, start, end))
     except Exception as e:  # noqa: BLE001
-        return {"error": f"{type(e).__name__}: {e}", "rows": []}
+        return {"error": _ads_exc_text(e), "rows": []}
 
 
 @app.get("/api/clarity")
@@ -526,7 +536,7 @@ def api_ads_create_campaign(req: CreateCampaignRequest):
     try:
         return ads_agent.create_campaign(req.name or None, budget, final_url)
     except Exception as e:  # noqa: BLE001
-        return {"ok": False, "error": f"{type(e).__name__}: {e}"}
+        return {"ok": False, "error": _ads_exc_text(e)}
 
 
 def _ads_prompt(perf: dict) -> str:
@@ -564,11 +574,15 @@ def _ldp_prompt(perf: dict) -> str:
     ) + _knowledge() + _persona()
 
 
-def _clarity_prompt(ins: dict) -> str:
+def _clarity_prompt(ins: dict, filter_desc: str = "") -> str:
     import json as _json
 
+    flt = (f"\nBỘ LỌC NGƯỜI DÙNG YÊU CẦU: {filter_desc}. "
+           "Nếu dữ liệu Clarity có URL/page matching thì chỉ tập trung phần đó; nếu dữ liệu chỉ là project-level, nói rõ giới hạn này và phân tích tổng quan.\n"
+           if filter_desc else "")
     return (
         "Bạn là DeCho — phân tích UX từ Microsoft Clarity (live insights):\n\n"
+        + flt
         + _json.dumps(ins.get("data", ins), ensure_ascii=False)[:6000] +
         "\n\nDựa DUY NHẤT trên số liệu trên: nêu chỉ số đáng chú ý (sessions, engagement, scroll depth, rage click, "
         "dead click, quick back, bot). Chỉ dấu hiệu UX có vấn đề (rage/dead click cao = chỗ bấm hỏng; scroll thấp = nội dung "
@@ -751,7 +765,7 @@ def _do_trigger() -> str:
     cfg = runtime_config.current()
     threading.Thread(target=_run_check_safe, kwargs={"source": "chat"}, daemon=True).start()
     return (f"✅ Đã bắt đầu kiểm tra {len(cfg['urls'])} URL × {len(cfg['strategies'])} strategy. "
-            f"Chạy nền vài phút, kết quả ghi vào Google Sheet (tab {datetime.now().strftime('%Y-%m')}).")
+            f"Chạy nền vài phút, kết quả ghi vào Google Sheet (tab {app_time.now().strftime('%Y-%m')}).")
 
 
 def _list_urls_text() -> str:
@@ -953,9 +967,31 @@ def _hard_intent_override(msg: str, current_action: str) -> dict | None:
     if current_action == "confirm":
         return None
     kw = _all_keyword_intent(msg)
+    if kw and kw.get("action") == "query_results" and current_action in ("run_check", "run_report", "seo_query", "seo_range"):
+        return kw
     if kw and kw.get("action") in _INTENT_OVERRIDE_ACTIONS and kw.get("action") != current_action:
         return kw
     return None
+
+
+def _keyword_param_patch(msg: str, data: dict, current_action: str) -> tuple[dict, bool]:
+    """Let deterministic keyword parsing fix LLM's default time window for the same action."""
+    kw = _all_keyword_intent(msg)
+    if not kw or kw.get("action") != current_action:
+        return data, False
+    out = dict(data)
+    changed = False
+    for key in ("start", "end", "days", "month", "months", "year"):
+        val = kw.get(key)
+        if val in (None, ""):
+            continue
+        if out.get(key) != val:
+            out[key] = val
+            changed = True
+    if kw.get("start") and kw.get("end") and "days" in out:
+        out.pop("days", None)
+        changed = True
+    return out, changed
 
 
 def _proactive_suffix() -> str:
@@ -1051,8 +1087,14 @@ def _keyword_intent(message: str) -> dict | None:
     if any(k in m for k in ("xóa", "xoá", "remove", "delete", "bỏ")) and any(k in m for k in ("url", "http", "trang", "link")):
         return {"action": "remove_url",
                 "url": url_match.group(0).rstrip(".,;") if url_match else message.split()[-1]}
-    if any(k in m for k in ("phân tích", "kết quả", "điểm", "chậm nhất", "nhanh nhất", "so sánh", "analyze")):
-        return {"action": "query_results"}
+    psi_ctx = any(k in m for k in ("pagespeed", "page speed", "lcp", "cls", "fcp", "tbt", "inp", "ttfb",
+                                   "web vitals", "score", "điểm", "chậm", "nhanh"))
+    report_ctx = any(k in m for k in ("báo cáo", "bao cao", "report", "tổng hợp", "tong hop", "review"))
+    analysis_ctx = any(k in m for k in ("phân tích", "phan tich", "kết quả", "ket qua", "điểm",
+                                        "chậm nhất", "nhanh nhất", "so sánh", "analyze"))
+    if analysis_ctx or (report_ctx and psi_ctx):
+        terms = _parse_psi_url_terms(message)
+        return {"action": "query_results", **({"url_terms": terms} if terms else {})}
     if any(k in m for k in ("danh sách", "list", "url nào", "những url")):
         return {"action": "list_urls"}
     if any(k in m for k in ("chạy", "check", "kiểm tra", "run", "trigger", "start")):
@@ -1117,8 +1159,9 @@ def _unified_prompt() -> str:
     cfg = runtime_config.current()
     import seo_agent
 
+    now = app_time.now()
     return (
-        f"Hôm nay là {datetime.now().strftime('%Y-%m-%d')} (thứ {datetime.now().isoweekday()+1 if datetime.now().isoweekday()<7 else 'CN'}).\n"
+        f"Hôm nay là {now.strftime('%Y-%m-%d')} (thứ {now.isoweekday()+1 if now.isoweekday()<7 else 'CN'}).\n"
         "Bạn là DeCho — AI agent all-in-one (app DeCho Agent, luôn khai báo là AI), quản lý 2 mảng:\n"
         f"A. PAGESPEED: kiểm tra Core Web Vitals cho {len(cfg['urls'])} URL, lịch {cfg['schedule_mode']} "
         f"lúc {cfg['schedule_time']}, ghi Google Sheet. Trạng thái: {_status_text()}\n"
@@ -1126,13 +1169,13 @@ def _unified_prompt() -> str:
         f"Trạng thái: {_seo_status_text()}\n"
         "C. PAID CAMPAIGNS: theo dõi Google Ads (read-only).\n"
         "Trả về DUY NHẤT một JSON theo intent:\n"
-        '- Chạy kiểm tra PageSpeed ngay: {"action":"run_check"}\n'
+        '- Chạy/kiểm tra/đo/scan PageSpeed NGAY (real-time): {"action":"run_check"}\n'
         "QUY TẮC THỜI GIAN PAGESPEED — PageSpeed là phép đo REAL-TIME tại thời điểm chạy, KHÔNG thể chạy cho quá khứ hay tương lai:\n"
         '  + "chạy pagespeed tháng <quá khứ>" → hiểu là muốn XEM data đã đo tháng đó: {"action":"query_results","month":"YYYY-MM"}\n'
         '  + tháng TƯƠNG LAI → {"action":"reply","text":"<từ chối dí dỏm đúng tính cách: tháng đó chưa tới, Đệ chưa biết du hành thời gian; mời chạy ngay hoặc xem data tháng đã có>"}\n'
         '  + tháng hiện tại hoặc không nêu tháng → {"action":"run_check"}\n'
         '  + KHÔNG RÕ tháng nào/năm nào (vd nói "tháng 12" khi chưa rõ năm) → {"action":"reply","text":"<hỏi lại cho rõ tháng/năm>"} — đừng đoán.\n'
-        '- Phân tích KẾT QUẢ PageSpeed (điểm, score, LCP/CLS, trang nhanh/chậm, "pagespeed/web có ỔN/TỐT không", "tình hình/sức khoẻ web thế nào"): {"action":"query_results"} — thêm "month":"YYYY-MM" nếu người dùng chỉ định tháng. "ổn/tốt/khoẻ không" = đánh giá ĐIỂM thực tế → query_results, KHÔNG phải status.\n'
+        '- Báo cáo/phân tích/xem/tổng hợp KẾT QUẢ PageSpeed đã đo (điểm, score, LCP/CLS, trang nhanh/chậm, "pagespeed/web có ỔN/TỐT không", "tình hình/sức khoẻ web thế nào", "báo cáo PageSpeed url tutorial và product"): {"action":"query_results"} — thêm "month":"YYYY-MM" nếu người dùng chỉ định tháng. Nếu người dùng nêu nhóm URL cho PageSpeed (vd "url tutorial và product", "trang /product"), thêm "url_terms":["tutorial","product"] hoặc ["product"]. "báo cáo PageSpeed" KHÔNG được chạy run_check; chỉ run_check khi có ý đo/chạy/check real-time rõ ràng.\n'
         '- Danh sách URL theo dõi: {"action":"list_urls"}\n'
         '- Thêm URL: {"action":"add_url","url":"<url>"}\n'
         '- Xóa URL: {"action":"remove_url","url":"<url hoặc từ khóa>"}\n'
@@ -1148,7 +1191,7 @@ def _unified_prompt() -> str:
         'Quy ước: "N tháng gần nhất" = N tháng TRỌN VẸN trước tháng hiện tại (vd hôm nay 2026-06-12 thì "3 tháng gần nhất" = 2026-03-01 → 2026-05-31); '
         '"N ngày gần nhất" = N ngày kết thúc hôm qua; "tuần trước" = thứ 2 → CN tuần trước. '
         'Nếu input mơ hồ không tính được ngày → đừng đoán, dùng {"action":"reply"} hỏi lại.\n'
-        'LỌC URL: nếu user muốn chỉ một nhóm URL (vd "các url chứa /tutorial", "bài blog", "trang /product"), THÊM field "url_contains":"<từ khóa>" vào run_report HOẶC seo_range. Bỏ field này nếu xét toàn bộ.\n'
+        'LỌC CHUNG: nếu user muốn chỉ một nhóm URL/campaign (vd "url tutorial và product", "trang /product, /tutorial", "campaign brand trừ competitor"), THÊM filter_spec với include/exclude nhiều keyword. Bỏ filter nếu xét toàn bộ.\n'
         '- Người dùng XÁC NHẬN đề xuất ngay trước đó ("ok", "đồng ý", "chạy đi"): {"action":"confirm"}\n'
         '- Danh sách campaign Google Ads (CHỈ khi hỏi "liệt kê/có những campaign nào"): {"action":"ads_list"}\n'
         '- Hiệu suất/chi tiêu/CPA/CTR Google Ads, HOẶC "tình hình/hiệu quả campaigns", "ads ổn không", "quảng cáo thế nào": {"action":"ads_perf","days":<số ngày, mặc định 7>} '
@@ -1168,6 +1211,8 @@ def _unified_prompt() -> str:
         '- KẾ HOẠCH HÀNH ĐỘNG từ Opportunity Score + alerts ("tuần này nên làm gì", "cần làm gì", "lên kế hoạch", "to-do", "ưu tiên công việc"): {"action":"action_plan"}\n'
         '- CHẨN ĐOÁN SỤT GIẢM ("tại sao clicks/traffic/views giảm", "vì sao tụt", "trang nào kéo xuống", "phân tích nguyên nhân giảm"): {"action":"diagnose_drop"}\n'
         '- GỢI Ý CÁCH SỬA trang chậm ("làm sao tăng tốc", "cách tối ưu trang X", "fix LCP/CLS thế nào", "trang chậm sửa sao"): {"action":"fix_suggest","url":"<path nếu có>"}\n'
+        'FILTER CHUNG: nếu user nêu nhiều keyword/path/campaign như "url tutorial và product", "trang /product, /tutorial", "chỉ product trừ blog", hoặc "campaign brand và competitor", thêm '
+        '{"filter_spec":{"scope":"url|campaign","include":["tutorial","product"],"exclude":["blog"],"match_mode":"any|all"}}. Mặc định "và/hoặc/dấu phẩy" = any; chỉ dùng all khi user nói rõ "phải chứa cả". Áp filter cho PageSpeed, SEO, Ads, Clarity, Opportunity, Alerts, kế hoạch.\n'
         '- Còn lại: {"action":"reply","text":"<trả lời ngắn>"}\n'
         "Phân biệt: kiểm tra/điểm/score/LCP/CLS/pagespeed → PageSpeed; báo cáo/traffic/clicks/GSC/GA4/SEO → SEO."
     ) + _persona()
@@ -1202,6 +1247,8 @@ def _capabilities() -> str:
         "- Alert monitor: 'có alert gì không' → cảnh báo PSI/SEO/Ads/Clarity kèm Evidence/Confidence.\n"
         "- Chẩn đoán sụt giảm: 'tại sao clicks/traffic giảm' → trang nào kéo xuống + nguyên nhân khả dĩ.\n"
         "- Gợi ý cách sửa trang chậm: 'cách tăng tốc trang X' → hành động cụ thể theo LCP/CLS/TBT.\n"
+        "## Bộ lọc chung\n"
+        "- Hầu hết phân tích hỗ trợ nhiều keyword: 'url tutorial và product', 'trang /product, /tutorial', 'chỉ product trừ blog', 'campaign brand và competitor'. Mặc định OR; muốn AND thì nói 'phải chứa cả'.\n"
         "## Tìm & đọc web\n"
         "- Tìm thông tin NGOÀI dữ liệu nội bộ (tin mới, đối thủ, xu hướng, best practice): 'tìm trên mạng ...', 'tin mới nhất về ...'. Trả lời kèm trích nguồn.\n"
         "- Đọc/tóm tắt một URL cụ thể: dán link và nói 'đọc/tóm tắt trang này'.\n"
@@ -1229,7 +1276,7 @@ def _parse_range_vi(m: str) -> dict | None:
 
     from dateutil.relativedelta import relativedelta
 
-    today = date.today()
+    today = app_time.today()
     mm = re.search(r"(\d+)\s*tháng gần nhất", m)
     if mm:  # N tháng TRỌN VẸN trước tháng hiện tại
         n = int(mm.group(1))
@@ -1276,14 +1323,258 @@ def _parse_range_vi(m: str) -> dict | None:
 
 def _parse_url_contains(message: str) -> str | None:
     """Bắt từ khóa lọc URL: 'url chứa /tutorial', 'các trang /product', 'bài /blog'."""
+    spec = _parse_filter_spec(message, "url")
+    return (spec.get("include") or [None])[0]
+
+
+_PSI_RUN_CUES = ("chạy", "chay", "kiểm tra", "kiem tra", "check", "run", "trigger", "start",
+                 "đo", "do ", "scan", "quét", "quet", "crawl", "cào")
+_PSI_REPORT_CUES = ("báo cáo", "bao cao", "phân tích", "phan tich", "tổng hợp", "tong hop",
+                    "xem", "kết quả", "ket qua", "report", "review", "đánh giá", "danh gia")
+
+
+def _filter_norm(s: str) -> str:
+    import unicodedata
+
+    raw = unicodedata.normalize("NFD", s or "")
+    raw = "".join(ch for ch in raw if unicodedata.category(ch) != "Mn")
+    return raw.lower()
+
+
+_FILTER_STOP = {
+    "a", "an", "and", "or", "the", "va", "voi", "hoac", "hoặc", "hay", "cac", "các", "nhung", "những",
+    "nao", "nào", "co", "có", "chua", "chứa", "gom", "gồm", "chi", "chỉ", "loc", "lọc",
+    "cho", "phai", "phải", "ca", "cả",
+    "url", "urls", "trang", "page", "pages", "path", "duong", "dan", "đường", "dẫn",
+    "landing", "ldp", "campaign", "campaigns", "chien", "dich", "chiến", "dịch",
+    "pagespeed", "page-speed", "speed", "psi", "seo", "gsc", "ga4", "ads", "clarity",
+    "bao", "cao", "báo", "cáo", "phan", "tich", "phân", "tích", "tong", "hop", "tổng", "hợp",
+    "xem", "ket", "qua", "kết", "quả", "review", "report", "diem", "điểm", "score",
+    "chay", "chạy", "kiem", "tra", "kiểm", "đo", "do", "scan", "quet", "quét",
+    "thang", "tháng", "nam", "năm", "ngay", "ngày", "tuan", "tuần", "quy", "quý",
+    "gan", "nhat", "gần", "nhất", "vua", "roi", "vừa", "rồi", "nay", "nay",
+    "tu", "từ", "den", "đến", "toi", "tới", "hien", "tai", "hiện", "tại",
+    "nen", "lam", "gi", "nên", "làm", "gì", "uu", "tien", "ưu", "tiên",
+    "can", "cần", "viec", "việc", "cong", "công",
+    "alert", "alerts", "canh", "bao", "cảnh", "báo", "fix", "sua", "sửa",
+    "toi", "uu", "tối", "ưu", "traffic", "clicks", "views", "users", "impressions",
+    "google", "paid", "performance", "hieu", "hiệu", "suat", "suất", "hieu-qua", "hiệu-quả",
+    "quang", "quảng", "ad", "advertising",
+    "chi", "tieu", "tiêu", "cpa", "ctr", "ngan", "sach", "ngân", "sách",
+    "dau", "cuoi", "đầu", "cuối", "truoc", "sau", "trước", "sau",
+}
+
+
+def _filter_clean_term(term: str) -> str:
     import re
-    for pat in (r"(?:url|trang|bài|đường dẫn|path)\s*(?:nào\s*)?(?:có\s*)?chứa\s*[\"']?(/[\w\-/]+)",
-                r"chứa\s*[\"']?(/[\w\-/]+)",
-                r"(?:url|trang|bài|path)\s+(/[\w\-/]{2,})"):
-        mt = re.search(pat, message, re.I)
-        if mt:
-            return mt.group(1).rstrip("/")
-    return None
+
+    term = _filter_norm(term).strip().strip("/.,:;\"'()[]{}")
+    term = re.sub(r"^https?://[^/]+/?", "", term).strip("/")
+    term = re.sub(r"\s+", "-", term)
+    return term
+
+
+def _filter_add_term(out: list[str], seen: set[str], term: str):
+    term = _filter_clean_term(term)
+    if not term or term in seen:
+        return
+    if term in _FILTER_STOP or term.isdigit():
+        return
+    if len(term) < 2:
+        return
+    seen.add(term)
+    out.append(term)
+
+
+def _extract_filter_terms(phrase: str) -> list[str]:
+    import re
+
+    out: list[str] = []
+    seen: set[str] = set()
+
+    for url in re.findall(r"https?://[^\s'\"<>)]+", phrase or "", re.I):
+        _filter_add_term(out, seen, url)
+    for path in re.findall(r"/[\w\-/]+", phrase or ""):
+        _filter_add_term(out, seen, path)
+
+    norm = _filter_norm(phrase)
+    norm = re.sub(r"https?://\S+", " ", norm)
+    norm = re.sub(r"20\d{2}-\d{1,2}(?:-\d{1,2})?", " ", norm)
+    norm = re.sub(r"\b\d{1,2}/\d{1,2}(?:/\d{2,4})?\b", " ", norm)
+    for word in re.findall(r"[a-z0-9][a-z0-9_-]{1,}", norm):
+        _filter_add_term(out, seen, word)
+    return out[:10]
+
+
+def _parse_filter_spec(message: str, default_scope: str = "url") -> dict:
+    """Parse filter chung: include/exclude nhiều keyword, OR mặc định, ALL khi user nói rõ."""
+    import re
+
+    raw = message or ""
+    norm = _filter_norm(raw)
+    url_cue = any(k in norm for k in ("url", "trang", "page", "path", "landing", "ldp", "duong dan", "đường dẫn", "/"))
+    campaign_cue = any(k in norm for k in ("campaign", "chien dich", "chiến dịch"))
+    scope = "campaign" if campaign_cue and not url_cue else default_scope
+    match_mode = "all" if any(k in norm for k in ("phai chua ca", "phải chứa cả", "chua ca", "chứa cả", "match all", "tat ca keyword", "tất cả keyword")) else "any"
+
+    # Nếu không có dấu hiệu filter rõ ràng, chỉ lấy term khi message có path/url cụ thể.
+    has_filter_context = url_cue or campaign_cue or bool(re.search(r"https?://|/[\w\-/]+", raw))
+    if not has_filter_context:
+        return {"scope": scope, "include": [], "exclude": [], "match_mode": match_mode}
+
+    exc_split = re.split(r"\b(?:tru|trừ|ngoai tru|ngoại trừ|loai tru|loại trừ|khong gom|không gồm|exclude|except)\b", norm, maxsplit=1)
+    include_phrase = exc_split[0]
+    exclude_phrase = exc_split[1] if len(exc_split) > 1 else ""
+
+    # Ưu tiên phần sau cue filter để tránh nhặt nhầm động từ ở đầu câu.
+    cue_re = r"\b(?:url|urls|trang|page|pages|path|landing page|ldp|duong dan|campaign|campaigns|chien dich)\b"
+    parts = re.split(cue_re, include_phrase, maxsplit=1)
+    if len(parts) > 1:
+        include_phrase = parts[1]
+    include = _extract_filter_terms(include_phrase)
+    exclude = _extract_filter_terms(exclude_phrase)
+
+    return {"scope": scope, "include": include, "exclude": exclude, "match_mode": match_mode}
+
+
+def _merge_filter_terms(spec: dict, *, include=None, exclude=None, scope: str | None = None) -> dict:
+    out = {
+        "scope": scope or spec.get("scope") or "url",
+        "include": list(spec.get("include") or []),
+        "exclude": list(spec.get("exclude") or []),
+        "match_mode": spec.get("match_mode") or "any",
+    }
+    seen_i = set(out["include"])
+    seen_e = set(out["exclude"])
+    for term in include or []:
+        _filter_add_term(out["include"], seen_i, str(term))
+    for term in exclude or []:
+        _filter_add_term(out["exclude"], seen_e, str(term))
+    return out
+
+
+def _filter_spec_from_action(data: dict, message: str, default_scope: str = "url") -> dict:
+    raw = data.get("filter_spec") if isinstance(data, dict) else None
+    if isinstance(raw, dict):
+        spec = {
+            "scope": raw.get("scope") or default_scope,
+            "include": [],
+            "exclude": [],
+            "match_mode": raw.get("match_mode") or "any",
+        }
+        spec = _merge_filter_terms(spec, include=raw.get("include") or raw.get("url_terms") or raw.get("terms") or [],
+                                   exclude=raw.get("exclude") or raw.get("exclude_url_terms") or [])
+    else:
+        spec = _parse_filter_spec(message, default_scope)
+    if isinstance(data, dict):
+        extra = []
+        if data.get("url_contains"):
+            extra.append(data.get("url_contains"))
+        extra += data.get("url_terms") or []
+        spec = _merge_filter_terms(spec, include=extra)
+        if data.get("campaign_terms"):
+            spec = _merge_filter_terms(spec, include=data.get("campaign_terms") or [], scope="campaign")
+        if not _filter_active(spec) and data.get("action") in {
+            "query_results", "seo_query", "seo_range", "run_report", "ads_list", "ads_perf",
+            "ldp_perf", "clarity", "combined", "priority_fix", "action_plan",
+            "diagnose_drop", "fix_suggest", "alerts",
+        }:
+            spec = _merge_filter_terms(spec, include=_extract_filter_terms(message))
+    return spec
+
+
+def _filter_active(spec: dict) -> bool:
+    return bool((spec or {}).get("include") or (spec or {}).get("exclude"))
+
+
+def _filter_text_matches(text: str, spec: dict) -> bool:
+    hay = _filter_norm(text)
+    inc = [t for t in (spec.get("include") or []) if t]
+    exc = [t for t in (spec.get("exclude") or []) if t]
+    if exc and any(t in hay for t in exc):
+        return False
+    if not inc:
+        return True
+    if spec.get("match_mode") == "all":
+        return all(t in hay for t in inc)
+    return any(t in hay for t in inc)
+
+
+def _filter_desc(spec: dict, label: str | None = None) -> str:
+    if not _filter_active(spec):
+        return ""
+    label = label or ("campaign" if spec.get("scope") == "campaign" else "URL")
+    joiner = " và " if spec.get("match_mode") == "all" else " hoặc "
+    bits = []
+    if spec.get("include"):
+        bits.append(f"{label} chứa " + joiner.join(spec["include"]))
+    if spec.get("exclude"):
+        bits.append("trừ " + " hoặc ".join(spec["exclude"]))
+    return "; ".join(bits)
+
+
+def _filter_rows_by_text(rows: list, text_fn, spec: dict) -> list:
+    if not _filter_active(spec):
+        return rows
+    return [r for r in rows if _filter_text_matches(text_fn(r), spec)]
+
+
+def _filter_table_rows(headers: list, rows: list, spec: dict, *, fallback_idx: int = 1) -> list:
+    if not _filter_active(spec):
+        return rows
+    if spec.get("scope") == "campaign":
+        names = ("campaign", "name")
+    else:
+        names = ("url", "path", "page", "landing")
+    idx = next((i for i, h in enumerate(headers) if any(n in str(h).lower() for n in names)),
+               fallback_idx if len(headers) > fallback_idx else 0)
+    return _filter_rows_by_text(rows, lambda r: str(r[idx] if idx < len(r) else ""), spec)
+
+
+def _filter_dict_data(data: dict, fields: tuple[str, ...], spec: dict) -> dict:
+    if not _filter_active(spec):
+        return data
+    out = dict(data)
+    rows = data.get("rows") or []
+    out["rows"] = _filter_rows_by_text(rows, lambda r: " ".join(str(r.get(f, "")) for f in fields), spec)
+    return out
+
+
+def _filter_regex_for_seo(spec: dict) -> str:
+    import re
+
+    if not _filter_active(spec) or spec.get("scope") != "url":
+        return ""
+    inc = [re.escape(t) for t in spec.get("include") or []]
+    exc = [re.escape(t) for t in spec.get("exclude") or []]
+    parts = ["^"]
+    if exc:
+        parts.append(f"(?!.*(?:{'|'.join(exc)}))")
+    if inc:
+        if spec.get("match_mode") == "all":
+            parts.extend(f"(?=.*{t})" for t in inc)
+        else:
+            parts.append(f"(?=.*(?:{'|'.join(inc)}))")
+    parts.append(".*")
+    return "".join(parts)
+
+
+def _parse_psi_url_terms(message: str) -> list[str]:
+    """Backward-compatible wrapper cho PageSpeed URL terms."""
+    return _parse_filter_spec(message, "url").get("include") or []
+
+
+def _filter_psi_rows(headers: list, rows: list, terms: list[str] | dict) -> tuple[list, list[str]]:
+    if isinstance(terms, dict):
+        spec = terms
+    else:
+        spec = {"scope": "url", "include": [t.strip().strip("/").lower() for t in terms if str(t).strip()],
+                "exclude": [], "match_mode": "any"}
+    if not _filter_active(spec):
+        return rows, []
+    filtered = _filter_table_rows(headers, rows, spec, fallback_idx=1)
+    used = list(spec.get("include") or [])
+    return filtered, used
 
 
 def _all_keyword_intent(message: str) -> dict | None:
@@ -1332,9 +1623,15 @@ def _all_keyword_intent(message: str) -> dict | None:
         q = _re4.sub(r"(?i)(tìm trên mạng|tìm trên web|search web|google giúp|tra google|tra cứu trên mạng|lên mạng tìm|tìm giúp trên internet|giúp tôi|giúp đệ|cho tôi)", "", message).strip(" :,")
         return {"action": "web_search", "query": q or message}
     rng = _parse_range_vi(m)
-    if rng and any(k in m for k in ("seo", "traffic", "báo cáo", "clicks", "gsc", "ga4")):
+    rng_psi_context = any(k in m for k in ("pagespeed", "lcp", "cls", "fcp", "tbt", "inp", "web vitals", "score", "điểm"))
+    if rng and any(k in m for k in ("seo", "traffic", "báo cáo", "bao cao", "clicks", "gsc", "ga4")) and not rng_psi_context:
         uc = _parse_url_contains(message)
         return {**rng, **({"url_contains": uc} if uc else {})}
+    if any(k in m for k in ("landing page", "landing", "trang đích", "trang dich", "ldp")):
+        if rng:
+            return {"action": "ldp_perf", "start": rng["start"], "end": rng["end"]}
+        dm = _re2.search(r"(\d{1,2})\s*ngày", m)
+        return {"action": "ldp_perf", "days": int(dm.group(1)) if dm else 7}
     if any(k in m for k in ("ads", "campaign", "quảng cáo", "cpa", "chi tiêu", "spend", "ngân sách")):
         if (any(k in m for k in ("danh sách", "list", "những campaign", "campaign nào đang", "liệt kê"))
                 and not _health):
@@ -1346,7 +1643,7 @@ def _all_keyword_intent(message: str) -> dict | None:
             from datetime import date, timedelta
 
             from dateutil.relativedelta import relativedelta
-            mo, yr = int(tm.group(1)), int(tm.group(2) or datetime.now().year)
+            mo, yr = int(tm.group(1)), int(tm.group(2) or app_time.now().year)
             if 1 <= mo <= 12:
                 s = date(yr, mo, 1)
                 return {"action": "ads_perf", "start": s.isoformat(),
@@ -1355,6 +1652,14 @@ def _all_keyword_intent(message: str) -> dict | None:
         return {"action": "ads_perf", "days": int(dm.group(1)) if dm else 7}
     psiish = any(k in m for k in ("lcp", "cls", "fcp", "tbt", "inp", "ttfb", "score", "điểm",
                                   "pagespeed", "kiểm tra", "web vitals", "chậm", "nhanh"))
+    psi_run = any(k in m for k in _PSI_RUN_CUES)
+    psi_report = any(k in m for k in _PSI_REPORT_CUES)
+    if psiish and psi_report and not psi_run:
+        data = {"action": "query_results"}
+        terms = _parse_psi_url_terms(message)
+        if terms:
+            data["url_terms"] = terms
+        return data
     # "SEO/traffic ổn không, tình hình SEO thế nào" → phân tích số liệu SEO
     if _health and any(k in m for k in ("seo", "traffic", "clicks", "gsc", "ga4", "impression", "views")):
         return {"action": "seo_query"}
@@ -1362,7 +1667,7 @@ def _all_keyword_intent(message: str) -> dict | None:
     if _health and any(k in m for k in ("pagespeed", "web", "trang", "tốc độ")):
         return {"action": "query_results"}
     seoish = any(k in m for k in ("seo", "traffic", "clicks", "gsc", "ga4", "impression",
-                                  "báo cáo", "views", "users"))
+                                  "views", "users")) or (any(k in m for k in ("báo cáo", "bao cao")) and not psiish)
     kw_seo = _seo_keyword_intent(message)
     if kw_seo and kw_seo.get("action") == "query_data":
         kw_seo = {**kw_seo, "action": "seo_query"}
@@ -1373,7 +1678,7 @@ def _all_keyword_intent(message: str) -> dict | None:
         if tm:
             from datetime import date
             mo, yr = int(tm.group(1)), tm.group(2) and int(tm.group(2))
-            today = date.today()
+            today = app_time.today()
             if 1 <= mo <= 12:
                 if yr is None and mo > today.month:  # không rõ năm mà tháng chưa tới → hỏi lại
                     return {"action": "reply",
@@ -1386,8 +1691,12 @@ def _all_keyword_intent(message: str) -> dict | None:
                     return {"action": "query_results", "month": f"{yr}-{mo:02d}"}
                 return {"action": "run_check"}  # đúng tháng hiện tại
         # câu hỏi metric PSI nhưng _keyword_intent không bắt được → ép query_results
-        return kw_psi if kw_psi and kw_psi.get("action") != "run_check" or "chạy" in m or "kiểm tra" in m \
-            else {"action": "query_results"}
+        if kw_psi and kw_psi.get("action") != "run_check":
+            return kw_psi
+        if psi_run:
+            return {"action": "run_check"}
+        terms = _parse_psi_url_terms(message)
+        return {"action": "query_results", **({"url_terms": terms} if terms else {})}
     if seoish:
         return kw_seo or kw_psi
     return kw_psi or kw_seo
@@ -1534,6 +1843,11 @@ async def agent_chat_stream(req: ChatStreamRequest, request: Request = None):
             data = _validate_action(override)
             action = data.get("action", action)
             yield ev({"type": "step", "text": "↪️ Sửa intent bằng keyword an toàn"})
+        patched, param_changed = _keyword_param_patch(req.message, data, action)
+        if param_changed:
+            data = _validate_action(patched)
+            action = data.get("action", action)
+            yield ev({"type": "step", "text": "↪️ Sửa khoảng thời gian bằng keyword an toàn"})
         # Lưới an toàn: đang có đề xuất chờ xác nhận + user gõ 'ok/oke/chạy đi' → ép confirm (đừng hỏi lại hoài)
         if action != "confirm" and _looks_confirm(req.message) and (pend_range.get("start") or pend_op.get("data")):
             data = {"action": "confirm"}
@@ -1647,7 +1961,7 @@ async def agent_chat_stream(req: ChatStreamRequest, request: Request = None):
             yield ev({"type": "step", "text": f"🌐 Tìm web: {query}"})
             results = await asyncio.to_thread(web_search.search, query, 5)
             if not results:
-                yield ev({"type": "final", "text": "Đệ tìm web không ra kết quả (hoặc chưa bật được tìm kiếm). Đại ca thử từ khoá khác, hoặc kiểm tra cấu hình TAVILY_API_KEY nhé."})
+                yield ev({"type": "final", "text": "Đệ tìm web không ra kết quả sau khi thử vài biến thể query. Có thể web search đang bị chặn/timed out; Đại ca thử từ khoá cụ thể hơn hoặc kiểm tra TAVILY_API_KEY/network nhé."})
                 yield ev({"type": "done"})
                 return
             for r in results[:5]:
@@ -1720,27 +2034,36 @@ async def agent_chat_stream(req: ChatStreamRequest, request: Request = None):
 
         # ── Alert monitor hợp nhất: PSI + SEO + Ads + Clarity ──
         if action == "alerts":
+            spec = _filter_spec_from_action({**data, "action": action}, req.message, "url")
+            desc = _filter_desc(spec)
             yield ev({"type": "step", "text": "🚨 Đọc alert monitor PSI + SEO + Ads + Clarity..."})
             report = await asyncio.to_thread(_alert_report, 50)
+            report = _filter_alert_report(report, spec)
+            if desc:
+                yield ev({"type": "step", "text": f"🔎 Áp bộ lọc: {desc}"})
             yield ev({"type": "final", "text": _alerts_text(report)})
             yield ev({"type": "done"})
             return
 
         # ── Insight xuyên mảng: ưu tiên tối ưu / kế hoạch / chẩn đoán / gợi ý sửa ──
         if action in ("priority_fix", "action_plan", "diagnose_drop", "fix_suggest"):
+            spec = _filter_spec_from_action({**data, "action": action}, req.message, "url")
+            desc = _filter_desc(spec)
             yield ev({"type": "step", "text": "📊 Đọc & gộp dữ liệu PSI + SEO + Ads + Clarity..."})
             j = await asyncio.to_thread(_insight_join)
             opp_report = await asyncio.to_thread(_opportunity_report, 25)
             alert_report = await asyncio.to_thread(_alert_report, 20)
-            rows = j["rows"]
-            opps = opp_report.get("opportunities") or []
-            alerts = alert_report.get("alerts") or []
+            rows = _filter_rows_by_text(j["rows"], lambda r: r.get("path", ""), spec)
+            opps = _filter_rows_by_text(opp_report.get("opportunities") or [],
+                                        lambda o: " ".join([o.get("path", ""), " ".join(o.get("evidence") or [])]), spec)
+            alerts = _filter_alert_report(alert_report, spec).get("alerts") or []
             if not rows and not opps:
-                yield ev({"type": "final", "text": "Đệ chưa có đủ dữ liệu để phân tích — chạy PageSpeed/SEO và cấu hình Ads/Clarity nếu muốn score đa kênh nha Đại ca."})
+                msg = f"Không có dữ liệu khớp bộ lọc: {desc}." if desc else "Đệ chưa có đủ dữ liệu để phân tích — chạy PageSpeed/SEO và cấu hình Ads/Clarity nếu muốn score đa kênh nha Đại ca."
+                yield ev({"type": "final", "text": msg})
                 yield ev({"type": "done"})
                 return
             fr = lambda v: ("" if v == "" or v is None else str(v))
-            ctxhdr = f"(PSI lần chạy {j['run'] or '—'} · SEO tháng {j['month'] or '—'} · Ads/Clarity best-effort)"
+            ctxhdr = f"(PSI lần chạy {j['run'] or '—'} · SEO tháng {j['month'] or '—'} · Ads/Clarity best-effort" + (f" · {desc}" if desc else "") + ")"
             opp_tbl = "\n".join(
                 f"{o['path']} | score {o['score']} | sources {','.join(o.get('sources') or [])} | "
                 f"confidence {o.get('confidence')} | evidence {'; '.join((o.get('evidence') or [])[:4])}"
@@ -1829,7 +2152,15 @@ async def agent_chat_stream(req: ChatStreamRequest, request: Request = None):
                 yield ev({"type": "final", "text": "Chưa có dữ liệu PageSpeed nào — nói 'chạy kiểm tra ngay' trước nhé."})
                 yield ev({"type": "done"})
                 return
-            yield ev({"type": "step", "text": f"📊 Đọc {len(rows)} dòng từ PSI Sheet tab {tab}"})
+            spec = _filter_spec_from_action({**data, "action": action}, req.message, "url")
+            rows, used_terms = _filter_psi_rows(headers, rows, spec)
+            desc = _filter_desc(spec)
+            if _filter_active(spec) and not rows:
+                yield ev({"type": "final", "text": f"Không thấy dòng PageSpeed nào trong tab {tab} khớp bộ lọc: {desc}. Đại ca thử nhóm URL khác hoặc chạy check nếu danh sách mới vừa đổi."})
+                yield ev({"type": "done"})
+                return
+            flt = f" · {desc}" if desc else ""
+            yield ev({"type": "step", "text": f"📊 Đọc {len(rows)} dòng từ PSI Sheet tab {tab}{flt}"})
             yield ev({"type": "step", "text": f"🧠 Phân tích dữ liệu ({model})..."})
             extra = ("\nLƯU Ý: đây là dữ liệu ĐÃ ĐO trong tháng " + tab +
                      " (PageSpeed không đo lại quá khứ được). Kết thúc câu trả lời bằng đúng 1 câu mời theo tính cách: "
@@ -1845,6 +2176,15 @@ async def agent_chat_stream(req: ChatStreamRequest, request: Request = None):
                 yield ev({"type": "error", "text": "❌ Chưa cấu hình PSI_API_KEY / SHEET_ID."})
                 yield ev({"type": "done"})
                 return
+            spec = _filter_spec_from_action({**data, "action": action}, req.message, "url")
+            desc = _filter_desc(spec)
+            run_urls = runtime_config.current()["urls"]
+            if _filter_active(spec):
+                run_urls = _filter_rows_by_text(run_urls, lambda u: u, spec)
+                if not run_urls:
+                    yield ev({"type": "final", "text": f"Không có URL theo dõi nào khớp bộ lọc: {desc}. Đại ca vào Cấu hình kiểm tra danh sách URL nha."})
+                    yield ev({"type": "done"})
+                    return
             with _lock:
                 if _state["running"]:
                     yield ev({"type": "final", "text": "Đang có một lần kiểm tra chạy rồi — chờ xong đã nhé."})
@@ -1854,13 +2194,15 @@ async def agent_chat_stream(req: ChatStreamRequest, request: Request = None):
             ok = err_count = 0
             _DONE = object()
             try:
-                it = psi_checker.run_check_iter()
+                if desc:
+                    yield ev({"type": "step", "text": f"🔎 Chỉ chạy {len(run_urls)} URL khớp bộ lọc: {desc}"})
+                it = psi_checker.run_check_iter(run_urls)
                 while True:
                     item = await asyncio.to_thread(next, it, _DONE)
                     if item is _DONE:
                         break
                     e = item["event"]
-                    now = datetime.now().strftime("%H:%M:%S")
+                    now = app_time.time_label()
                     if e == "start":
                         yield ev({"type": "step", "text": f"[{now}] 🚀 Bắt đầu: {item['total']} lượt check → Sheet tab {item['tab']}"})
                     elif e == "check":
@@ -1885,13 +2227,15 @@ async def agent_chat_stream(req: ChatStreamRequest, request: Request = None):
                 yield ev({"type": "error", "text": f"❌ Lỗi khi chạy kiểm tra: {type(e).__name__}: {e}"})
             finally:
                 _state["running"] = False
-                _state["last_run"] = datetime.now().isoformat(timespec="seconds")
+                _state["last_run"] = app_time.iso_now()
             yield ev({"type": "done"})
             return
 
         # ── Ads: danh sách campaign ──
         if action == "ads_list":
             import ads_agent
+            spec = _filter_spec_from_action({**data, "action": action}, req.message, "campaign")
+            desc = _filter_desc(spec, "campaign")
 
             if not ads_agent.configured():
                 yield ev({"type": "error", "text": "❌ Chưa cấu hình Google Ads (GOOGLE_ADS_* trong env)."})
@@ -1900,10 +2244,13 @@ async def agent_chat_stream(req: ChatStreamRequest, request: Request = None):
             try:
                 camps = await asyncio.to_thread(lambda: _cached("ads:camps", 300, lambda: {"campaigns": ads_agent.list_campaigns()}))
             except Exception as e:  # noqa: BLE001
-                yield ev({"type": "error", "text": f"❌ Lỗi Google Ads: {type(e).__name__}: {e}"})
+                yield ev({"type": "error", "text": f"❌ Lỗi Google Ads: {_ads_exc_text(e)}"})
                 yield ev({"type": "done"})
                 return
             cl = camps.get("campaigns", [])
+            cl = _filter_rows_by_text(cl, lambda c: " ".join(str(c.get(k, "")) for k in ("name", "status", "channel")), spec)
+            if desc:
+                yield ev({"type": "step", "text": f"🔎 Áp bộ lọc: {desc}"})
             listing = "\n".join(f"• **{c['name']}** — {c['status']} ({c['channel']})" for c in cl)
             yield ev({"type": "final", "text": f"Đang có {len(cl)} campaign:\n{listing}" if cl else "Không thấy campaign nào trong tài khoản."})
             yield ev({"type": "done"})
@@ -1912,6 +2259,8 @@ async def agent_chat_stream(req: ChatStreamRequest, request: Request = None):
         # ── Ads: phân tích hiệu suất ──
         if action == "ads_perf":
             import ads_agent
+            spec = _filter_spec_from_action({**data, "action": action}, req.message, "campaign")
+            desc = _filter_desc(spec, "campaign")
 
             if not ads_agent.configured():
                 yield ev({"type": "error", "text": "❌ Chưa cấu hình Google Ads (GOOGLE_ADS_* trong env)."})
@@ -1929,15 +2278,19 @@ async def agent_chat_stream(req: ChatStreamRequest, request: Request = None):
                 key = f"ads:perf:{a_start}:{a_end}" if a_start else f"ads:perf:{days}"
                 perf = await asyncio.to_thread(lambda: _cached(key, 300, lambda: ads_agent.campaign_perf(days, a_start or None, a_end or None)))
             except Exception as e:  # noqa: BLE001
-                yield ev({"type": "error", "text": f"❌ Lỗi Google Ads: {type(e).__name__}: {e}"})
+                yield ev({"type": "error", "text": f"❌ Lỗi Google Ads: {_ads_exc_text(e)}"})
                 yield ev({"type": "done"})
                 return
+            if _filter_active(spec):
+                perf = _filter_dict_data(perf, ("name", "status"), spec)
             if not perf.get("rows"):
                 rng_txt = f"khoảng {a_start} → {a_end}" if a_start else f"{days} ngày gần nhất"
+                if desc:
+                    rng_txt += f" với bộ lọc {desc}"
                 yield ev({"type": "final", "text": f"Không có dữ liệu Ads trong {rng_txt} — Đại ca thử khoảng khác xem."})
                 yield ev({"type": "done"})
                 return
-            yield ev({"type": "step", "text": f"📊 {len(perf['rows'])} dòng ({perf['start']} → {perf['end']})"})
+            yield ev({"type": "step", "text": f"📊 {len(perf['rows'])} dòng ({perf['start']} → {perf['end']})" + (f" · {desc}" if desc else "")})
             yield ev({"type": "step", "text": f"🧠 Phân tích dữ liệu ({model})..."})
             async for chunk in stream_analysis(_ads_prompt(perf) + _proactive_suffix()):
                 yield chunk
@@ -1947,6 +2300,8 @@ async def agent_chat_stream(req: ChatStreamRequest, request: Request = None):
         # ── Ads: hiệu suất theo LANDING PAGE (read-only) ──
         if action == "ldp_perf":
             import ads_agent
+            spec = _filter_spec_from_action({**data, "action": action}, req.message, "url")
+            desc = _filter_desc(spec)
 
             if not ads_agent.configured():
                 yield ev({"type": "error", "text": "❌ Chưa cấu hình Google Ads (GOOGLE_ADS_* trong env)."})
@@ -1960,12 +2315,14 @@ async def agent_chat_stream(req: ChatStreamRequest, request: Request = None):
                 key = f"ads:ldp:{a_start}:{a_end}" if a_start else f"ads:ldp:{days}"
                 ldp = await asyncio.to_thread(lambda: _cached(key, 300, lambda: ads_agent.landing_page_perf(days, a_start or None, a_end or None)))
             except Exception as e:  # noqa: BLE001
-                yield ev({"type": "error", "text": f"❌ Lỗi Google Ads (LDP): {type(e).__name__}: {e}"})
+                yield ev({"type": "error", "text": f"❌ Lỗi Google Ads (LDP): {_ads_exc_text(e)}"})
                 yield ev({"type": "done"}); return
+            if _filter_active(spec):
+                ldp = _filter_dict_data(ldp, ("url", "base_url"), spec)
             if not ldp.get("rows"):
-                yield ev({"type": "final", "text": "Không có dữ liệu landing page trong khoảng này."})
+                yield ev({"type": "final", "text": "Không có dữ liệu landing page trong khoảng này" + (f" với bộ lọc {desc}." if desc else ".")})
                 yield ev({"type": "done"}); return
-            yield ev({"type": "step", "text": f"📄 {len(ldp['rows'])} landing page ({ldp['start']} → {ldp['end']})"})
+            yield ev({"type": "step", "text": f"📄 {len(ldp['rows'])} landing page ({ldp['start']} → {ldp['end']})" + (f" · {desc}" if desc else "")})
             yield ev({"type": "step", "text": f"🧠 Phân tích ({model})..."})
             async for chunk in stream_analysis(_ldp_prompt(ldp) + _proactive_suffix()):
                 yield chunk
@@ -1974,6 +2331,8 @@ async def agent_chat_stream(req: ChatStreamRequest, request: Request = None):
         # ── Microsoft Clarity: UX insights ──
         if action == "clarity":
             import clarity_agent
+            spec = _filter_spec_from_action({**data, "action": action}, req.message, "url")
+            desc = _filter_desc(spec)
 
             if not clarity_agent.configured():
                 yield ev({"type": "error", "text": "❌ Chưa cấu hình Microsoft Clarity (CLARITY_PROJECT_ID / CLARITY_API_TOKEN trong env)."})
@@ -1983,8 +2342,10 @@ async def agent_chat_stream(req: ChatStreamRequest, request: Request = None):
             if ins.get("error"):
                 yield ev({"type": "error", "text": f"❌ Clarity lỗi: {ins['error']}"})
                 yield ev({"type": "done"}); return
+            if desc:
+                yield ev({"type": "step", "text": f"🔎 Bộ lọc yêu cầu: {desc} (Clarity live insights có thể chỉ là project-level)"})
             yield ev({"type": "step", "text": f"🧠 Phân tích hành vi ({model})..."})
-            async for chunk in stream_analysis(_clarity_prompt(ins)):
+            async for chunk in stream_analysis(_clarity_prompt(ins, desc)):
                 yield chunk
             yield ev({"type": "done"}); return
 
@@ -1992,6 +2353,8 @@ async def agent_chat_stream(req: ChatStreamRequest, request: Request = None):
         if action == "combined":
             import ads_agent
             import clarity_agent
+            spec = _filter_spec_from_action({**data, "action": action}, req.message, "url")
+            desc = _filter_desc(spec)
 
             if not ads_agent.configured():
                 yield ev({"type": "error", "text": "❌ Chưa cấu hình Google Ads (GOOGLE_ADS_*)."})
@@ -2002,9 +2365,16 @@ async def agent_chat_stream(req: ChatStreamRequest, request: Request = None):
                 ads = await asyncio.to_thread(lambda: _cached(f"ads:perf:{days}", 300, lambda: ads_agent.campaign_perf(days)))
                 ldp = await asyncio.to_thread(lambda: _cached(f"ads:ldp:{days}", 300, lambda: ads_agent.landing_page_perf(days)))
             except Exception as e:  # noqa: BLE001
-                yield ev({"type": "error", "text": f"❌ Lỗi Google Ads: {type(e).__name__}: {e}"})
+                yield ev({"type": "error", "text": f"❌ Lỗi Google Ads: {_ads_exc_text(e)}"})
                 yield ev({"type": "done"}); return
+            if _filter_active(spec):
+                if spec.get("scope") == "campaign":
+                    ads = _filter_dict_data(ads, ("name", "status"), spec)
+                else:
+                    ldp = _filter_dict_data(ldp, ("url", "base_url"), spec)
             clarity = clarity_agent.insights_safe(3) if clarity_agent.configured() else {"error": "Clarity chưa cấu hình"}
+            if desc:
+                yield ev({"type": "step", "text": f"🔎 Áp bộ lọc: {desc}"})
             yield ev({"type": "step", "text": f"🧠 Phân tích user journey ({model})..."})
             async for chunk in stream_analysis(_combined_prompt(ads, ldp, clarity) + _proactive_suffix()):
                 yield chunk
@@ -2048,7 +2418,7 @@ async def agent_chat_stream(req: ChatStreamRequest, request: Request = None):
                 return
             if d0 > d1:
                 d0, d1 = d1, d0
-            today = _dt.now().date()
+            today = app_time.today()
             if d1 > today:
                 d1 = today
             days = (d1 - d0).days + 1
@@ -2058,13 +2428,15 @@ async def agent_chat_stream(req: ChatStreamRequest, request: Request = None):
                 return
             p1 = d0 - _td(days=1)
             p0 = p1 - _td(days=days - 1)
-            uc = str(data.get("url_contains") or "").strip() or _parse_url_contains(req.message) or ""
+            spec = _filter_spec_from_action({**data, "action": action}, req.message, "url")
+            desc = _filter_desc(spec)
+            uc = _filter_regex_for_seo(spec)
             pend_op.clear()    # hủy thao tác config đang chờ → 'ok' không lỡ chạy xóa URL/đổi lịch
             pend_range.clear()
             pend_range.update({"start": d0.isoformat(), "end": d1.isoformat(),
-                                   "url_contains": uc, "ts": time.time()})
-            flt_line = f"\n• **Lọc URL chứa**: `{uc}`" if uc else ""
-            yield ev({"type": "step", "text": f"📅 Đã xác định khoảng: {d0} → {d1} ({days} ngày)" + (f" · lọc '{uc}'" if uc else "")})
+                               "url_contains": uc, "filter_spec": spec, "ts": time.time()})
+            flt_line = f"\n• **Bộ lọc**: {desc}" if desc else ""
+            yield ev({"type": "step", "text": f"📅 Đã xác định khoảng: {d0} → {d1} ({days} ngày)" + (f" · {desc}" if desc else "")})
             yield ev({"type": "final",
                       "text": (f"Đệ xác định được rồi nha:\n• **Khoảng lấy data**: {d0} → {d1} ({days} ngày)\n"
                                f"• **Kỳ so sánh tự động**: {p0} → {p1}{flt_line}\n• **Tên sheet**: {d0}__{d1}\n\n"
@@ -2091,10 +2463,11 @@ async def agent_chat_stream(req: ChatStreamRequest, request: Request = None):
                 return
             rs, re_ = pend_range["start"], pend_range["end"]
             uc = pend_range.get("url_contains") or ""
+            desc = _filter_desc(pend_range.get("filter_spec") or {})
             pend_range.clear()
-            yield ev({"type": "step", "text": f"▶ Chạy báo cáo SEO khoảng {rs} → {re_}" + (f" · lọc '{uc}'" if uc else "")})
+            yield ev({"type": "step", "text": f"▶ Chạy báo cáo SEO khoảng {rs} → {re_}" + (f" · {desc}" if desc else "")})
             log_pos = len(_seo_state["log"])
-            t = threading.Thread(target=_run_seo_range_safe, args=(rs, re_, uc or None), daemon=True)
+            t = threading.Thread(target=_run_seo_range_safe, args=(rs, re_, uc or None, desc or None), daemon=True)
             t.start()
             while t.is_alive():
                 await asyncio.sleep(1)
@@ -2116,7 +2489,9 @@ async def agent_chat_stream(req: ChatStreamRequest, request: Request = None):
                 yield ev({"type": "final", "text": "Đang có báo cáo SEO chạy rồi — chờ xong đã nhé."})
                 yield ev({"type": "done"})
                 return
-            uc = str(data.get("url_contains") or "").strip() or _parse_url_contains(req.message) or ""
+            spec = _filter_spec_from_action({**data, "action": action}, req.message, "url")
+            desc = _filter_desc(spec)
+            uc = _filter_regex_for_seo(spec)
             jobs = []
             for it in (data.get("months") or [{"year": data.get("year"), "month": data.get("month")}]):
                 if isinstance(it, dict):
@@ -2132,9 +2507,9 @@ async def agent_chat_stream(req: ChatStreamRequest, request: Request = None):
             for idx, (y, m) in enumerate(jobs, 1):
                 label = f"{y}-{m:02d}" if y else "tháng vừa rồi"
                 if len(jobs) > 1:
-                    yield ev({"type": "step", "text": f"▶ [{idx}/{len(jobs)}] Chạy báo cáo {label}" + (f" · lọc '{uc}'" if uc else "")})
+                    yield ev({"type": "step", "text": f"▶ [{idx}/{len(jobs)}] Chạy báo cáo {label}" + (f" · {desc}" if desc else "")})
                 log_pos = len(_seo_state["log"])
-                t = threading.Thread(target=_run_seo_safe, args=(y, m, uc or None), daemon=True)
+                t = threading.Thread(target=_run_seo_safe, args=(y, m, uc or None, desc or None), daemon=True)
                 t.start()
                 while t.is_alive():
                     await asyncio.sleep(1)
@@ -2177,6 +2552,8 @@ async def agent_chat_stream(req: ChatStreamRequest, request: Request = None):
 
         # ── SEO: phân tích số liệu (1 tháng / nhiều tháng / xu hướng) ──
         if action == "seo_query":
+            spec = _filter_spec_from_action({**data, "action": action}, req.message, "url")
+            desc = _filter_desc(spec)
             months = data.get("months")
             if isinstance(months, str) and months != "all":
                 months = [months]
@@ -2201,10 +2578,17 @@ async def agent_chat_stream(req: ChatStreamRequest, request: Request = None):
                     yield ev({"type": "done"})
                     return
                 summaries = []
+                total_filtered_rows = 0
                 for t in sel:
                     headers, rows = data_map.get(t, ([], []))
+                    rows = _filter_table_rows(headers, rows, spec, fallback_idx=0)
+                    total_filtered_rows += len(rows)
                     summaries.append(_seo_month_summary(t, headers, rows))
-                    yield ev({"type": "step", "text": f"📊 {t}: {len(rows)} URL"})
+                    yield ev({"type": "step", "text": f"📊 {t}: {len(rows)} URL" + (f" · {desc}" if desc else "")})
+                if desc and total_filtered_rows == 0:
+                    yield ev({"type": "final", "text": f"Không thấy dữ liệu SEO khớp bộ lọc: {desc}."})
+                    yield ev({"type": "done"})
+                    return
                 yield ev({"type": "step", "text": f"🧠 Phân tích xu hướng {len(summaries)} tháng ({model})..."})
                 async for chunk in stream_analysis(_seo_trend_prompt(summaries) + _proactive_suffix()):
                     yield chunk
@@ -2220,7 +2604,12 @@ async def agent_chat_stream(req: ChatStreamRequest, request: Request = None):
                 yield ev({"type": "final", "text": "Chưa có báo cáo SEO nào — nói 'chạy báo cáo SEO' trước nhé."})
                 yield ev({"type": "done"})
                 return
-            yield ev({"type": "step", "text": f"📊 Đọc {len(rows)} dòng từ SEO Sheet tab {tab}"})
+            rows = _filter_table_rows(headers, rows, spec, fallback_idx=0)
+            if _filter_active(spec) and not rows:
+                yield ev({"type": "final", "text": f"Không thấy dòng SEO nào trong tab {tab} khớp bộ lọc: {desc}."})
+                yield ev({"type": "done"})
+                return
+            yield ev({"type": "step", "text": f"📊 Đọc {len(rows)} dòng từ SEO Sheet tab {tab}" + (f" · {desc}" if desc else "")})
             yield ev({"type": "step", "text": f"🧠 Phân tích dữ liệu ({model})..."})
             async for chunk in stream_analysis(
                 _seo_results_prompt(tab, headers, rows) + _proactive_suffix(),
@@ -2265,7 +2654,7 @@ def _range_from_text(text: str) -> dict | None:
     from dateutil.relativedelta import relativedelta
 
     m = text.lower()
-    today = date.today()
+    today = app_time.today()
     # "từ d/m(/y) đến d/m(/y)"
     dm = re.search(r"từ\s*(\d{1,2})[/\-](\d{1,2})(?:[/\-](\d{4}))?\s*(?:đến|tới|->|→)\s*(\d{1,2})[/\-](\d{1,2})(?:[/\-](\d{4}))?", m)
     if dm:
@@ -2498,17 +2887,17 @@ def memory_records(user_id: str):
 # ── SEO endpoints ─────────────────────────────────────────────────────────────
 
 
-def _seo_token_health() -> dict:
+def _seo_auth_health() -> dict:
     import seo_agent
 
-    present = bool(os.getenv("SEO_TOKEN_JSON") or os.path.exists(seo_agent.TOKEN_FILE))
+    present = seo_agent.auth_config_present()
     if not present:
-        return {"token_present": False, "token_usable": False, "token_error": ""}
+        return {"auth_configured": False, "auth_usable": False, "auth_error": "", "auth_source": "", "auth_mode": ""}
     try:
-        seo_agent.get_creds()
-        return {"token_present": True, "token_usable": True, "token_error": ""}
+        status = seo_agent.auth_status()
+        return {"auth_configured": True, "auth_usable": True, "auth_error": "", **status}
     except Exception as e:  # noqa: BLE001
-        return {"token_present": True, "token_usable": False, "token_error": _seo_exc_text(e)}
+        return {"auth_configured": True, "auth_usable": False, "auth_error": _seo_exc_text(e), "auth_source": "", "auth_mode": ""}
 
 
 @app.get("/api/seo/config")
@@ -2516,15 +2905,14 @@ def seo_config():
     import seo_agent
 
     cfg = runtime_config.current()
-    token_health = _seo_token_health()
+    auth_health = _seo_auth_health()
     return {
         "site": seo_agent.SITE_URL,
         "ga4_property": seo_agent.GA4_PROPERTY_ID,
         "sheet_url": f"https://docs.google.com/spreadsheets/d/{seo_agent.SEO_SHEET_ID}",
         "schedule": f"ngày {cfg.get('seo_run_day_of_month', 8)} hàng tháng lúc {cfg.get('seo_run_time', '08:00')}",
         "tracked_urls": cfg.get("seo_tracked_urls") or "tất cả",
-        "token_configured": bool(token_health["token_usable"]),
-        **token_health,
+        **auth_health,
     }
 
 
@@ -2852,7 +3240,7 @@ def _ads_latest_by_path(days: int = 14) -> tuple[dict, dict]:
     try:
         perf = _cached(f"ads:ldp:{days}", 300, lambda: ads_agent.landing_page_perf(days))
     except Exception as e:  # noqa: BLE001
-        return {}, {"configured": True, "error": f"{type(e).__name__}: {e}"}
+        return {}, {"configured": True, "error": _ads_exc_text(e)}
     out: dict = {}
     for r in perf.get("rows") or []:
         p = _path_only(r.get("base_url") or r.get("url") or "")
@@ -2878,7 +3266,7 @@ def _ads_campaign_alerts(days: int = 7) -> list[dict]:
 
     if not ads_agent.configured():
         return []
-    today = date.today()
+    today = app_time.today()
     cur_start, cur_end = today - timedelta(days=days), today - timedelta(days=1)
     prev_start, prev_end = today - timedelta(days=days * 2), today - timedelta(days=days + 1)
     try:
@@ -3061,6 +3449,24 @@ def _alert_report(limit: int = 50) -> dict:
             "run": opp.get("run"), "month": opp.get("month")}
 
 
+def _filter_alert_report(report: dict, spec: dict) -> dict:
+    if not _filter_active(spec):
+        return report
+    out = dict(report)
+    out["alerts"] = _filter_rows_by_text(
+        report.get("alerts") or [],
+        lambda a: " ".join([str(a.get("text", "")), str(a.get("source", "")),
+                            " ".join(str(x) for x in (a.get("evidence") or []))]),
+        spec,
+    )
+    out["opportunities"] = _filter_rows_by_text(
+        report.get("opportunities") or [],
+        lambda o: " ".join([str(o.get("path", "")), " ".join(str(x) for x in (o.get("evidence") or []))]),
+        spec,
+    )
+    return out
+
+
 def _alerts_text(report: dict, max_items: int = 8) -> str:
     alerts = report.get("alerts") or []
     if not alerts:
@@ -3087,14 +3493,14 @@ def _seo_keyword_intent(message: str) -> dict | None:
     mm = re.search(r"(20\d{2})-(\d{1,2})", m)
     if mm:
         month = f"{mm.group(1)}-{int(mm.group(2)):02d}"
-    if any(k in m for k in ("chạy", "run", "tạo báo cáo", "lấy báo cáo", "report")):
+    if any(k in m for k in ("chạy", "run", "tạo báo cáo", "lấy báo cáo", "báo cáo", "bao cao", "report")):
         # nhiều tháng: "chạy tháng 1, 2, 3 năm nay"
         seg = re.search(r"tháng\s+([\d\s,và]+)", m)
         if seg:
             nums = [int(n) for n in re.findall(r"\b(1[0-2]|[1-9])\b", seg.group(1))]
             if len(nums) > 1:
                 ym = re.search(r"\b(20\d{2})\b", m)
-                year = int(ym.group(1)) if ym else datetime.now().year
+                year = int(ym.group(1)) if ym else app_time.now().year
                 return {"action": "run_report",
                         "months": [{"year": year, "month": n} for n in dict.fromkeys(nums)]}
         if mm:
@@ -3628,7 +4034,7 @@ async def chat_stream(req: ChatStreamRequest, request: Request = None):
                 if item is _DONE:
                     break
                 e = item["event"]
-                now = datetime.now().strftime("%H:%M:%S")
+                now = app_time.time_label()
                 if e == "start":
                     yield ev({"type": "step",
                               "text": f"[{now}] 🚀 Bắt đầu: {item['total']} lượt check → Sheet tab {item['tab']}"})
@@ -3658,7 +4064,7 @@ async def chat_stream(req: ChatStreamRequest, request: Request = None):
             yield ev({"type": "error", "text": f"❌ Lỗi khi chạy kiểm tra: {type(e).__name__}: {e}"})
         finally:
             _state["running"] = False
-            _state["last_run"] = datetime.now().isoformat(timespec="seconds")
+            _state["last_run"] = app_time.iso_now()
         yield ev({"type": "done"})
 
     return StreamingResponse(gen(), media_type="text/event-stream",

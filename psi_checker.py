@@ -10,7 +10,8 @@ import schedule
 import logging
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import datetime
+
+import app_time
 
 WORKERS = int(os.getenv("PSI_WORKERS", "3"))  # số luồng check song song
 _rate_lock = threading.Lock()
@@ -298,7 +299,7 @@ def parse_result(data: dict, url: str, strategy: str, timestamp: str) -> list:
 
 # ── Main job ──────────────────────────────────────────────────────────────────
 
-def run_check_iter():
+def run_check_iter(urls: list[str] | None = None):
     """Generator: yield tiến trình từng bước (dùng cho streaming real-time).
 
     Events: {"event":"start","total","tab"} → {"event":"check","i","total","url","strategy","score"}*
@@ -308,14 +309,14 @@ def run_check_iter():
     import runtime_config
 
     cfg = runtime_config.current()
-    urls, strategies, delay = cfg["urls"], cfg["strategies"], cfg["request_delay"]
+    urls, strategies, delay = (urls or cfg["urls"]), cfg["strategies"], cfg["request_delay"]
     total = len(urls) * len(strategies)
 
     log.info("=" * 60)
     log.info(f"Bắt đầu kiểm tra PSI — {len(urls)} URL × {len(strategies)} strategy")
     log.info("=" * 60)
 
-    now = datetime.now()
+    now = app_time.now()
     tab_name = now.strftime("%Y-%m")   # ví dụ: "2026-06"
     timestamp = now.strftime("%Y-%m-%d %H:%M:%S")
 
@@ -370,7 +371,7 @@ def run_check():
 
 def _monthly_job():
     """Wrapper: chỉ thực sự chạy nếu hôm nay đúng ngày trong tháng đã cấu hình."""
-    if datetime.now().day == SCHEDULE_DAY_OF_MONTH:
+    if app_time.today().day == SCHEDULE_DAY_OF_MONTH:
         run_check()
 
 

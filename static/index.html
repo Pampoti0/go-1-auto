@@ -2587,8 +2587,8 @@ function App(){
     }catch(e){setMeta('Không kết nối được server')}
     try{
       const c=await(await fetch('/api/seo/config')).json();
-      const tokenNote=c.token_usable?'':(c.token_present?' · ⚠️ token lỗi':' · ⚠️ thiếu token');
-      setSeoMeta(`${c.site} · GA4 ${c.ga4_property} · lịch ${c.schedule}${tokenNote}`);
+      const authNote=c.auth_usable?'':(c.auth_configured?' · ⚠️ SEO auth lỗi':' · ⚠️ thiếu service account');
+      setSeoMeta(`${c.site} · GA4 ${c.ga4_property} · lịch ${c.schedule}${authNote}`);
       if(c.sheet_url)setSeoSheet(c.sheet_url);
     }catch(e){}
   })()},[]);

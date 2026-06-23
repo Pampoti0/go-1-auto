@@ -6,31 +6,112 @@ Credentials qua env (GOOGLE_ADS_*) — TUYỆT ĐỐI không hardcode vào code.
 
 import logging
 import os
+from dataclasses import dataclass
 from urllib.parse import urlparse
+
+import app_time
 
 log = logging.getLogger("ads_agent")
 
-DEV_TOKEN = os.getenv("GOOGLE_ADS_DEVELOPER_TOKEN", "")
-CLIENT_ID = os.getenv("GOOGLE_ADS_CLIENT_ID", "")
-CLIENT_SECRET = os.getenv("GOOGLE_ADS_CLIENT_SECRET", "")
-REFRESH_TOKEN = os.getenv("GOOGLE_ADS_REFRESH_TOKEN", "")
-LOGIN_CUSTOMER_ID = os.getenv("GOOGLE_ADS_LOGIN_CUSTOMER_ID", "")  # MCC
-CUSTOMER_ID = os.getenv("GOOGLE_ADS_CUSTOMER_ID", "") or LOGIN_CUSTOMER_ID
+ADS_ENV_FILE = os.getenv("ADS_ENV_FILE", ".env")
+
+
+class AdsAuthError(RuntimeError):
+    """Raised when Google Ads OAuth refresh token is missing, revoked, or unusable."""
+
+
+@dataclass(frozen=True)
+class AdsSettings:
+    developer_token: str
+    client_id: str
+    client_secret: str
+    refresh_token: str
+    login_customer_id: str
+    customer_id: str
+
+    @property
+    def cache_key(self) -> tuple[str, ...]:
+        return (
+            self.developer_token,
+            self.client_id,
+            self.client_secret,
+            self.refresh_token,
+            self.login_customer_id,
+            self.customer_id,
+        )
+
+
+def _reload_env() -> None:
+    if os.getenv("ADS_RELOAD_ENV", "true").lower() != "true":
+        return
+    try:
+        from dotenv import load_dotenv
+
+        load_dotenv(os.getenv("ADS_ENV_FILE", ADS_ENV_FILE), override=True)
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def _settings() -> AdsSettings:
+    _reload_env()
+    login_customer_id = os.getenv("GOOGLE_ADS_LOGIN_CUSTOMER_ID", "")
+    return AdsSettings(
+        developer_token=os.getenv("GOOGLE_ADS_DEVELOPER_TOKEN", ""),
+        client_id=os.getenv("GOOGLE_ADS_CLIENT_ID", ""),
+        client_secret=os.getenv("GOOGLE_ADS_CLIENT_SECRET", ""),
+        refresh_token=os.getenv("GOOGLE_ADS_REFRESH_TOKEN", ""),
+        login_customer_id=login_customer_id,
+        customer_id=os.getenv("GOOGLE_ADS_CUSTOMER_ID", "") or login_customer_id,
+    )
+
+
+def _reauth_message(reason: str) -> str:
+    return (
+        f"{reason} Tạo lại Google Ads refresh token bằng: "
+        "python generate_ads_token.py --env-file .env. "
+        "Local server sẽ tự reload .env ở request kế tiếp; nếu deploy AgentBase, "
+        "cập nhật env GOOGLE_ADS_REFRESH_TOKEN rồi restart runtime."
+    )
+
+
+def _is_auth_error(exc: Exception) -> bool:
+    text = f"{type(exc).__name__}: {exc}".lower()
+    return (
+        "invalid_grant" in text
+        or "token has been expired or revoked" in text
+        or "getting metadata from plugin failed" in text
+    )
+
+
+def ads_error_text(exc: Exception) -> str:
+    if isinstance(exc, AdsAuthError) or _is_auth_error(exc):
+        return _reauth_message("Google Ads OAuth refresh token đã hết hạn/bị revoke (invalid_grant).")
+    return f"{type(exc).__name__}: {exc}"
 
 
 def configured() -> bool:
-    return all([DEV_TOKEN, CLIENT_ID, CLIENT_SECRET, REFRESH_TOKEN, LOGIN_CUSTOMER_ID, CUSTOMER_ID])
+    cfg = _settings()
+    return all([
+        cfg.developer_token,
+        cfg.client_id,
+        cfg.client_secret,
+        cfg.refresh_token,
+        cfg.login_customer_id,
+        cfg.customer_id,
+    ])
 
 
 _svc_cache = None
+_svc_key = None
 _svc_lock = None
 
 
 def _service():
     """Client Google Ads được cache module-level — init 1 lần (đổi token + dựng
     gRPC channel mất ~1-2s), các call sau dùng lại nên nhanh hơn hẳn."""
-    global _svc_cache, _svc_lock
-    if _svc_cache is not None:
+    global _svc_cache, _svc_key, _svc_lock
+    cfg = _settings()
+    if _svc_cache is not None and _svc_key == cfg.cache_key:
         return _svc_cache
     if not configured():
         raise RuntimeError("Thiếu env Google Ads (GOOGLE_ADS_*) — xem .env.example.")
@@ -39,18 +120,19 @@ def _service():
     if _svc_lock is None:
         _svc_lock = threading.Lock()
     with _svc_lock:
-        if _svc_cache is None:
+        if _svc_cache is None or _svc_key != cfg.cache_key:
             from google.ads.googleads.client import GoogleAdsClient
 
             client = GoogleAdsClient.load_from_dict({
-                "developer_token": DEV_TOKEN,
-                "client_id": CLIENT_ID,
-                "client_secret": CLIENT_SECRET,
-                "refresh_token": REFRESH_TOKEN,
-                "login_customer_id": LOGIN_CUSTOMER_ID,
+                "developer_token": cfg.developer_token,
+                "client_id": cfg.client_id,
+                "client_secret": cfg.client_secret,
+                "refresh_token": cfg.refresh_token,
+                "login_customer_id": cfg.login_customer_id,
                 "use_proto_plus": True,
             })
             _svc_cache = client.get_service("GoogleAdsService")
+            _svc_key = cfg.cache_key
             log.info("Google Ads client khởi tạo xong (cached)")
     return _svc_cache
 
@@ -66,8 +148,11 @@ def warmup():
 
 def _reset():
     """Bỏ client đang cache — gRPC channel idle lâu có thể bị server ngắt."""
-    global _svc_cache
+    global _svc_cache, _svc_key, _client_cache, _client_key
     _svc_cache = None
+    _svc_key = None
+    _client_cache = None
+    _client_key = None
 
 
 _TRANSIENT = ("unavailable", "timed out", "timeout", "stream removed",
@@ -79,8 +164,11 @@ def _search(query: str) -> list:
     for attempt in (1, 2):
         try:
             svc = _service()
-            return list(svc.search(customer_id=CUSTOMER_ID, query=query))
+            return list(svc.search(customer_id=_settings().customer_id, query=query))
         except Exception as e:  # noqa: BLE001
+            if _is_auth_error(e):
+                _reset()
+                raise AdsAuthError(ads_error_text(e)) from e
             if attempt == 1 and any(k in str(e).lower() for k in _TRANSIENT):
                 log.warning(f"Ads kết nối hỏng ({type(e).__name__}) — làm mới client, thử lại...")
                 _reset()
@@ -107,22 +195,24 @@ def campaign_perf(days: int = 7, start: str | None = None, end: str | None = Non
     Mặc định N ngày gần nhất (trừ hôm nay); truyền start/end (YYYY-MM-DD) để lọc
     khoảng bất kỳ — validate bằng strptime (chặn injection), tối đa 366 ngày.
     """
-    from datetime import date, datetime, timedelta
+    from datetime import datetime, timedelta
 
     if start and end:
         d0 = datetime.strptime(start, "%Y-%m-%d").date()
         d1 = datetime.strptime(end, "%Y-%m-%d").date()
         if d0 > d1:
             d0, d1 = d1, d0
-        if d1 > date.today():
-            d1 = date.today()
+        today = app_time.today()
+        if d1 > today:
+            d1 = today
         if (d1 - d0).days + 1 > 366:
             raise RuntimeError(f"Khoảng quá dài ({(d1 - d0).days + 1} ngày) — tối đa 366 ngày.")
         start, end = d0.isoformat(), d1.isoformat()
     else:
         days = max(1, min(int(days or 7), 90))
-        start = (date.today() - timedelta(days=days)).strftime("%Y-%m-%d")
-        end = (date.today() - timedelta(days=1)).strftime("%Y-%m-%d")
+        today = app_time.today()
+        start = (today - timedelta(days=days)).strftime("%Y-%m-%d")
+        end = (today - timedelta(days=1)).strftime("%Y-%m-%d")
     q = f"""
         SELECT campaign.id, campaign.name, campaign.status, segments.date,
                metrics.impressions, metrics.clicks, metrics.ctr,
@@ -155,22 +245,24 @@ def landing_page_perf(days: int = 7, start: str | None = None, end: str | None =
 
     Account-wide (mọi campaign). Ngày: mặc định N ngày gần nhất, hoặc start/end (YYYY-MM-DD).
     """
-    from datetime import date, datetime, timedelta
+    from datetime import datetime, timedelta
 
     if start and end:
         d0 = datetime.strptime(start, "%Y-%m-%d").date()
         d1 = datetime.strptime(end, "%Y-%m-%d").date()
         if d0 > d1:
             d0, d1 = d1, d0
-        if d1 > date.today():
-            d1 = date.today()
+        today = app_time.today()
+        if d1 > today:
+            d1 = today
         if (d1 - d0).days + 1 > 366:
             raise RuntimeError(f"Khoảng quá dài ({(d1 - d0).days + 1} ngày) — tối đa 366 ngày.")
         start, end = d0.isoformat(), d1.isoformat()
     else:
         days = max(1, min(int(days or 7), 90))
-        start = (date.today() - timedelta(days=days)).strftime("%Y-%m-%d")
-        end = (date.today() - timedelta(days=1)).strftime("%Y-%m-%d")
+        today = app_time.today()
+        start = (today - timedelta(days=days)).strftime("%Y-%m-%d")
+        end = (today - timedelta(days=1)).strftime("%Y-%m-%d")
     q = f"""
         SELECT landing_page_view.unexpanded_final_url,
                metrics.impressions, metrics.clicks, metrics.ctr,
@@ -213,21 +305,28 @@ def landing_page_perf(days: int = 7, start: str | None = None, end: str | None =
 # ── GHI: tạo campaign (luôn PAUSED — không tiêu tiền tới khi bật tay) ──────────
 
 _client_cache = None
+_client_key = None
 
 
 def _client():
     """GoogleAdsClient (cache) cho thao tác GHI — khác _service() (chỉ GoogleAdsService)."""
-    global _client_cache
-    if _client_cache is not None:
+    global _client_cache, _client_key
+    cfg = _settings()
+    if _client_cache is not None and _client_key == cfg.cache_key:
         return _client_cache
     if not configured():
         raise RuntimeError("Thiếu env Google Ads (GOOGLE_ADS_*).")
     from google.ads.googleads.client import GoogleAdsClient
 
     _client_cache = GoogleAdsClient.load_from_dict({
-        "developer_token": DEV_TOKEN, "client_id": CLIENT_ID, "client_secret": CLIENT_SECRET,
-        "refresh_token": REFRESH_TOKEN, "login_customer_id": LOGIN_CUSTOMER_ID, "use_proto_plus": True,
+        "developer_token": cfg.developer_token,
+        "client_id": cfg.client_id,
+        "client_secret": cfg.client_secret,
+        "refresh_token": cfg.refresh_token,
+        "login_customer_id": cfg.login_customer_id,
+        "use_proto_plus": True,
     })
+    _client_key = cfg.cache_key
     return _client_cache
 
 
@@ -289,7 +388,7 @@ def create_campaign(name: str, budget_vnd: int = 100_000, final_url: str | None 
     import uuid
 
     client = _client()
-    cust = CUSTOMER_ID
+    cust = _settings().customer_id
     name = (name or f"DeCho_Campaign_{uuid.uuid4().hex[:6]}").strip()[:120]
     final_url = (final_url or "https://greennode.ai/product/cpu-instances").strip()
     _validate_campaign_inputs(int(budget_vnd), final_url)

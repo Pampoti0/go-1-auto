@@ -2,8 +2,10 @@
 .env
 service_account.json
 token.json
+ads_token.json
 oauth_credentials.json
 client_secret.json
+google_ads_client_secret.json
 decho-sitemap-wireframe.docx
 
 # Skills / tool config

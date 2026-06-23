@@ -3,14 +3,23 @@
 Kéo dữ liệu Google Search Console + GA4 theo tháng, so sánh với tháng trước,
 ghi báo cáo (kèm tô màu % tăng/giảm) vào Google Sheet.
 
-Config qua env (xem .env.example). Auth: OAuth user token —
-SEO_TOKEN_JSON (nội dung JSON, dùng khi deploy) hoặc file token.json (local).
+Config qua env (xem .env.example). Auth dùng service account:
+SEO_SERVICE_ACCOUNT_JSON/SERVICE_ACCOUNT_JSON (deploy) hoặc service_account.json (local).
 CLI: python seo_agent.py [--month YYYY-MM]
 """
 
 import json
 import logging
 import os
+
+import app_time
+
+try:  # tự nạp .env khi chạy local/CLI; deploy vẫn dùng env runtime
+    from dotenv import load_dotenv
+
+    load_dotenv()
+except ImportError:
+    pass
 
 log = logging.getLogger("seo_agent")
 
@@ -23,7 +32,12 @@ ROW_LIMIT = int(os.getenv("SEO_ROW_LIMIT", "5000"))
 RUN_DAY_OF_MONTH = int(os.getenv("SEO_RUN_DAY_OF_MONTH", "8"))  # 1–28
 RUN_TIME = os.getenv("SEO_RUN_TIME", "08:00")
 
-TOKEN_FILE = os.getenv("SEO_TOKEN_FILE", "token.json")
+SEO_SERVICE_ACCOUNT_FILE = (
+    os.getenv("SEO_SERVICE_ACCOUNT_FILE")
+    or os.getenv("SERVICE_ACCOUNT_FILE")
+    or "service_account.json"
+)
+SEO_SERVICE_ACCOUNT_JSON = os.getenv("SEO_SERVICE_ACCOUNT_JSON") or os.getenv("SERVICE_ACCOUNT_JSON", "")
 SCOPES = [
     "https://www.googleapis.com/auth/webmasters.readonly",
     "https://www.googleapis.com/auth/analytics.readonly",
@@ -32,59 +46,66 @@ SCOPES = [
 
 
 class SeoAuthError(RuntimeError):
-    """Raised when the SEO OAuth user token is missing, revoked, or cannot refresh."""
+    """Raised when SEO credentials are missing, revoked, or cannot be used."""
 
 
-def _reauth_message(reason: str, source: str = "unknown") -> str:
-    hint = (
-        "Tạo lại token SEO bằng: python generate_seo_token.py --token token.json "
-        "(hoặc thêm --client-secrets client_secret.json nếu chưa có token cũ)."
+def _service_account_file() -> str:
+    return (
+        os.getenv("SEO_SERVICE_ACCOUNT_FILE")
+        or os.getenv("SERVICE_ACCOUNT_FILE")
+        or SEO_SERVICE_ACCOUNT_FILE
     )
-    if source == "file":
-        hint += " Server local sẽ đọc token.json mới ở lần gọi SEO kế tiếp."
-    elif source == "env":
-        hint += " Nếu deploy AgentBase, cập nhật lại env SEO_TOKEN_JSON bằng nội dung token.json mới và restart server."
-    return f"{reason} {hint}"
+
+
+def _service_account_json() -> str:
+    return os.getenv("SEO_SERVICE_ACCOUNT_JSON") or os.getenv("SERVICE_ACCOUNT_JSON", "") or SEO_SERVICE_ACCOUNT_JSON
+
+
+def _service_account_available() -> bool:
+    return bool(_service_account_json() or os.path.exists(_service_account_file()))
+
+
+def _load_service_account_creds():
+    from google.oauth2 import service_account
+
+    raw = _service_account_json()
+    if raw:
+        try:
+            return service_account.Credentials.from_service_account_info(json.loads(raw), scopes=SCOPES), "service_account_env"
+        except Exception as e:  # noqa: BLE001
+            raise SeoAuthError(f"SEO_SERVICE_ACCOUNT_JSON/SERVICE_ACCOUNT_JSON không hợp lệ ({type(e).__name__}).") from e
+
+    path = _service_account_file()
+    if os.path.exists(path):
+        try:
+            return service_account.Credentials.from_service_account_file(path, scopes=SCOPES), "service_account_file"
+        except Exception as e:  # noqa: BLE001
+            raise SeoAuthError(f"Không đọc được service account SEO từ {path} ({type(e).__name__}).") from e
+
+    raise SeoAuthError(
+        "Thiếu service account cho SEO: đặt SERVICE_ACCOUNT_JSON/SEO_SERVICE_ACCOUNT_JSON "
+        "hoặc SERVICE_ACCOUNT_FILE/SEO_SERVICE_ACCOUNT_FILE trỏ tới service_account.json. "
+        "Nhớ share service account vào Search Console property, GA4 property và SEO Sheet."
+    )
+
+
+def auth_config_present() -> bool:
+    return _service_account_available()
+
+
+def auth_status() -> dict:
+    creds, source = _load_service_account_creds()
+    return {
+        "auth_mode": "service_account",
+        "auth_source": source,
+        "service_account": True,
+        "expiry": creds.expiry.isoformat() if getattr(creds, "expiry", None) else "",
+    }
 
 
 def get_creds():
-    """OAuth user credentials: file token.json (local) hoặc env SEO_TOKEN_JSON (deploy)."""
-    from google.auth.transport.requests import Request
-    from google.auth.exceptions import RefreshError
-    from google.oauth2.credentials import Credentials
-
-    token_json = os.getenv("SEO_TOKEN_JSON", "")
-    source = "unknown"
-    # Local mode: prefer token.json when present, even if .env has SEO_TOKEN_JSON.
-    # This lets a freshly generated local token take effect without editing .env.
-    if os.path.exists(TOKEN_FILE):
-        creds = Credentials.from_authorized_user_file(TOKEN_FILE, SCOPES)
-        source = "file"
-    elif token_json:
-        try:
-            creds = Credentials.from_authorized_user_info(json.loads(token_json), SCOPES)
-        except Exception as e:  # noqa: BLE001
-            raise SeoAuthError(_reauth_message(f"SEO_TOKEN_JSON khong hop le ({type(e).__name__}).", "env")) from e
-        source = "env"
-    else:
-        raise SeoAuthError(
-            "Thiếu OAuth token: đặt env SEO_TOKEN_JSON (nội dung token.json) hoặc file token.json. "
-            "Tạo token bằng: python generate_seo_token.py --client-secrets client_secret.json --token token.json.")
-    if not creds.valid:
-        if creds.expired and creds.refresh_token:
-            try:
-                creds.refresh(Request())
-            except RefreshError as e:
-                msg = str(e)
-                reason = "Đã thử tự động refresh OAuth token SEO nhưng Google từ chối."
-                if "invalid_grant" in msg:
-                    reason = "Đã thử tự động refresh, nhưng refresh token SEO đã hết hạn/bị revoke (invalid_grant)."
-                raise SeoAuthError(_reauth_message(reason, source)) from e
-            if source == "file":  # cập nhật lại file local
-                with open(TOKEN_FILE, "w", encoding="utf-8") as f:
-                    f.write(creds.to_json())
-        else:
-            raise SeoAuthError(_reauth_message("OAuth token SEO hết hạn và không có refresh_token.", source))
+    """SEO credentials: service account only."""
+    creds, _source = _load_service_account_creds()
     return creds
 
 
@@ -338,12 +359,10 @@ def run_for_range(start: str, end: str, url_contains: str | None = None):
 
 def run():
     """Chạy cho tháng vừa kết thúc."""
-    from datetime import date
-
     from dateutil.relativedelta import relativedelta
 
     log.info("SEO Agent bắt đầu chạy")
-    target = date.today().replace(day=1) - relativedelta(months=1)
+    target = app_time.today().replace(day=1) - relativedelta(months=1)
     result = run_for_month(target.year, target.month)
     log.info("Hoàn thành!")
     return result

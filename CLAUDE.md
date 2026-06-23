@@ -25,7 +25,7 @@ No JS build step: `static/index.html` contains JSX compiled in-browser by Babel 
 |---|---|
 | `server.py` | FastAPI. All endpoints, SSE chat streams, intent routing, scheduler, sheet-read cache, SEO log capture. ~1200 lines, the heart of the app. |
 | `psi_checker.py` | PSI checks: `run_check_iter()` generator yields progress events (used for real-time SSE); 3 parallel workers (`PSI_WORKERS`), 3 retries w/ backoff; writes monthly tab + conditional formatting via service account. |
-| `seo_agent.py` | GSC + GA4 monthly report → SEO Sheet (separate sheet, OAuth user token). `run_for_month(y,m)`. Env-driven config with runtime overrides via `runtime_val()`. |
+| `seo_agent.py` | GSC + GA4 monthly report → SEO Sheet (separate sheet, service account auth). `run_for_month(y,m)`. Env-driven config with runtime overrides via `runtime_val()`. |
 | `runtime_config.py` | Dynamic config overlay (PSI urls/schedule + SEO schedule/tracked) persisted to `runtime_config.json` (gitignored) and synced to PSI Sheet tab `_config` via `on_change` hook → survives container recreate. |
 | `sheet_store.py` | PSI Sheet I/O: `_config` tab (config persist), `_logs` tab (run history), `read_results`/`read_results_data` (dashboard data). |
 | `static/index.html` | Entire UI: React 18 + Tailwind (CDN). Views: home (Tổng quan), chat, urls (URL Intelligence), dash (PageSpeed Dashboard), alerts, config. DeCho components + `dechoBus` event bus + `dechoCtx` screen context. |
@@ -45,8 +45,8 @@ No JS build step: `static/index.html` contains JSX compiled in-browser by Babel 
 
 - `.env` (gitignored): `PSI_API_KEY`, `SHEET_ID`, `MAAS_BASE_URL/_API_KEY/_MODEL`, SEO vars.
 - PSI Sheet: service account — `service_account.json` file or `SERVICE_ACCOUNT_JSON` env (deploy).
-- SEO (GSC/GA4/SEO Sheet): OAuth user token — `token.json` file or `SEO_TOKEN_JSON` env (deploy). No browser flow on server; token must be created locally first.
-- Never commit: `.env`, `service_account.json`, `token.json`, `runtime_config.json` (all gitignored; `.dockerignore` keeps them out of images too).
+- SEO (GSC/GA4/SEO Sheet): service account only — `service_account.json` local or `SERVICE_ACCOUNT_JSON`/`SEO_SERVICE_ACCOUNT_JSON` env (deploy). Add the service account `client_email` to Search Console, GA4, and the SEO Sheet.
+- Never commit: `.env`, `service_account.json`, `runtime_config.json` (all gitignored; `.dockerignore` keeps them out of images too).
 
 ## Gotchas
 
