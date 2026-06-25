@@ -18,6 +18,10 @@ Marketer, content creator, growth team quản lý website nhiều trang (case th
 - **Paid Campaigns + Clarity**: đọc Google Ads campaign/landing page, kết hợp Microsoft Clarity live insights để soi hành vi UX; campaign tạo mới chỉ qua form bảo mật và luôn ở trạng thái `PAUSED`
 - **Hỏi đáp trên dữ liệu thật**: "trang nào LCP tệ nhất?", "traffic 5 tháng xu hướng sao?", "campaign nào CPA cao?" — DeCho đọc Sheet/API, phân tích bằng LLM (GreenNode MaaS), trả lời kèm số liệu/evidence, stream từng đoạn
 - **Opportunity Score & Alerts**: gộp PSI + SEO + Ads + Clarity để xếp ưu tiên tối ưu; alert monitor phát hiện clicks drop, LCP xấu, spend tăng, CTR/CPA bất thường; mọi khuyến nghị có Evidence + Confidence
+- **Self-learning Entity Catalog**: tự học nhóm URL/campaign từ URL inventory và Ads data để hiểu `product`, `tutorial`, `vdb mysql`, `brand campaign` mà không bắt rác từ câu tự nhiên
+- **Conversion Tracking Auditor**: soi campaign/landing page có spend/click nhưng 0 conversion, cảnh báo gap ở Google Ads conversion action, GTM, GA4 key event hoặc thank-you/form path
+- **Root Cause Engine**: gộp SEO drop, PageSpeed/CWV, Ads, Clarity và tracking gap thành giả thuyết nguyên nhân có Evidence + Confidence
+- **Experiment Planner**: biến opportunity/root-cause thành plan đo được: hypothesis, baseline, success metric, mốc 7/14 ngày và rollback rule
 - **URL Intelligence**: hợp nhất traffic + PageSpeed theo từng URL, drill-down chi tiết
 - **DeCho mascot + memory**: nhân vật 3D/2D phản ứng theo trạng thái hệ thống, hỏi nhanh theo bối cảnh màn hình; long-term memory chỉ lưu fact khi user chủ động "ghi nhớ" và có nút reset actor local
 
@@ -97,6 +101,14 @@ CLARITY_CACHE_FILE=.cache/clarity_insights.json
 
 File `.cache/` đã được ignore, không commit dữ liệu API. Response Clarity trả thêm `cache: "api" | "memory" | "disk"` để kiểm tra nguồn cache.
 
+### Test intent/filter parser
+
+Filter parser dùng hướng **entity-first**: chỉ tự lọc khi match URL/campaign entity đã học, hoặc khi user nói cue rõ như `url chứa ...`, `/path`, `campaign ...`, `trừ ...`. Câu nghiệp vụ chung như `phân tích số liệu SEO` không được biến thành filter keyword.
+
+```bash
+.venv/bin/python tests/test_intent_filter.py
+```
+
 ## Deploy (GreenNode AgentBase)
 
 ```bash
@@ -115,6 +127,10 @@ Secrets inject qua env lúc runtime (không bake vào image / không commit): `S
 | `GET /api/results` · `/api/seo/results` · `/api/seo/summary` | Dữ liệu dashboard (cache TTL) |
 | `GET /api/opportunities` | Opportunity Score gộp PSI + SEO + Ads + Clarity |
 | `GET /api/alerts` | Alert monitor hợp nhất, kèm Evidence + Confidence |
+| `GET /api/entities` | Entity catalog tự học dùng cho filter URL/campaign |
+| `GET /api/tracking-audit` | Conversion Tracking Auditor: spend/click nhưng 0 conversion, GTM/GA4/conversion action gaps |
+| `GET /api/root-cause` | Root Cause Engine: giả thuyết nguyên nhân đa nguồn, có Evidence + Confidence |
+| `GET /api/experiments` | Experiment Planner: hypothesis, baseline, success metric, mốc 7/14 ngày và rollback rule |
 | `GET /api/ads/*` · `GET /api/clarity` | Google Ads/landing page/Clarity insights |
 | `GET/PUT /api/config` | Config động PSI + SEO (persist qua Sheet) |
 | `POST /api/check` · `POST /api/seo/run` | Trigger chạy trực tiếp |

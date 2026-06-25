@@ -29,6 +29,7 @@ from pydantic import BaseModel
 
 import app_time
 import config
+import entity_resolver
 import memory_agent
 import psi_checker
 import runtime_config
@@ -402,7 +403,9 @@ def api_ads_campaigns():
     if not ads_agent.configured():
         return {"error": "Chưa cấu hình Google Ads (GOOGLE_ADS_* trong env).", "campaigns": []}
     try:
-        return _cached("ads:camps", 300, lambda: {"campaigns": ads_agent.list_campaigns()})
+        out = _cached("ads:camps", 300, lambda: {"campaigns": ads_agent.list_campaigns()})
+        entity_resolver.register_campaigns(out.get("campaigns") or [])
+        return out
     except Exception as e:  # noqa: BLE001
         return {"error": _ads_exc_text(e), "campaigns": []}
 
@@ -420,7 +423,9 @@ def api_ads_perf(days: int = 7, start: str | None = None, end: str | None = None
         start = end = None
     try:
         key = f"ads:perf:{start}:{end}" if start else f"ads:perf:{days}"
-        return _cached(key, 300, lambda: ads_agent.campaign_perf(days, start, end))
+        out = _cached(key, 300, lambda: ads_agent.campaign_perf(days, start, end))
+        entity_resolver.register_campaigns(out.get("rows") or [])
+        return out
     except Exception as e:  # noqa: BLE001
         return {"error": _ads_exc_text(e), "rows": []}
 
@@ -473,6 +478,42 @@ def api_alerts(limit: int = 50):
         return _cached(f"alerts:{limit}", 300, lambda: _alert_report(limit))
     except Exception as e:  # noqa: BLE001
         return {"error": f"{type(e).__name__}: {e}", "alerts": []}
+
+
+@app.get("/api/entities")
+def api_entities():
+    """Self-learning entity catalog used for URL/campaign filters."""
+    return {"entities": entity_resolver.catalog(runtime_config.current().get("urls") or [])}
+
+
+@app.get("/api/tracking-audit")
+def api_tracking_audit(days: int = 30):
+    """Conversion tracking audit from Ads campaign + landing page metrics."""
+    try:
+        days = max(1, min(int(days or 30), 90))
+        return _cached(f"tracking_audit:{days}", 300, lambda: _conversion_tracking_report(days))
+    except Exception as e:  # noqa: BLE001
+        return {"error": f"{type(e).__name__}: {e}", "issues": []}
+
+
+@app.get("/api/root-cause")
+def api_root_cause(limit: int = 12):
+    """Root-cause signals across SEO, PSI, Ads, Clarity and tracking."""
+    try:
+        limit = max(1, min(int(limit or 12), 30))
+        return _cached(f"root_cause:{limit}", 300, lambda: _root_cause_report(limit))
+    except Exception as e:  # noqa: BLE001
+        return {"error": f"{type(e).__name__}: {e}", "hypotheses": []}
+
+
+@app.get("/api/experiments")
+def api_experiments(limit: int = 8):
+    """Suggested measurement plans for top opportunities."""
+    try:
+        limit = max(1, min(int(limit or 8), 20))
+        return _cached(f"experiments:{limit}", 300, lambda: _experiment_report(limit))
+    except Exception as e:  # noqa: BLE001
+        return {"error": f"{type(e).__name__}: {e}", "experiments": []}
 
 
 class CreateCampaignRequest(BaseModel):
@@ -839,7 +880,8 @@ _KNOWN_ACTIONS = {
     "run_report", "seo_range", "confirm", "seo_query", "list_months", "ads_list", "ads_perf",
     "ldp_perf", "clarity", "combined", "create_campaign",
     "status", "help", "web_search", "web_fetch", "priority_fix", "action_plan",
-    "diagnose_drop", "fix_suggest", "alerts", "remember", "reply",
+    "diagnose_drop", "fix_suggest", "tracking_audit", "experiment_plan",
+    "alerts", "remember", "reply",
 }
 _TOOL_ALIAS = {"search": "web_search", "websearch": "web_search", "fetch": "web_fetch",
                "read_url": "web_fetch", "readurl": "web_fetch", "open_url": "web_fetch", "browse": "web_fetch"}
@@ -954,7 +996,7 @@ def _looks_confirm(msg: str) -> bool:
 
 _INTENT_OVERRIDE_ACTIONS = {
     "ads_list", "ads_perf",
-    "action_plan", "priority_fix", "diagnose_drop", "fix_suggest", "alerts",
+    "action_plan", "priority_fix", "diagnose_drop", "fix_suggest", "tracking_audit", "experiment_plan", "alerts",
 }
 
 
@@ -968,6 +1010,8 @@ def _hard_intent_override(msg: str, current_action: str) -> dict | None:
         return None
     kw = _all_keyword_intent(msg)
     if kw and kw.get("action") == "query_results" and current_action in ("run_check", "run_report", "seo_query", "seo_range"):
+        return kw
+    if kw and kw.get("action") in ("seo_query", "query_results") and current_action == "reply":
         return kw
     if kw and kw.get("action") in _INTENT_OVERRIDE_ACTIONS and kw.get("action") != current_action:
         return kw
@@ -1089,15 +1133,17 @@ def _keyword_intent(message: str) -> dict | None:
                 "url": url_match.group(0).rstrip(".,;") if url_match else message.split()[-1]}
     psi_ctx = any(k in m for k in ("pagespeed", "page speed", "lcp", "cls", "fcp", "tbt", "inp", "ttfb",
                                    "web vitals", "score", "điểm", "chậm", "nhanh"))
-    report_ctx = any(k in m for k in ("báo cáo", "bao cao", "report", "tổng hợp", "tong hop", "review"))
+    report_ctx = _has_norm_phrase(message, ("báo cáo", "bao cao", "report", "tổng hợp", "tong hop", "review"))
     analysis_ctx = any(k in m for k in ("phân tích", "phan tich", "kết quả", "ket qua", "điểm",
-                                        "chậm nhất", "nhanh nhất", "so sánh", "analyze"))
+                                        "chậm nhất", "nhanh nhất", "so sánh", "analyze",
+                                        "score", "trung bình", "trung binh", "bao nhiêu", "bao nhieu",
+                                        "average", "avg"))
     if analysis_ctx or (report_ctx and psi_ctx):
         terms = _parse_psi_url_terms(message)
         return {"action": "query_results", **({"url_terms": terms} if terms else {})}
     if any(k in m for k in ("danh sách", "list", "url nào", "những url")):
         return {"action": "list_urls"}
-    if any(k in m for k in ("chạy", "check", "kiểm tra", "run", "trigger", "start")):
+    if _has_norm_phrase(message, ("chạy", "check", "kiểm tra", "run", "trigger", "start")):
         return {"action": "run_check"}
     if any(k in m for k in ("trạng thái", "status", "xong chưa", "sao rồi")):
         return {"action": "status"}
@@ -1202,6 +1248,7 @@ def _unified_prompt() -> str:
         '- PHÂN TÍCH TỔNG HỢP Ads + landing page + Clarity (user journey, "vì sao traffic trả tiền mà không convert", "phân tích tổng hợp ads", "từ click tới hành vi"): {"action":"combined","days":<mặc định 7>}\n'
         '- TẠO campaign Google Ads ("tạo campaign", "tạo chiến dịch mới"): {"action":"create_campaign"} — Đệ chỉ hướng dẫn mở form bảo mật ở tab Paid Campaigns (KHÔNG nhận mật khẩu qua chat, đừng hỏi/đọc mật khẩu trong chat).\n'
         '- ALERT MONITOR / cảnh báo bất thường ("có alert gì", "monitor hôm nay", "cảnh báo nào cần xử lý"): {"action":"alerts"}\n'
+        '- CONVERSION TRACKING AUDITOR ("tracking conversion ổn không", "audit tracking", "thiếu conversion tracking", "GTM/GA4 event/conversion action có lỗi không"): {"action":"tracking_audit","days":<mặc định 30>}\n'
         '- Trạng thái hệ thống: {"action":"status"}\n'
         '- HƯỚNG DẪN / HỎI VỀ NĂNG LỰC ("DeCho làm được gì", "có tính năng nào", "làm sao thêm URL", "đổi lịch ở đâu", "LCP là gì", "score bao nhiêu là tốt", "lọc URL được không"): {"action":"help"}\n'
         '- GHI NHỚ theo yêu cầu ("nhớ giúp...", "ghi nhớ...", "DeCho nhớ là...", "lưu lại: ...", "từ giờ gọi tôi là...", "thông tin về anh/cửa hàng/brand là..."): {"action":"remember","fact":"<dữ kiện cô đọng, ngôi thứ 3 về Đại ca/doanh nghiệp>"}\n'
@@ -1211,6 +1258,7 @@ def _unified_prompt() -> str:
         '- KẾ HOẠCH HÀNH ĐỘNG từ Opportunity Score + alerts ("tuần này nên làm gì", "cần làm gì", "lên kế hoạch", "to-do", "ưu tiên công việc"): {"action":"action_plan"}\n'
         '- CHẨN ĐOÁN SỤT GIẢM ("tại sao clicks/traffic/views giảm", "vì sao tụt", "trang nào kéo xuống", "phân tích nguyên nhân giảm"): {"action":"diagnose_drop"}\n'
         '- GỢI Ý CÁCH SỬA trang chậm ("làm sao tăng tốc", "cách tối ưu trang X", "fix LCP/CLS thế nào", "trang chậm sửa sao"): {"action":"fix_suggest","url":"<path nếu có>"}\n'
+        '- EXPERIMENT PLANNER / kế hoạch đo sau khi làm ("làm experiment", "baseline/success metric/rollback", "đo sau khi sửa"): {"action":"experiment_plan"}\n'
         'FILTER CHUNG: nếu user nêu nhiều keyword/path/campaign như "url tutorial và product", "trang /product, /tutorial", "chỉ product trừ blog", hoặc "campaign brand và competitor", thêm '
         '{"filter_spec":{"scope":"url|campaign","include":["tutorial","product"],"exclude":["blog"],"match_mode":"any|all"}}. Mặc định "và/hoặc/dấu phẩy" = any; chỉ dùng all khi user nói rõ "phải chứa cả". Áp filter cho PageSpeed, SEO, Ads, Clarity, Opportunity, Alerts, kế hoạch.\n'
         '- Còn lại: {"action":"reply","text":"<trả lời ngắn>"}\n'
@@ -1245,10 +1293,13 @@ def _capabilities() -> str:
         "- Ưu tiên tối ưu: 'nên tối ưu trang nào trước' → Opportunity Score gộp PSI + SEO + Ads + Clarity, kèm Evidence/Confidence.\n"
         "- Kế hoạch tuần: 'tuần này nên làm gì' → to-do xếp ưu tiên từ Opportunity Score + alerts + xu hướng.\n"
         "- Alert monitor: 'có alert gì không' → cảnh báo PSI/SEO/Ads/Clarity kèm Evidence/Confidence.\n"
+        "- Conversion Tracking Auditor: 'tracking conversion ổn không' → soi campaign/landing page có cost/click nhưng 0 conversion, cảnh báo signal conversion không đáng tin.\n"
         "- Chẩn đoán sụt giảm: 'tại sao clicks/traffic giảm' → trang nào kéo xuống + nguyên nhân khả dĩ.\n"
         "- Gợi ý cách sửa trang chậm: 'cách tăng tốc trang X' → hành động cụ thể theo LCP/CLS/TBT.\n"
+        "- Experiment Planner: 'làm experiment/đo sau khi sửa' → baseline, success metric, target 7/14 ngày và rollback rule cho top opportunity.\n"
         "## Bộ lọc chung\n"
-        "- Hầu hết phân tích hỗ trợ nhiều keyword: 'url tutorial và product', 'trang /product, /tutorial', 'chỉ product trừ blog', 'campaign brand và competitor'. Mặc định OR; muốn AND thì nói 'phải chứa cả'.\n"
+        "- Hầu hết phân tích hỗ trợ nhiều keyword/entity: 'url tutorial và product', 'trang /product, /tutorial', 'chỉ product trừ blog', 'campaign brand và competitor'. Mặc định OR; muốn AND thì nói 'phải chứa cả'.\n"
+        "- Entity catalog tự học từ URL đang theo dõi và campaign/landing data đã đọc: hiểu 'product', 'tutorial', 'vdb', 'vdb mysql', 'brand campaign', 'cloud server' là nhóm thật thay vì bắt mọi từ trong câu làm keyword.\n"
         "## Tìm & đọc web\n"
         "- Tìm thông tin NGOÀI dữ liệu nội bộ (tin mới, đối thủ, xu hướng, best practice): 'tìm trên mạng ...', 'tin mới nhất về ...'. Trả lời kèm trích nguồn.\n"
         "- Đọc/tóm tắt một URL cụ thể: dán link và nói 'đọc/tóm tắt trang này'.\n"
@@ -1323,7 +1374,9 @@ def _parse_range_vi(m: str) -> dict | None:
 
 def _parse_url_contains(message: str) -> str | None:
     """Bắt từ khóa lọc URL: 'url chứa /tutorial', 'các trang /product', 'bài /blog'."""
-    spec = _parse_filter_spec(message, "url")
+    spec = entity_resolver.resolve(message, "url")
+    if not _filter_active(spec):
+        spec = _parse_filter_spec(message, "url")
     return (spec.get("include") or [None])[0]
 
 
@@ -1334,25 +1387,72 @@ _PSI_REPORT_CUES = ("báo cáo", "bao cao", "phân tích", "phan tich", "tổng 
 
 
 def _filter_norm(s: str) -> str:
+    import re
     import unicodedata
 
     raw = unicodedata.normalize("NFD", s or "")
     raw = "".join(ch for ch in raw if unicodedata.category(ch) != "Mn")
+    raw = raw.replace("đ", "d").replace("Đ", "D")
+
+    def split_token(match):
+        token = match.group(0)
+        if re.search(r"[a-z][A-Z]|[0-9][A-Z]", token):
+            token = re.sub(r"([0-9])([A-Z][a-z])", r"\1-\2", token)
+            token = re.sub(r"([a-z])([A-Z])", r"\1-\2", token)
+            if re.search(r"[a-z]AI$", match.group(0)):
+                token = re.sub(r"-AI$", "AI", token)
+        return token
+
+    raw = re.sub(r"[A-Za-z0-9]+", split_token, raw)
     return raw.lower()
+
+
+def _has_norm_phrase(text: str, phrases: tuple[str, ...] | list[str]) -> bool:
+    import re
+
+    hay = _filter_norm(text)
+    for phrase in phrases:
+        needle = _filter_norm(str(phrase or "")).strip()
+        if not needle:
+            continue
+        if re.search(rf"(?<![a-z0-9_\-/]){re.escape(needle)}(?![a-z0-9_\-/])", hay):
+            return True
+    return False
+
+
+def _has_raw_phrase(text: str, phrases: tuple[str, ...] | list[str]) -> bool:
+    import re
+
+    hay = (text or "").lower()
+    for phrase in phrases:
+        needle = str(phrase or "").lower().strip()
+        if not needle:
+            continue
+        if re.search(rf"(?<!\w){re.escape(needle)}(?!\w)", hay):
+            return True
+    return False
 
 
 _FILTER_STOP = {
     "a", "an", "and", "or", "the", "va", "voi", "hoac", "hoặc", "hay", "cac", "các", "nhung", "những",
     "nao", "nào", "co", "có", "chua", "chứa", "gom", "gồm", "chi", "chỉ", "loc", "lọc",
-    "cho", "phai", "phải", "ca", "cả",
+    "cho", "phai", "phải", "ca", "cả", "trong", "cau", "câu", "filter", "filters", "keyword", "keywords",
+    "dung", "đừng", "generic", "match", "all",
+    "thay", "doi", "đổi", "truc", "trúc", "truu", "tuong", "tượng", "structure", "site", "sanh", "sánh",
     "url", "urls", "trang", "page", "pages", "path", "duong", "dan", "đường", "dẫn",
     "landing", "ldp", "campaign", "campaigns", "chien", "dich", "chiến", "dịch",
     "pagespeed", "page-speed", "speed", "psi", "seo", "gsc", "ga4", "ads", "clarity",
     "bao", "cao", "báo", "cáo", "phan", "tich", "phân", "tích", "tong", "hop", "tổng", "hợp",
     "xem", "ket", "qua", "kết", "quả", "review", "report", "diem", "điểm", "score",
+    "danh", "sach", "danh-sach", "trung", "binh", "trung-binh", "bao-nhieu", "nhieu",
+    "so", "số", "lieu", "liệu", "so-lieu", "số-liệu", "du", "dữ", "du-lieu", "dữ-liệu",
+    "data", "metric", "metrics", "kpi", "kpis", "reporting", "performance",
     "chay", "chạy", "kiem", "tra", "kiểm", "đo", "do", "scan", "quet", "quét",
     "thang", "tháng", "nam", "năm", "ngay", "ngày", "tuan", "tuần", "quy", "quý",
-    "gan", "nhat", "gần", "nhất", "vua", "roi", "vừa", "rồi", "nay", "nay",
+    "gan", "nhat", "gần", "nhất", "vua", "roi", "vừa", "rồi", "nay", "nay", "dang", "đang",
+    "on", "ổn", "khong", "không", "ko", "hong", "hông", "tot", "tốt", "xau", "xấu",
+    "khoe", "khoẻ", "the", "thế", "ra", "sao", "cham", "chậm", "nhanh", "slow", "fast",
+    "active", "running", "status", "run", "rate",
     "tu", "từ", "den", "đến", "toi", "tới", "hien", "tai", "hiện", "tại",
     "nen", "lam", "gi", "nên", "làm", "gì", "uu", "tien", "ưu", "tiên",
     "can", "cần", "viec", "việc", "cong", "công",
@@ -1361,28 +1461,375 @@ _FILTER_STOP = {
     "google", "paid", "performance", "hieu", "hiệu", "suat", "suất", "hieu-qua", "hiệu-quả",
     "quang", "quảng", "ad", "advertising",
     "chi", "tieu", "tiêu", "cpa", "ctr", "ngan", "sach", "ngân", "sách",
+    "conversion", "conversions", "convert", "tracking", "audit", "event", "events",
+    "spend", "reach", "frequency", "value", "lead", "leads", "roas",
+    "organic", "scope", "ranking", "rank", "position", "lcp", "cls", "tbt", "inp",
+    "table", "drop", "script", "private", "shadow", "passwd", "secret", "etc", "tmp",
     "dau", "cuoi", "đầu", "cuối", "truoc", "sau", "trước", "sau",
 }
+
+
+def _filter_context_strength(message: str) -> str:
+    """none | weak | explicit.
+
+    weak: natural group mention like "trang product" — only known entities.
+    explicit: URL/path/campaign/filter cues — allow new free-text terms too.
+    """
+    import re
+
+    raw = message or ""
+    raw_l = raw.lower()
+    norm = _filter_norm(raw)
+    if re.search(r"https?://|(?<![a-z0-9])\/[\w\-/]+", raw, re.I):
+        return "explicit"
+    explicit_cues = (
+        "url", "urls", "path", "landing", "ldp", "duong dan", "đường dẫn",
+        "campaign", "campaigns", "chien dich", "chiến dịch",
+        "gom", "loc", "tru",
+        "ngoai tru", "ngoại trừ", "exclude", "except",
+    )
+    accented_cues = ("chứa", "gồm", "lọc", "trừ", "ngoại trừ")
+    if _has_norm_phrase(raw, explicit_cues) or _has_raw_phrase(raw_l, accented_cues):
+        return "explicit"
+    weak_cues = ("trang", "page", "pages")
+    if _has_norm_phrase(raw, weak_cues):
+        return "weak"
+    return "none"
+
+
+def _empty_filter_spec(scope: str, match_mode: str = "any") -> dict:
+    return {
+        "scope": scope or "url",
+        "include": [],
+        "exclude": [],
+        "match_mode": match_mode or "any",
+        "entities": [],
+        "entity_labels": [],
+        "exclude_entities": [],
+    }
+
+
+def _filter_match_mode(message: str) -> str:
+    return "all" if (
+        _has_norm_phrase(message, ("phai chua ca", "chua ca", "match all", "tat ca keyword"))
+        or _has_raw_phrase(message, ("phải chứa cả", "chứa cả", "tất cả keyword"))
+    ) else "any"
+
+
+def _filter_request_suppressed(message: str) -> bool:
+    import re
+
+    sep = _filter_sep_norm(message)
+    if re.match(r"^\s*(?:khong phai|not)\b", sep):
+        return True
+    return (
+        _has_norm_phrase(message, ("dung loc", "dung filter", "khong can loc", "khong can filter", "do not filter", "dont filter"))
+        or _has_raw_phrase(message, ("đừng lọc", "đừng filter", "không cần lọc", "không cần filter"))
+    )
+
+
+def _message_has_campaign_identifier(message: str) -> bool:
+    import re
+
+    return bool(
+        re.search(r"\b(?:GG|PMAX|Competitor|Remarketing|seoLeads)[-_]?[A-Za-z0-9_-]*[A-Z_][A-Za-z0-9_-]*\b", message or "")
+        or re.search(r"\bBrand[_-][A-Za-z0-9_-]+\b", message or "")
+        or re.search(r"\bBrandAwareness[A-Za-z0-9]*\b", message or "")
+    )
+
+
+def _term_looks_campaign_identifier(term: str) -> bool:
+    import re
+
+    clean = str(term or "").strip().lower()
+    return bool(
+        re.search(r"^(?:gg|pmax|brand|competitor|remarketing|seoleads|seo-leads)[_-][a-z0-9_-]+$", clean)
+        or re.search(r"^(?:mlops|abm)[_-][a-z0-9_-]+$", clean)
+    )
+
+
+def _message_has_url_scope_hint(message: str) -> bool:
+    import re
+
+    raw = message or ""
+    safe_raw = re.sub(r"(?:\.\.?/)+[\w\-/]+|<[^>]+>", " ", raw)
+    return (
+        bool(re.search(r"https?://|(?<![a-z0-9])\/[\w\-/]+|(?<![a-z0-9])[\w-]+/[\w\-/]+", safe_raw, re.I))
+        or _has_norm_phrase(raw, (
+            "blog", "docs", "api gpu", "case study", "gpu benchmark",
+            "h200 vs h100", "resources", "solutions",
+        ))
+    )
+
+
+def _message_has_filter_analysis_cue(message: str, scope: str) -> bool:
+    common = (
+        "traffic", "click", "clicks", "view", "views", "user", "users", "impression", "impressions",
+        "conversion", "conversions", "convert", "ctr", "cpa", "score", "performance", "hieu suat",
+        "hieu qua", "organic", "tracking", "ranking", "rank", "position", "keyword",
+        "lcp", "cls", "tbt", "inp", "pagespeed", "page speed", "cham", "chậm", "slow",
+        "loi", "lỗi", "giam", "giảm", "tang", "tăng", "tut", "tụt",
+        "ra sao", "on", "ổn", "cao", "thap", "thấp", "assist",
+    )
+    campaign = (
+        "cost", "spend", "chi tieu", "chi tiêu", "budget", "ngan sach", "ngân sách",
+        "reach", "frequency", "lead", "leads", "value", "roas", "cpc", "cpm",
+    )
+    return _has_norm_phrase(message, common + (campaign if scope == "campaign" else ()))
+
+
+def _message_has_knowledge_cue(message: str) -> bool:
+    return (
+        _has_norm_phrase(message, (
+            "la gi", "nghia la gi", "bao nhieu tien", "gia", "market", "ngoai thi truong",
+            "mua", "thue", "nen chon", "can tai lieu", "ben ngoai", "cau hinh gi",
+            "doi tac", "doi thu", "tong quan", "dung de lam gi", "can doc", "de hieu",
+            "khac gi", "khac", "so voi", "co nghia", "giai thich", "co phai",
+            "dang tin", "la loai", "loai campaign", "search hay display", "audience gi",
+            "muc tieu", "khi nao", "naming convention", "cau truc", "la ai",
+            "la san pham", "san pham gi", "dinh gia", "kien thuc", "tai lieu ky thuat",
+        ))
+        or _has_raw_phrase(message, (
+            "là gì", "nghĩa là gì", "bao nhiêu tiền", "giá", "ngoài thị trường",
+            "mua", "thuê", "nên chọn", "cần tài liệu", "bên ngoài", "cấu hình gì",
+            "đối tác", "đối thủ", "tổng quan", "dùng để làm gì", "cần đọc", "để hiểu",
+            "khác gì", "khác", "so với", "có nghĩa", "giải thích", "có phải",
+            "đáng tin", "là loại", "loại campaign", "search hay display", "audience gì",
+            "mục tiêu", "khi nào", "naming convention", "cấu trúc", "là ai",
+            "là sản phẩm", "sản phẩm gì", "định giá", "kiến thức", "tài liệu kỹ thuật",
+        ))
+    )
+
+
+def _message_has_noise_trap(message: str) -> bool:
+    return _has_norm_phrase(message, (
+        "urlencoded", "preurl", "urlify", "urlness", "nonurl",
+        "pathological", "pathfinder", "pathway", "apath",
+        "campaigner", "campaigning", "campaignish", "campaignless",
+        "landingness", "landingish", "filtering", "filtered", "filterable",
+        "narrative", "copy", "workload",
+    ))
+
+
+def _campaign_free_terms_allowed(message: str) -> bool:
+    import re
+
+    raw = message or ""
+    if (
+        _has_norm_phrase(raw, ("chua", "loc", "phai chua ca", "match all"))
+        or _has_norm_phrase(raw, ("tat ca keyword",))
+        or _has_raw_phrase(raw, ("chứa", "lọc", "phải chứa cả", "tất cả keyword"))
+    ):
+        return True
+    return bool(re.search(r"\b[A-Za-z0-9]+[-_][A-Za-z0-9_-]+\b|[A-Z]{2,}[A-Za-z]+|[A-Z][a-z]+[A-Z][A-Za-z]*|,", raw))
+
+
+def _filter_natural_terms_allowed(message: str, scope: str) -> bool:
+    strength = _filter_context_strength(message)
+    if _filter_request_suppressed(message):
+        return False
+    if scope == "campaign":
+        if _has_norm_phrase(message, ("not campaign", "khong phai campaign", "khong phai chien dich")) or _has_raw_phrase(message, ("không phải campaign", "không phải chiến dịch")):
+            return False
+        if _message_has_url_scope_hint(message):
+            return False
+        if _message_has_noise_trap(message) and not _message_has_filter_analysis_cue(message, scope):
+            return False
+        if _message_has_knowledge_cue(message) and not _message_has_filter_analysis_cue(message, scope):
+            return False
+        if strength == "explicit":
+            return True
+        return _message_has_campaign_identifier(message) or _message_has_filter_analysis_cue(message, scope)
+    if _message_has_campaign_identifier(message):
+        return False
+    if (
+        _has_norm_phrase(message, ("giai thich", "co phai", "la san pham", "san pham gi", "dang tin"))
+        or _has_raw_phrase(message, ("giải thích", "có phải", "là sản phẩm", "sản phẩm gì", "đáng tin"))
+    ):
+        return False
+    if (
+        _has_norm_phrase(message, ("dinh gia", "tai lieu ky thuat"))
+        or _has_raw_phrase(message, ("định giá", "tài liệu kỹ thuật"))
+    ):
+        return False
+    if _message_has_knowledge_cue(message) and not _message_has_filter_analysis_cue(message, scope):
+        return False
+    if _message_has_noise_trap(message) and not _message_has_filter_analysis_cue(message, scope):
+        return False
+    return True
+
+
+def _filter_entity_spec_safe(spec: dict, message: str, default_scope: str) -> bool:
+    if default_scope == "url" and (spec or {}).get("include") == ["ai"]:
+        if (
+            _has_norm_phrase(message, ("viettel ai", "fpt ai", "cmc ai", "aws ai", "azure ai", "gcp ai"))
+            and not _message_has_filter_analysis_cue(message, "url")
+        ):
+            return False
+    return True
+
+
+def _has_filter_context(message: str) -> bool:
+    return _filter_context_strength(message) != "none"
+
+
+def _known_filter_terms(scope: str) -> set[str]:
+    vals: set[str] = set()
+    try:
+        ents = entity_resolver.catalog(runtime_config.current().get("urls") or [])
+    except Exception:  # noqa: BLE001
+        ents = []
+    for ent in ents:
+        if ent.get("scope") != scope:
+            continue
+        for raw in [ent.get("label"), *(ent.get("aliases") or []), *(ent.get("patterns") or [])]:
+            clean = _filter_clean_term(str(raw or ""))
+            if not clean:
+                continue
+            vals.add(clean)
+            if "/" in clean:
+                vals.add(clean.rsplit("/", 1)[-1])
+    return vals
+
+
+def _filter_term_allowed(term: str, scope: str, strength: str, message: str = "") -> bool:
+    clean = _filter_clean_term(term)
+    clean_l = clean.lower()
+    if not clean or _filter_is_stop_term(clean) or clean_l.isdigit() or len(clean) < 2:
+        return False
+    if scope == "campaign" and "/" in clean_l:
+        return False
+    if scope == "url" and _term_looks_campaign_identifier(clean):
+        return False
+    known = _known_filter_terms(scope)
+    known_l = {k.lower() for k in known}
+    if clean_l in known_l:
+        return True
+    if any(k.lower().endswith("/" + clean_l) for k in known):
+        return True
+    if scope == "campaign" and not _campaign_free_terms_allowed(message):
+        return False
+    return strength == "explicit"
+
+
+def _filter_is_stop_term(term: str) -> bool:
+    import re
+
+    clean = _filter_clean_term(term)
+    clean_l = clean.lower()
+    if not clean:
+        return True
+    if clean_l in {"drop-table"}:
+        return False
+    if clean_l in _FILTER_STOP:
+        return True
+    parts = [p for p in re.split(r"[-\s]+", clean_l) if p]
+    return bool(parts) and all(p in _FILTER_STOP or p.isdigit() for p in parts)
+
+
+def _filter_sep_norm(text: str) -> str:
+    import re
+    import unicodedata
+
+    raw = unicodedata.normalize("NFD", text or "")
+    raw = "".join(ch for ch in raw if unicodedata.category(ch) != "Mn")
+    raw = raw.replace("đ", "d").replace("Đ", "D")
+    raw = raw.lower()
+    raw = re.sub(r"[^a-z0-9_\-/\s]+", " ", raw)
+    return re.sub(r"\s+", " ", raw).strip()
+
+
+def _filter_term_exact_in_text(text: str, term: str) -> bool:
+    import re
+
+    hay = _filter_sep_norm(text)
+    clean = _filter_clean_term(term).lower()
+    if not clean:
+        return False
+    parts = [re.escape(p) for p in re.split(r"[-_\s]+", clean) if p]
+    if not parts:
+        return False
+    if "/" in clean:
+        needle = re.escape(clean)
+    else:
+        needle = r"[-_\s]+".join(parts)
+    return bool(re.search(rf"(?<![a-z0-9_\-/]){needle}(?![a-z0-9_\-/])", hay))
+
+
+def _filter_negated_text(message: str) -> str:
+    import re
+
+    parts = re.split(r"\b(?:khong phai|không phải|not)\b", _filter_sep_norm(message), maxsplit=1)
+    return parts[1] if len(parts) > 1 else ""
+
+
+def _sanitize_filter_spec(
+    spec: dict,
+    message: str,
+    default_scope: str = "url",
+    *,
+    require_exact_terms: bool = False,
+) -> dict:
+    scope = spec.get("scope") or default_scope
+    strength = _filter_context_strength(message)
+    negated_text = _filter_negated_text(message)
+    out = {
+        "scope": scope,
+        "include": [],
+        "exclude": [],
+        "match_mode": spec.get("match_mode") or "any",
+        "entities": list(spec.get("entities") or []),
+        "entity_labels": list(spec.get("entity_labels") or []),
+        "exclude_entities": list(spec.get("exclude_entities") or []),
+    }
+    seen_i, seen_e = set(), set()
+    for term in spec.get("include") or []:
+        if require_exact_terms and not _filter_term_exact_in_text(message, str(term)):
+            continue
+        if negated_text and _filter_term_exact_in_text(negated_text, str(term)):
+            continue
+        if _filter_term_allowed(str(term), scope, strength, message):
+            _filter_add_term(out["include"], seen_i, str(term))
+    for term in spec.get("exclude") or []:
+        if require_exact_terms and not _filter_term_exact_in_text(message, str(term)):
+            continue
+        if negated_text and _filter_term_exact_in_text(negated_text, str(term)):
+            continue
+        if _filter_term_allowed(str(term), scope, strength, message):
+            _filter_add_term(out["exclude"], seen_e, str(term))
+    if not out["include"]:
+        out["entities"] = []
+        out["entity_labels"] = []
+    if not out["exclude"]:
+        out["exclude_entities"] = []
+    return out
 
 
 def _filter_clean_term(term: str) -> str:
     import re
 
-    term = _filter_norm(term).strip().strip("/.,:;\"'()[]{}")
-    term = re.sub(r"^https?://[^/]+/?", "", term).strip("/")
-    term = re.sub(r"\s+", "-", term)
-    return term
+    raw = str(term or "").strip().strip(".,:;\"'()[]{}")
+    raw = re.sub(r"^https?://[^/]+/?", "", raw, flags=re.I).strip("/")
+    if "/" in raw:
+        return raw.strip("/")
+    clean = _filter_norm(raw).strip().strip("/.,:;\"'()[]{}")
+    clean = re.sub(r"\s+", "-", clean)
+    clean = clean.replace("gpuaa-s", "gpuaas")
+    clean = clean.replace("mlops-kit", "mlopskit")
+    clean = clean.replace("h200-quickstart", "h200quickstart")
+    return clean
 
 
 def _filter_add_term(out: list[str], seen: set[str], term: str):
     term = _filter_clean_term(term)
-    if not term or term in seen:
+    key = term.lower()
+    if not term or key in seen:
         return
-    if term in _FILTER_STOP or term.isdigit():
+    if _filter_is_stop_term(term) or term.isdigit():
         return
     if len(term) < 2:
         return
-    seen.add(term)
+    seen.add(key)
     out.append(term)
 
 
@@ -1391,14 +1838,24 @@ def _extract_filter_terms(phrase: str) -> list[str]:
 
     out: list[str] = []
     seen: set[str] = set()
+    scrubbed = phrase or ""
 
     for url in re.findall(r"https?://[^\s'\"<>)]+", phrase or "", re.I):
         _filter_add_term(out, seen, url)
-    for path in re.findall(r"/[\w\-/]+", phrase or ""):
+        scrubbed = scrubbed.replace(url, " ")
+    for path in re.findall(r"(?<![a-z0-9_\-/.])[\w-]+/[\w\-/]+", scrubbed, re.I):
         _filter_add_term(out, seen, path)
+        scrubbed = scrubbed.replace(path, " ")
+    for path in re.findall(r"/[\w\-/]+", scrubbed):
+        _filter_add_term(out, seen, path)
+        scrubbed = scrubbed.replace(path, " ")
 
-    norm = _filter_norm(phrase)
+    norm = _filter_norm(scrubbed)
+    norm = re.sub(r"\bcase\s+study\b", " ", norm)
     norm = re.sub(r"https?://\S+", " ", norm)
+    norm = re.sub(r"(?<![a-z0-9_\-/])[\w-]+/[\w\-/]+", " ", norm)
+    norm = re.sub(r"/[\w\-/]+", " ", norm)
+    norm = re.sub(r"\b(?:phai chua ca|chua ca|match all|tat ca keyword)\b", " ", norm)
     norm = re.sub(r"20\d{2}-\d{1,2}(?:-\d{1,2})?", " ", norm)
     norm = re.sub(r"\b\d{1,2}/\d{1,2}(?:/\d{2,4})?\b", " ", norm)
     for word in re.findall(r"[a-z0-9][a-z0-9_-]{1,}", norm):
@@ -1412,29 +1869,39 @@ def _parse_filter_spec(message: str, default_scope: str = "url") -> dict:
 
     raw = message or ""
     norm = _filter_norm(raw)
-    url_cue = any(k in norm for k in ("url", "trang", "page", "path", "landing", "ldp", "duong dan", "đường dẫn", "/"))
-    campaign_cue = any(k in norm for k in ("campaign", "chien dich", "chiến dịch"))
-    scope = "campaign" if campaign_cue and not url_cue else default_scope
-    match_mode = "all" if any(k in norm for k in ("phai chua ca", "phải chứa cả", "chua ca", "chứa cả", "match all", "tat ca keyword", "tất cả keyword")) else "any"
+    url_cue = (
+        _has_norm_phrase(raw, ("url", "trang", "page", "path", "landing", "ldp", "duong dan", "đường dẫn", "seo"))
+        or bool(re.search(r"https?://|(?<![a-z0-9])\/[\w\-/]+", raw, re.I))
+    )
+    campaign_cue = _has_norm_phrase(raw, ("campaign", "chien dich", "chiến dịch"))
+    scope = "campaign" if default_scope == "campaign" and campaign_cue and not url_cue else default_scope
+    match_mode = _filter_match_mode(raw)
 
     # Nếu không có dấu hiệu filter rõ ràng, chỉ lấy term khi message có path/url cụ thể.
-    has_filter_context = url_cue or campaign_cue or bool(re.search(r"https?://|/[\w\-/]+", raw))
+    has_filter_context = _has_filter_context(raw)
     if not has_filter_context:
         return {"scope": scope, "include": [], "exclude": [], "match_mode": match_mode}
 
-    exc_split = re.split(r"\b(?:tru|trừ|ngoai tru|ngoại trừ|loai tru|loại trừ|khong gom|không gồm|exclude|except)\b", norm, maxsplit=1)
+    exc_re = r"(?i)\b(?:tru|trừ|ngoai\s+tru|ngoại\s+trừ|loai\s+tru|loại\s+trừ|khong\s+gom|không\s+gồm|exclude|except)\b"
+    exc_split = re.split(exc_re, raw, maxsplit=1)
     include_phrase = exc_split[0]
     exclude_phrase = exc_split[1] if len(exc_split) > 1 else ""
 
     # Ưu tiên phần sau cue filter để tránh nhặt nhầm động từ ở đầu câu.
-    cue_re = r"\b(?:url|urls|trang|page|pages|path|landing page|ldp|duong dan|campaign|campaigns|chien dich)\b"
+    cue_re = r"(?i)\b(?:url|urls|trang|page|pages|path|landing\s+page|ldp|duong\s+dan|đường\s+dẫn|campaign|campaigns|chien\s+dich|chiến\s+dịch)\b"
     parts = re.split(cue_re, include_phrase, maxsplit=1)
     if len(parts) > 1:
         include_phrase = parts[1]
     include = _extract_filter_terms(include_phrase)
     exclude = _extract_filter_terms(exclude_phrase)
+    if exclude_phrase and re.search(r"(?i)\bdrop\s+table\b", exclude_phrase):
+        exclude.append("drop-table")
 
-    return {"scope": scope, "include": include, "exclude": exclude, "match_mode": match_mode}
+    return _sanitize_filter_spec(
+        {"scope": scope, "include": include, "exclude": exclude, "match_mode": match_mode},
+        message,
+        default_scope,
+    )
 
 
 def _merge_filter_terms(spec: dict, *, include=None, exclude=None, scope: str | None = None) -> dict:
@@ -1443,6 +1910,9 @@ def _merge_filter_terms(spec: dict, *, include=None, exclude=None, scope: str | 
         "include": list(spec.get("include") or []),
         "exclude": list(spec.get("exclude") or []),
         "match_mode": spec.get("match_mode") or "any",
+        "entities": list(spec.get("entities") or []),
+        "entity_labels": list(spec.get("entity_labels") or []),
+        "exclude_entities": list(spec.get("exclude_entities") or []),
     }
     seen_i = set(out["include"])
     seen_e = set(out["exclude"])
@@ -1453,34 +1923,330 @@ def _merge_filter_terms(spec: dict, *, include=None, exclude=None, scope: str | 
     return out
 
 
+def _merge_filter_specs(base: dict, extra: dict) -> dict:
+    base = {
+        "scope": (base or {}).get("scope") or (extra or {}).get("scope") or "url",
+        "include": list((base or {}).get("include") or []),
+        "exclude": list((base or {}).get("exclude") or []),
+        "match_mode": (base or {}).get("match_mode") or "any",
+        "entities": list((base or {}).get("entities") or []),
+        "entity_labels": list((base or {}).get("entity_labels") or []),
+        "exclude_entities": list((base or {}).get("exclude_entities") or []),
+    }
+    forced_include: list[str] = []
+    known_l = {k.lower() for k in _known_filter_terms((base or {}).get("scope") or (extra or {}).get("scope") or "url")}
+    for term in (extra or {}).get("include") or []:
+        clean = _filter_clean_term(str(term))
+        if clean and "/" not in clean and "-" in clean and clean.lower() not in known_l:
+            before = len(base["include"])
+            base["include"] = [
+                existing for existing in base["include"]
+                if not str(existing).lower().endswith("/" + clean.lower())
+            ]
+            if len(base["include"]) != before:
+                forced_include.append(str(term))
+    include = [
+        t for t in ((extra or {}).get("include") or [])
+        if str(t) in forced_include
+        or not _filter_term_fragment_of_spec(
+            str(t),
+            base,
+            "include",
+            use_labels=True,
+        )
+    ]
+    exclude = [
+        t for t in ((extra or {}).get("exclude") or [])
+        if not _filter_term_fragment_of_spec(str(t), base, "exclude")
+    ]
+    out = _merge_filter_terms(
+        base,
+        include=include,
+        exclude=exclude,
+        scope=(base or {}).get("scope") or (extra or {}).get("scope"),
+    )
+    if (extra or {}).get("match_mode") == "all":
+        out["match_mode"] = "all"
+    return out
+
+
+def _filter_term_position(message: str, term: str) -> int:
+    import re
+
+    hay_norm = _filter_norm(message)
+    hay_sep = _filter_sep_norm(message)
+    clean = _filter_clean_term(term)
+    if "/" in clean:
+        full_parts = [re.escape(p) for p in re.split(r"[-_\s/]+", clean.strip("/").lower()) if p]
+        if full_parts:
+            full_needle = r"[-_\s/]+".join(full_parts)
+            for hay in (hay_norm, hay_sep):
+                m = re.search(rf"(?<![a-z0-9_\-/]){full_needle}(?![a-z0-9_\-/])", hay.lower())
+                if m:
+                    return m.start()
+    candidates = [clean, clean.lower()]
+    if "/" in clean:
+        candidates.append(clean.rsplit("/", 1)[-1])
+    candidates.extend([
+        clean.replace("-", " "),
+        clean.replace("_", " "),
+        clean.replace("/", " "),
+        re.sub(r"[^a-z0-9]+", "", clean.lower()),
+    ])
+    best = 10**9
+    for cand in candidates:
+        cand = str(cand or "").strip()
+        if not cand:
+            continue
+        parts = [re.escape(p) for p in re.split(r"[-_\s/]+", cand.lower()) if p]
+        if parts:
+            needle = r"[-_\s/]+".join(parts)
+            for hay in (hay_norm, hay_sep):
+                m = re.search(rf"(?<![a-z0-9_\-/]){needle}(?![a-z0-9_\-/])", hay.lower())
+                if m:
+                    best = min(best, m.start())
+        compact_cand = re.sub(r"[^a-z0-9]+", "", cand.lower())
+        if len(compact_cand) >= 6:
+            compact_hay = re.sub(r"[^a-z0-9]+", "", hay_sep.lower())
+            idx = compact_hay.find(compact_cand)
+            if idx >= 0:
+                best = min(best, idx)
+    if best == 10**9:
+        try:
+            ents = entity_resolver.catalog(runtime_config.current().get("urls") or [])
+        except Exception:  # noqa: BLE001
+            ents = []
+        clean_l = clean.lower()
+        for ent in ents:
+            pattern_hits = {
+                _filter_clean_term(str(raw or "")).lower()
+                for raw in ent.get("patterns") or []
+                if str(raw or "").strip()
+            }
+            if clean_l not in pattern_hits:
+                continue
+            for raw in [ent.get("label"), *(ent.get("aliases") or []), *(ent.get("patterns") or [])]:
+                alias = _filter_clean_term(str(raw or ""))
+                if not alias or alias.lower() == clean_l:
+                    continue
+                parts = [re.escape(p) for p in re.split(r"[-_\s/]+", alias.lower()) if p]
+                if parts:
+                    needle = r"[-_\s/]+".join(parts)
+                    for hay in (hay_norm, hay_sep):
+                        m = re.search(rf"(?<![a-z0-9_\-/]){needle}(?![a-z0-9_\-/])", hay.lower())
+                        if m:
+                            best = min(best, m.start())
+                compact_alias = re.sub(r"[^a-z0-9]+", "", alias.lower())
+                if len(compact_alias) >= 6:
+                    compact_hay = re.sub(r"[^a-z0-9]+", "", hay_sep.lower())
+                    idx = compact_hay.find(compact_alias)
+                    if idx >= 0:
+                        best = min(best, idx)
+    return best
+
+
+def _filter_order_spec_terms(spec: dict, message: str) -> dict:
+    out = dict(spec or {})
+    should_order = bool(
+        out.get("match_mode") == "all"
+        or re_search_camel_or_path(message)
+    )
+    if not should_order:
+        return out
+    for key in ("include", "exclude"):
+        vals = list(out.get(key) or [])
+        out[key] = sorted(enumerate(vals), key=lambda item: (_filter_term_position(message, item[1]), item[0]))
+        out[key] = [v for _, v in out[key]]
+    return out
+
+
+def _filter_focus_message(message: str, default_scope: str) -> str:
+    """Prefer the metric/action clause when a user mixes context and analysis.
+
+    This keeps "GPUaaS là gì ... nhưng xem traffic CloudGPUX" focused on
+    CloudGPUX, while leaving normal multi-term/exclude requests untouched.
+    """
+    import re
+
+    raw = message or ""
+    if not raw.strip():
+        return raw
+    if _filter_request_suppressed(raw):
+        return raw
+    if not (_message_has_knowledge_cue(raw) and _message_has_filter_analysis_cue(raw, default_scope)):
+        return raw
+
+    clauses = [
+        c.strip(" \t\r\n,;:.")
+        for c in re.split(
+            r"(?i)(?:[.;\n]|,\s*|\b(?:nhung|nhưng|sau\s+do|sau\s+đó|con|còn|nua\s+sau|nửa\s+sau|phan\s+cuoi|phần\s+cuối|doan\s+sau|đoạn\s+sau|roi|rồi)\b)",
+            raw,
+        )
+        if c and c.strip(" \t\r\n,;:.")
+    ]
+    if len(clauses) <= 1:
+        return raw
+
+    def score_clause(clause: str, idx: int) -> tuple[int, int, int]:
+        score = 0
+        has_analysis = _message_has_filter_analysis_cue(clause, default_scope)
+        has_knowledge = _message_has_knowledge_cue(clause)
+        if has_analysis:
+            score += 5
+        if _filter_context_strength(clause) == "explicit":
+            score += 2
+        try:
+            ent = entity_resolver.resolve(clause, default_scope)
+            if ent.get("scope") == default_scope and _filter_active(ent):
+                score += 4
+        except Exception:  # noqa: BLE001
+            pass
+        if _message_has_noise_trap(clause) and not has_analysis:
+            score -= 3
+        if has_knowledge and not has_analysis:
+            score -= 5
+        elif has_knowledge:
+            score -= 1
+        return score, len(clause), -idx
+
+    best_idx, best_clause = max(enumerate(clauses), key=lambda item: score_clause(item[1], item[0]))
+    if score_clause(best_clause, best_idx)[0] >= 4:
+        return best_clause
+    return raw
+
+
+def re_search_camel_or_path(message: str) -> bool:
+    import re
+
+    raw = message or ""
+    return bool(
+        re.search(r"https?://|(?<![a-z0-9])/?[\w-]+/[\w\-/]+", raw, re.I)
+        or re.search(r"[a-z][A-Z]|[0-9][A-Z]", raw)
+        or re.search(r"[A-Z]{2,}[a-z]|[A-Za-z]+[0-9]", raw)
+        or re.search(r"[,;]", raw)
+    )
+
+
+def _filter_term_fragment_of_spec(term: str, spec: dict, side: str, *, use_labels: bool = True) -> bool:
+    import re
+
+    clean = _filter_clean_term(term)
+    if not clean:
+        return True
+    scope = spec.get("scope") or "url"
+    known = _known_filter_terms(scope)
+    known_l = {k.lower() for k in known}
+    clean_l = clean.lower()
+    if use_labels and (clean_l in known_l or any(k.lower().endswith("/" + clean_l) for k in known)):
+        return True
+    surfaces = list(spec.get(side) or [])
+    if side == "include" and use_labels:
+        surfaces.extend(spec.get("entity_labels") or [])
+    else:
+        surfaces.extend(spec.get("exclude_entities") or [])
+    for surface in surfaces:
+        candidate = _filter_clean_term(str(surface or ""))
+        if not candidate:
+            continue
+        clean_sig = re.sub(r"[-_\s]+", "-", clean)
+        candidate_sig = re.sub(r"[-_\s]+", "-", candidate)
+        if candidate == clean:
+            continue
+        clean_compact = re.sub(r"[^a-z0-9]+", "", clean.lower())
+        candidate_last_compact = re.sub(r"[^a-z0-9]+", "", candidate.rsplit("/", 1)[-1].lower())
+        if clean_compact and clean_compact == candidate_last_compact:
+            return True
+        if clean_sig == candidate_sig:
+            return True
+        if re.search(r"\d", clean) and re.search(rf"(?<![a-z0-9]){re.escape(clean)}(?![a-z0-9])", candidate):
+            return True
+        if len(clean) < len(candidate) and re.search(rf"(?<![a-z0-9]){re.escape(clean)}(?![a-z0-9])", candidate):
+            if clean == "case" and candidate.startswith("case-study"):
+                continue
+            return True
+        if len(candidate) < len(clean) and re.search(rf"(?<![a-z0-9]){re.escape(candidate)}(?![a-z0-9])", clean):
+            return True
+    return False
+
+
 def _filter_spec_from_action(data: dict, message: str, default_scope: str = "url") -> dict:
+    import re
+
+    match_mode = _filter_match_mode(message)
+    focus_message = _filter_focus_message(message, default_scope)
+    if _filter_request_suppressed(message) or not _filter_natural_terms_allowed(focus_message, default_scope):
+        return _empty_filter_spec(default_scope, match_mode)
+
+    entity_spec = entity_resolver.resolve(focus_message, default_scope)
+    if entity_spec.get("scope") != default_scope:
+        entity_spec = _empty_filter_spec(default_scope, match_mode)
+    if not _filter_entity_spec_safe(entity_spec, message, default_scope):
+        entity_spec = _empty_filter_spec(default_scope, match_mode)
+    parsed_spec = _parse_filter_spec(focus_message, default_scope)
+    if parsed_spec.get("scope") != default_scope:
+        parsed_spec = _empty_filter_spec(default_scope, match_mode)
     raw = data.get("filter_spec") if isinstance(data, dict) else None
+    raw_spec = {"scope": default_scope, "include": [], "exclude": [], "match_mode": "any"}
     if isinstance(raw, dict):
-        spec = {
+        raw_spec = {
             "scope": raw.get("scope") or default_scope,
             "include": [],
             "exclude": [],
-            "match_mode": raw.get("match_mode") or "any",
+            "match_mode": match_mode,
         }
-        spec = _merge_filter_terms(spec, include=raw.get("include") or raw.get("url_terms") or raw.get("terms") or [],
-                                   exclude=raw.get("exclude") or raw.get("exclude_url_terms") or [])
+        raw_spec = _merge_filter_terms(
+            raw_spec,
+            include=raw.get("include") or raw.get("url_terms") or raw.get("terms") or [],
+            exclude=raw.get("exclude") or raw.get("exclude_url_terms") or [],
+        )
+        raw_spec = _sanitize_filter_spec(raw_spec, focus_message, default_scope, require_exact_terms=True)
+        if raw_spec.get("scope") != default_scope:
+            raw_spec = _empty_filter_spec(default_scope, match_mode)
+
+    prefer_keyword_terms = match_mode == "all" and _filter_active(parsed_spec) and (
+        _has_norm_phrase(message, ("tat ca keyword",))
+        or _has_raw_phrase(message, ("tất cả keyword",))
+        or (_has_norm_phrase(message, ("match all",)) and not re.search(r"[A-Z]", message or ""))
+    )
+
+    if prefer_keyword_terms:
+        spec = parsed_spec
+    elif _filter_active(entity_spec):
+        spec = entity_spec
+        if _filter_context_strength(message) == "explicit" and _filter_active(parsed_spec):
+            spec = _merge_filter_specs(spec, parsed_spec)
+        if _filter_context_strength(message) == "explicit" and _filter_active(raw_spec):
+            spec = _merge_filter_specs(spec, raw_spec)
+    elif _filter_active(raw_spec):
+        spec = raw_spec
     else:
-        spec = _parse_filter_spec(message, default_scope)
+        spec = parsed_spec
+
     if isinstance(data, dict):
-        extra = []
+        extra = {"scope": spec.get("scope") or default_scope, "include": [], "exclude": [], "match_mode": spec.get("match_mode") or "any"}
         if data.get("url_contains"):
-            extra.append(data.get("url_contains"))
-        extra += data.get("url_terms") or []
-        spec = _merge_filter_terms(spec, include=extra)
+            extra["include"].append(data.get("url_contains"))
+        extra["include"].extend(data.get("url_terms") or [])
         if data.get("campaign_terms"):
-            spec = _merge_filter_terms(spec, include=data.get("campaign_terms") or [], scope="campaign")
-        if not _filter_active(spec) and data.get("action") in {
-            "query_results", "seo_query", "seo_range", "run_report", "ads_list", "ads_perf",
-            "ldp_perf", "clarity", "combined", "priority_fix", "action_plan",
-            "diagnose_drop", "fix_suggest", "alerts",
-        }:
-            spec = _merge_filter_terms(spec, include=_extract_filter_terms(message))
-    return spec
+            extra["scope"] = "campaign"
+            extra["include"].extend(data.get("campaign_terms") or [])
+        extra = _sanitize_filter_spec(extra, focus_message, default_scope, require_exact_terms=True)
+        if _filter_active(extra):
+            spec = _merge_filter_specs(spec, extra)
+    if match_mode == "all" and _filter_active(parsed_spec):
+        lowered_message = message or ""
+        for term in parsed_spec.get("include") or []:
+            clean = _filter_clean_term(str(term))
+            if "/" in clean or "-" not in clean:
+                continue
+            if not re.search(rf"(?<![A-Za-z0-9_\-/]){re.escape(clean)}(?![A-Za-z0-9_\-/])", lowered_message):
+                continue
+            spec["include"] = [
+                clean if str(existing).lower().endswith("/" + clean.lower()) else existing
+                for existing in (spec.get("include") or [])
+            ]
+    spec["match_mode"] = match_mode if match_mode == "all" else "any"
+    return _filter_order_spec_terms(spec, focus_message)
 
 
 def _filter_active(spec: dict) -> bool:
@@ -1489,8 +2255,8 @@ def _filter_active(spec: dict) -> bool:
 
 def _filter_text_matches(text: str, spec: dict) -> bool:
     hay = _filter_norm(text)
-    inc = [t for t in (spec.get("include") or []) if t]
-    exc = [t for t in (spec.get("exclude") or []) if t]
+    inc = [_filter_clean_term(str(t)).lower() for t in (spec.get("include") or []) if t]
+    exc = [_filter_clean_term(str(t)).lower() for t in (spec.get("exclude") or []) if t]
     if exc and any(t in hay for t in exc):
         return False
     if not inc:
@@ -1507,7 +2273,8 @@ def _filter_desc(spec: dict, label: str | None = None) -> str:
     joiner = " và " if spec.get("match_mode") == "all" else " hoặc "
     bits = []
     if spec.get("include"):
-        bits.append(f"{label} chứa " + joiner.join(spec["include"]))
+        names = spec.get("entity_labels") or spec["include"]
+        bits.append(f"{label} chứa " + joiner.join(names))
     if spec.get("exclude"):
         bits.append("trừ " + " hoặc ".join(spec["exclude"]))
     return "; ".join(bits)
@@ -1586,14 +2353,23 @@ def _all_keyword_intent(message: str) -> dict | None:
     _health = any(k in m for k in ("ổn không", "on khong", "tốt không", "tot khong", "khoẻ không", "khoe khong",
                                    "tình hình", "tinh hinh", "thế nào", "the nao", "ra sao", "ổn chứ", "hiệu quả"))
     # Insight xuyên mảng
+    if any(k in m for k in ("conversion tracking", "tracking conversion", "audit tracking", "tracking audit",
+                            "đo conversion", "do conversion", "thiếu tracking", "thieu tracking",
+                            "tracking lỗi", "tracking loi", "gtm", "conversion action", "event ga4", "ga4 event")):
+        dm = _re2.search(r"(\d{1,2})\s*ngày", m)
+        return {"action": "tracking_audit", "days": int(dm.group(1)) if dm else 30}
+    if any(k in m for k in ("experiment", "thử nghiệm", "thu nghiem", "a/b", "ab test",
+                            "baseline", "success metric", "rollback", "đo sau khi", "do sau khi",
+                            "kế hoạch đo", "ke hoach do")):
+        return {"action": "experiment_plan"}
     if any(k in m for k in ("alert", "alerts", "cảnh báo", "canh bao", "bất thường", "bat thuong", "monitor")):
         return {"action": "alerts"}
     if any(k in m for k in ("ưu tiên", "uu tien", "nên tối ưu", "nen toi uu", "fix trước", "fix truoc", "trang nào nên")):
         return {"action": "priority_fix"}
     if any(k in m for k in ("nên làm gì", "nen lam gi", "kế hoạch", "ke hoach", "to-do", "todo", "việc tuần", "cần làm gì", "can lam gi", "ưu tiên công việc")):
         return {"action": "action_plan"}
-    if (any(k in m for k in ("tại sao", "tai sao", "vì sao", "vi sao", "nguyên nhân", "nguyen nhan", "kéo xuống"))
-            and any(k in m for k in ("giảm", "giam", "tụt", "tut", "drop", "rớt", "rot"))):
+    if (any(k in m for k in ("tại sao", "tai sao", "vì sao", "vi sao", "nguyên nhân", "nguyen nhan", "kéo xuống", "root cause"))
+            and any(k in m for k in ("giảm", "giam", "tụt", "tut", "drop", "rớt", "rot", "không convert", "khong convert", "conversion kém", "conversion kem", "khong co conversion", "không có conversion"))):
         return {"action": "diagnose_drop"}
     if (any(k in m for k in ("tăng tốc", "tang toc", "speed up"))
             or (any(k in m for k in ("làm sao", "lam sao", "cách", "cach", "fix", "sửa", "sua", "tối ưu", "toi uu"))
@@ -1633,7 +2409,8 @@ def _all_keyword_intent(message: str) -> dict | None:
         dm = _re2.search(r"(\d{1,2})\s*ngày", m)
         return {"action": "ldp_perf", "days": int(dm.group(1)) if dm else 7}
     if any(k in m for k in ("ads", "campaign", "quảng cáo", "cpa", "chi tiêu", "spend", "ngân sách")):
-        if (any(k in m for k in ("danh sách", "list", "những campaign", "campaign nào đang", "liệt kê"))
+        if ((any(k in m for k in ("danh sách", "list", "những campaign", "campaign nào đang", "liệt kê"))
+                or _has_norm_phrase(message, ("campaign đang active", "campaign active", "active campaign")))
                 and not _health):
             return {"action": "ads_list"}
         if rng:  # khoảng thời gian tự nhiên ("tháng 5", "quý 1", "từ đầu năm"...) → lọc ads theo range
@@ -1874,6 +2651,7 @@ async def agent_chat_stream(req: ChatStreamRequest, request: Request = None):
                   "web_search": "Tìm trên web", "web_fetch": "Đọc trang web", "alerts": "Alert monitor",
                   "priority_fix": "Ưu tiên tối ưu", "action_plan": "Kế hoạch hành động",
                   "diagnose_drop": "Chẩn đoán sụt giảm", "fix_suggest": "Gợi ý cách sửa",
+                  "tracking_audit": "Audit conversion tracking", "experiment_plan": "Experiment planner",
                   "remember": "Ghi nhớ", "reply": "Trả lời"}
         yield ev({"type": "step", "text": f"⚙️ Action: {labels.get(action, action)}"})
 
@@ -2045,8 +2823,52 @@ async def agent_chat_stream(req: ChatStreamRequest, request: Request = None):
             yield ev({"type": "done"})
             return
 
+        # ── Conversion Tracking Auditor: Ads campaign + landing page conversion signal ──
+        if action == "tracking_audit":
+            spec = _filter_spec_from_action({**data, "action": action}, req.message, "url")
+            desc = _filter_desc(spec, "campaign" if spec.get("scope") == "campaign" else "URL")
+            days = int(data.get("days") or 30)
+            days = max(1, min(days, 90))
+            yield ev({"type": "step", "text": f"🧾 Audit conversion tracking {days} ngày gần nhất..."})
+            report = await asyncio.to_thread(_conversion_tracking_report, days)
+            if _filter_active(spec):
+                report = _filter_tracking_report(report, spec)
+            if desc:
+                yield ev({"type": "step", "text": f"🔎 Áp bộ lọc: {desc}"})
+            yield ev({"type": "final", "text": _tracking_audit_text(report)})
+            yield ev({"type": "done"})
+            return
+
+        # ── Experiment Planner: deterministic plan from structured candidates ──
+        if action == "experiment_plan":
+            spec = _filter_spec_from_action({**data, "action": action}, req.message, "url")
+            desc = _filter_desc(spec)
+            yield ev({"type": "step", "text": "🧪 Lập experiment plan từ opportunity + tracking signals..."})
+            report = await asyncio.to_thread(_experiment_report, 10)
+            if _filter_active(spec):
+                report = _filter_experiment_report(report, spec)
+            if desc:
+                yield ev({"type": "step", "text": f"🔎 Áp bộ lọc: {desc}"})
+            yield ev({"type": "final", "text": _experiments_text(report)})
+            yield ev({"type": "done"})
+            return
+
+        # ── Root Cause Engine: deterministic hypotheses from observed signals ──
+        if action == "diagnose_drop":
+            spec = _filter_spec_from_action({**data, "action": action}, req.message, "url")
+            desc = _filter_desc(spec)
+            yield ev({"type": "step", "text": "🧭 Gộp root-cause signals từ SEO + PSI + Ads + Clarity + Tracking..."})
+            report = await asyncio.to_thread(_root_cause_report, 18)
+            if _filter_active(spec):
+                report = _filter_root_cause_report(report, spec)
+            if desc:
+                yield ev({"type": "step", "text": f"🔎 Áp bộ lọc: {desc}"})
+            yield ev({"type": "final", "text": _root_cause_text(report)})
+            yield ev({"type": "done"})
+            return
+
         # ── Insight xuyên mảng: ưu tiên tối ưu / kế hoạch / chẩn đoán / gợi ý sửa ──
-        if action in ("priority_fix", "action_plan", "diagnose_drop", "fix_suggest"):
+        if action in ("priority_fix", "action_plan", "fix_suggest"):
             spec = _filter_spec_from_action({**data, "action": action}, req.message, "url")
             desc = _filter_desc(spec)
             yield ev({"type": "step", "text": "📊 Đọc & gộp dữ liệu PSI + SEO + Ads + Clarity..."})
@@ -2057,7 +2879,7 @@ async def agent_chat_stream(req: ChatStreamRequest, request: Request = None):
             opps = _filter_rows_by_text(opp_report.get("opportunities") or [],
                                         lambda o: " ".join([o.get("path", ""), " ".join(o.get("evidence") or [])]), spec)
             alerts = _filter_alert_report(alert_report, spec).get("alerts") or []
-            if not rows and not opps:
+            if not rows and not opps and action not in ("diagnose_drop", "experiment_plan"):
                 msg = f"Không có dữ liệu khớp bộ lọc: {desc}." if desc else "Đệ chưa có đủ dữ liệu để phân tích — chạy PageSpeed/SEO và cấu hình Ads/Clarity nếu muốn score đa kênh nha Đại ca."
                 yield ev({"type": "final", "text": msg})
                 yield ev({"type": "done"})
@@ -2079,20 +2901,6 @@ async def agent_chat_stream(req: ChatStreamRequest, request: Request = None):
                 instr = ("Dựa DUY NHẤT trên bảng Opportunity Score dưới, lập DANH SÁCH ƯU TIÊN TỐI ƯU. "
                          "Score đã gộp PSI slowness + SEO drop/traffic + Ads cost/friction + Clarity signal. "
                          "Mỗi mục PHẢI có Evidence và Confidence.")
-            elif action == "diagnose_drop":
-                def chnum(x):
-                    try:
-                        return float(str(x).replace("%", ""))
-                    except (ValueError, TypeError):
-                        return 0.0
-                drops = [r for r in rows if chnum(r["clicksCh"]) < 0 or chnum(r["viewsCh"]) < 0]
-                drops.sort(key=lambda r: (chnum(r["clicksCh"]) * (r["clicks"] or 1)))
-                tbl = "\n".join(f"{r['path']} | clicks {int(r['clicks'])} (Δ {fr(r['clicksCh'])}%) | views {int(r['views'])} (Δ {fr(r['viewsCh'])}%) | impr {int(r['impr'])}"
-                                for r in drops[:18]) or "(không có trang nào tụt so với kỳ trước)"
-                instr = ("Dựa DUY NHẤT trên bảng dưới (Δ% = so với tháng trước), CHẨN ĐOÁN vì sao traffic/clicks giảm: "
-                         "chỉ ra 3-6 trang kéo xuống mạnh nhất (tụt nhiều × lưu lượng lớn), nhận định khả năng nguyên nhân "
-                         "(mất thứ hạng, giảm hiển thị, mùa vụ...) và gợi ý kiểm tra. Mỗi nhận định PHẢI có Evidence và Confidence. "
-                         "Nếu không có trang tụt thì nói traffic ổn định/tăng.")
             elif action == "fix_suggest":
                 want = _path_only(str(data.get("url") or "")) if data.get("url") else ""
                 sel = [r for r in rows if want and want in r["path"]] if want else []
@@ -2107,7 +2915,7 @@ async def agent_chat_stream(req: ChatStreamRequest, request: Request = None):
             else:  # action_plan
                 tbl = "OPPORTUNITY SCORE:\n" + (opp_tbl or "(chưa có)") + "\n\nALERT MONITOR:\n" + alert_tbl
                 instr = ("Dựa DUY NHẤT trên dữ liệu dưới, lập KẾ HOẠCH HÀNH ĐỘNG TUẦN cho marketer: 4-6 việc xếp theo ƯU TIÊN "
-                         "(score cao/alert high làm trước), mỗi việc kèm lý do ngắn dựa số liệu. Mỗi việc PHẢI có Evidence và Confidence. "
+                         "(score cao/alert high làm trước), mỗi việc kèm lý do ngắn dựa số liệu và success metric/rollback nếu phù hợp. Mỗi việc PHẢI có Evidence và Confidence. "
                          "Cuối cùng 1 câu nhắc lịch tự động nếu hợp lý. Không bịa số.")
 
             yield ev({"type": "step", "text": f"🧠 Tổng hợp {ctxhdr} ({model})..."})
@@ -2234,8 +3042,6 @@ async def agent_chat_stream(req: ChatStreamRequest, request: Request = None):
         # ── Ads: danh sách campaign ──
         if action == "ads_list":
             import ads_agent
-            spec = _filter_spec_from_action({**data, "action": action}, req.message, "campaign")
-            desc = _filter_desc(spec, "campaign")
 
             if not ads_agent.configured():
                 yield ev({"type": "error", "text": "❌ Chưa cấu hình Google Ads (GOOGLE_ADS_* trong env)."})
@@ -2248,6 +3054,9 @@ async def agent_chat_stream(req: ChatStreamRequest, request: Request = None):
                 yield ev({"type": "done"})
                 return
             cl = camps.get("campaigns", [])
+            entity_resolver.register_campaigns(cl)
+            spec = _filter_spec_from_action({**data, "action": action}, req.message, "campaign")
+            desc = _filter_desc(spec, "campaign")
             cl = _filter_rows_by_text(cl, lambda c: " ".join(str(c.get(k, "")) for k in ("name", "status", "channel")), spec)
             if desc:
                 yield ev({"type": "step", "text": f"🔎 Áp bộ lọc: {desc}"})
@@ -2259,8 +3068,6 @@ async def agent_chat_stream(req: ChatStreamRequest, request: Request = None):
         # ── Ads: phân tích hiệu suất ──
         if action == "ads_perf":
             import ads_agent
-            spec = _filter_spec_from_action({**data, "action": action}, req.message, "campaign")
-            desc = _filter_desc(spec, "campaign")
 
             if not ads_agent.configured():
                 yield ev({"type": "error", "text": "❌ Chưa cấu hình Google Ads (GOOGLE_ADS_* trong env)."})
@@ -2281,6 +3088,9 @@ async def agent_chat_stream(req: ChatStreamRequest, request: Request = None):
                 yield ev({"type": "error", "text": f"❌ Lỗi Google Ads: {_ads_exc_text(e)}"})
                 yield ev({"type": "done"})
                 return
+            entity_resolver.register_campaigns(perf.get("rows") or [])
+            spec = _filter_spec_from_action({**data, "action": action}, req.message, "campaign")
+            desc = _filter_desc(spec, "campaign")
             if _filter_active(spec):
                 perf = _filter_dict_data(perf, ("name", "status"), spec)
             if not perf.get("rows"):
@@ -2353,8 +3163,6 @@ async def agent_chat_stream(req: ChatStreamRequest, request: Request = None):
         if action == "combined":
             import ads_agent
             import clarity_agent
-            spec = _filter_spec_from_action({**data, "action": action}, req.message, "url")
-            desc = _filter_desc(spec)
 
             if not ads_agent.configured():
                 yield ev({"type": "error", "text": "❌ Chưa cấu hình Google Ads (GOOGLE_ADS_*)."})
@@ -2367,6 +3175,9 @@ async def agent_chat_stream(req: ChatStreamRequest, request: Request = None):
             except Exception as e:  # noqa: BLE001
                 yield ev({"type": "error", "text": f"❌ Lỗi Google Ads: {_ads_exc_text(e)}"})
                 yield ev({"type": "done"}); return
+            entity_resolver.register_campaigns(ads.get("rows") or [])
+            spec = _filter_spec_from_action({**data, "action": action}, req.message, "url")
+            desc = _filter_desc(spec, "campaign" if spec.get("scope") == "campaign" else None)
             if _filter_active(spec):
                 if spec.get("scope") == "campaign":
                     ads = _filter_dict_data(ads, ("name", "status"), spec)
@@ -3119,7 +3930,10 @@ def _seo_results_fallback(tab: str, headers: list, rows: list) -> str:
 
 def _path_only(u: str) -> str:
     import re
-    return re.sub(r"^https?://[^/]+", "", str(u or "")) or "/"
+    raw = str(u or "")
+    raw = raw.split("#", 1)[0].split("?", 1)[0]
+    raw = re.split(r"&(?:utm_|gclid|gbraid|wbraid|fbclid)", raw, maxsplit=1)[0]
+    return re.sub(r"^https?://[^/]+", "", raw) or "/"
 
 
 def _num_value(x, default: float = 0.0) -> float:
@@ -3352,6 +4166,537 @@ def _clarity_signals() -> dict:
             signals.append(f"{name}: {round(val, 1)}")
     return {"configured": True, "signals": signals[:5], "score": min(15, len(signals) * 5),
             "heatmap": clarity_agent.heatmap_url(), "recordings": clarity_agent.recordings_url()}
+
+
+def _fmt_pct(n) -> str:
+    return f"{round(_num_value(n), 2)}%"
+
+
+def _ads_metric_groups(rows: list[dict], key_fn, label_fn) -> list[dict]:
+    groups: dict[str, dict] = {}
+    for r in rows or []:
+        key = str(key_fn(r) or "").strip()
+        if not key:
+            continue
+        cur = groups.setdefault(key, {
+            "key": key,
+            "name": str(label_fn(r) or key),
+            "impressions": 0.0,
+            "clicks": 0.0,
+            "cost": 0.0,
+            "conversions": 0.0,
+        })
+        cur["impressions"] += _num_value(r.get("impressions"))
+        cur["clicks"] += _num_value(r.get("clicks"))
+        cur["cost"] += _num_value(r.get("cost"))
+        cur["conversions"] += _num_value(r.get("conversions"))
+        for k in ("url", "base_url", "status", "speed_score", "bounce_rate"):
+            if r.get(k) is not None and cur.get(k) is None:
+                cur[k] = r.get(k)
+    for cur in groups.values():
+        cur["ctr"] = round(cur["clicks"] / cur["impressions"] * 100, 2) if cur["impressions"] else 0.0
+        cur["cpa"] = round(cur["cost"] / cur["conversions"]) if cur["conversions"] else None
+    return list(groups.values())
+
+
+def _conversion_tracking_report(days: int = 30) -> dict:
+    import ads_agent
+
+    days = max(1, min(int(days or 30), 90))
+    if not ads_agent.configured():
+        return {
+            "configured": False,
+            "days": days,
+            "health": "unknown",
+            "issues": [{
+                "lv": "med",
+                "scope": "config",
+                "text": "Chưa cấu hình Google Ads nên chưa audit được conversion tracking.",
+                "evidence": ["Thiếu GOOGLE_ADS_* trong env"],
+                "confidence": "high",
+                "score": 60,
+            }],
+            "campaigns": [],
+            "landing_pages": [],
+            "totals": {},
+        }
+
+    errors: list[str] = []
+    try:
+        perf = _cached(f"ads:perf:{days}", 300, lambda: ads_agent.campaign_perf(days))
+    except Exception as e:  # noqa: BLE001
+        errors.append(_ads_exc_text(e))
+        perf = {"rows": []}
+    try:
+        ldp = _cached(f"ads:ldp:{days}", 300, lambda: ads_agent.landing_page_perf(days))
+    except Exception as e:  # noqa: BLE001
+        errors.append(_ads_exc_text(e))
+        ldp = {"rows": []}
+
+    campaigns = _ads_metric_groups(perf.get("rows") or [],
+                                   lambda r: r.get("name") or r.get("id"),
+                                   lambda r: r.get("name") or r.get("id"))
+    if perf.get("rows"):
+        entity_resolver.register_campaigns(perf.get("rows") or [])
+    landing_pages = _ads_metric_groups(ldp.get("rows") or [],
+                                       lambda r: r.get("base_url") or r.get("url"),
+                                       lambda r: _path_only(r.get("base_url") or r.get("url") or ""))
+    for lp in landing_pages:
+        lp["path"] = _path_only(lp.get("key") or lp.get("url") or "")
+
+    base_rows = campaigns or landing_pages
+    totals = {
+        "impressions": sum(_num_value(r.get("impressions")) for r in base_rows),
+        "clicks": sum(_num_value(r.get("clicks")) for r in base_rows),
+        "cost": sum(_num_value(r.get("cost")) for r in base_rows),
+        "conversions": sum(_num_value(r.get("conversions")) for r in base_rows),
+    }
+    totals["ctr"] = round(totals["clicks"] / totals["impressions"] * 100, 2) if totals["impressions"] else 0.0
+    totals["cpa"] = round(totals["cost"] / totals["conversions"]) if totals["conversions"] else None
+
+    cost_floor = _num_value(os.getenv("TRACKING_AUDIT_COST_VND", os.getenv("ALERT_ADS_COST_VND", "500000")))
+    click_floor = _num_value(os.getenv("TRACKING_AUDIT_CLICK_FLOOR", "30"))
+    issues: list[dict] = []
+
+    if not base_rows and errors:
+        issues.append({
+            "lv": "high",
+            "scope": "auth",
+            "text": "Không đọc được Google Ads để audit conversion tracking.",
+            "evidence": errors[:2],
+            "confidence": "high",
+            "score": 95,
+        })
+    elif not base_rows:
+        issues.append({
+            "lv": "low",
+            "scope": "data",
+            "text": f"Không có dữ liệu Ads trong {days} ngày gần nhất.",
+            "evidence": [f"Google Ads rows=0, days={days}"],
+            "confidence": "medium",
+            "score": 35,
+        })
+
+    if totals.get("cost", 0) >= cost_floor and totals.get("clicks", 0) >= click_floor and not totals.get("conversions"):
+        issues.append({
+            "lv": "high",
+            "scope": "account",
+            "text": "Toàn bộ Ads có spend/click nhưng 0 conversion — cần kiểm tra conversion action/GTM/GA4 event.",
+            "evidence": [
+                f"Cost {_fmt_money(totals['cost'])}, clicks {_fmt_num(totals['clicks'])}, conversions 0",
+                f"Ngưỡng audit: cost >= {_fmt_money(cost_floor)}, clicks >= {_fmt_num(click_floor)}",
+            ],
+            "confidence": "high",
+            "score": 98,
+            "metrics": totals,
+        })
+
+    for c in campaigns:
+        if c["cost"] >= cost_floor and not c["conversions"]:
+            issues.append({
+                "lv": "high",
+                "scope": "campaign",
+                "name": c["name"],
+                "text": f"Campaign {c['name']} tiêu {_fmt_money(c['cost'])} nhưng 0 conversion.",
+                "evidence": [f"Clicks {_fmt_num(c['clicks'])}, impressions {_fmt_num(c['impressions'])}, CTR {_fmt_pct(c['ctr'])}, conversions 0"],
+                "confidence": "high",
+                "score": 92,
+                "metrics": c,
+            })
+        elif c["clicks"] >= click_floor and not c["conversions"]:
+            issues.append({
+                "lv": "med",
+                "scope": "campaign",
+                "name": c["name"],
+                "text": f"Campaign {c['name']} có {_fmt_num(c['clicks'])} clicks nhưng 0 conversion.",
+                "evidence": [f"Cost {_fmt_money(c['cost'])}, impressions {_fmt_num(c['impressions'])}, conversions 0"],
+                "confidence": "medium",
+                "score": 70,
+                "metrics": c,
+            })
+
+    for lp in landing_pages:
+        label = lp.get("path") or lp.get("name")
+        if lp["cost"] >= cost_floor and not lp["conversions"]:
+            issues.append({
+                "lv": "high",
+                "scope": "landing_page",
+                "path": label,
+                "text": f"Landing page {label} tiêu {_fmt_money(lp['cost'])} nhưng 0 conversion.",
+                "evidence": [f"Clicks {_fmt_num(lp['clicks'])}, impressions {_fmt_num(lp['impressions'])}, CTR {_fmt_pct(lp['ctr'])}, conversions 0"],
+                "confidence": "high",
+                "score": 90,
+                "metrics": lp,
+            })
+        elif lp["clicks"] >= click_floor and not lp["conversions"]:
+            issues.append({
+                "lv": "med",
+                "scope": "landing_page",
+                "path": label,
+                "text": f"Landing page {label} có {_fmt_num(lp['clicks'])} clicks nhưng 0 conversion.",
+                "evidence": [f"Cost {_fmt_money(lp['cost'])}, conversions 0"],
+                "confidence": "medium",
+                "score": 68,
+                "metrics": lp,
+            })
+
+    issues.sort(key=lambda x: -_num_value(x.get("score")))
+    health = "bad" if any(i.get("lv") == "high" for i in issues) else ("warn" if issues else "ok")
+    campaigns.sort(key=lambda x: (_num_value(x.get("conversions")) <= 0, _num_value(x.get("cost"))), reverse=True)
+    landing_pages.sort(key=lambda x: (_num_value(x.get("conversions")) <= 0, _num_value(x.get("cost"))), reverse=True)
+    return {
+        "configured": True,
+        "days": days,
+        "start": perf.get("start") or ldp.get("start"),
+        "end": perf.get("end") or ldp.get("end"),
+        "health": health,
+        "errors": errors,
+        "thresholds": {"cost": cost_floor, "clicks": click_floor},
+        "totals": totals,
+        "campaigns": campaigns[:30],
+        "landing_pages": landing_pages[:30],
+        "issues": issues[:50],
+    }
+
+
+def _filter_tracking_report(report: dict, spec: dict) -> dict:
+    if not _filter_active(spec):
+        return report
+    out = dict(report)
+    if spec.get("scope") == "campaign":
+        out["campaigns"] = _filter_rows_by_text(
+            report.get("campaigns") or [],
+            lambda r: " ".join([str(r.get("name", "")), str(r.get("key", ""))]),
+            spec,
+        )
+        out["landing_pages"] = report.get("landing_pages") or []
+    else:
+        out["landing_pages"] = _filter_rows_by_text(
+            report.get("landing_pages") or [],
+            lambda r: " ".join([str(r.get("path", "")), str(r.get("url", "")), str(r.get("key", ""))]),
+            spec,
+        )
+        out["campaigns"] = report.get("campaigns") or []
+    global_issues = [
+        i for i in (report.get("issues") or [])
+        if i.get("scope") in {"account", "auth", "config", "data"}
+    ]
+    scoped_issues = _filter_rows_by_text(
+        report.get("issues") or [],
+        lambda i: " ".join([
+            str(i.get("scope", "")), str(i.get("name", "")), str(i.get("path", "")),
+            str(i.get("text", "")), " ".join(str(x) for x in (i.get("evidence") or [])),
+        ]),
+        spec,
+    )
+    out["issues"] = list({id(i): i for i in [*global_issues, *scoped_issues]}.values())
+    out["filtered"] = True
+    return out
+
+
+def _tracking_audit_text(report: dict, max_items: int = 8) -> str:
+    if report.get("error"):
+        return f"Không audit được conversion tracking: {report['error']}"
+    if not report.get("configured"):
+        return "Chưa cấu hình Google Ads nên DeCho chưa audit được conversion tracking."
+
+    totals = report.get("totals") or {}
+    lines = [
+        f"**Conversion Tracking Audit** ({report.get('start') or '—'} → {report.get('end') or '—'}, {report.get('days')} ngày)",
+        f"- Tổng Ads: **{_fmt_money(totals.get('cost'))}**, **{_fmt_num(totals.get('clicks'))} clicks**, "
+        f"**{_fmt_num(totals.get('conversions'))} conversions**, CTR **{_fmt_pct(totals.get('ctr'))}**.",
+    ]
+    if report.get("errors"):
+        lines.append("- Lưu ý: một phần dữ liệu Ads lỗi: " + "; ".join(report["errors"][:2]))
+    issues = report.get("issues") or []
+    if not issues:
+        lines.append("- Không thấy dấu hiệu mất conversion tracking rõ ràng trong dữ liệu hiện tại.")
+        lines.append("Evidence: có dữ liệu Ads và conversion signal không bằng 0 hoặc spend chưa vượt ngưỡng audit. Confidence: medium.")
+        return "\n".join(lines)
+    lines.append(f"- Phát hiện **{len(issues)}** vấn đề/điểm nghi ngờ:")
+    for i in issues[:max_items]:
+        sev = "HIGH" if i.get("lv") == "high" else ("MED" if i.get("lv") == "med" else "LOW")
+        evidence = "; ".join((i.get("evidence") or [])[:2]) or "không có evidence chi tiết"
+        lines.append(f"- **[{sev}] {i.get('text')}**\n  Evidence: {evidence}\n  Confidence: {i.get('confidence', 'low')}")
+    if len(issues) > max_items:
+        lines.append(f"- Còn {len(issues) - max_items} issue khác trong API `/api/tracking-audit`.")
+    lines.append("Nên kiểm tra: Google Ads conversion action → GTM trigger/tag → GA4 event/key event → thank-you/form submit path.")
+    return "\n".join(lines)
+
+
+def _root_cause_report(limit: int = 12) -> dict:
+    opp = _opportunity_report(max(limit * 2, 20))
+    tracking = _conversion_tracking_report(30)
+    tracking_issues = tracking.get("issues") or []
+    hypotheses: list[dict] = []
+
+    def tracking_for_path(path: str) -> list[dict]:
+        needle = path.strip("/")
+        if not needle:
+            return [i for i in tracking_issues if i.get("scope") == "account"]
+        return [
+            i for i in tracking_issues
+            if i.get("scope") in {"landing_page", "account"} and (
+                i.get("scope") == "account" or _filter_text_matches(
+                    " ".join([str(i.get("path", "")), str(i.get("text", "")), " ".join(i.get("evidence") or [])]),
+                    {"include": [needle], "exclude": [], "match_mode": "any"},
+                )
+            )
+        ]
+
+    for o in opp.get("opportunities") or []:
+        path = o.get("path") or ""
+        evidence = list(o.get("evidence") or [])
+        ev_text = " ".join(evidence).lower()
+        causes: list[str] = []
+        if any(k in ev_text for k in ("psi", "lcp", "cls", "tbt", "speed")) or "PSI" in (o.get("sources") or []):
+            causes.append("Core Web Vitals/tốc độ trang có thể làm giảm trải nghiệm và conversion.")
+        if any(k in ev_text for k in ("clicks change", "seo ctr", "impressions")) or "SEO" in (o.get("sources") or []):
+            causes.append("SEO/CTR/ranking có thể là nguồn kéo traffic/clicks xuống.")
+        if any(k in ev_text for k in ("ads cost", "ads ctr", "0 conversion", "landing bounce")) or "Ads" in (o.get("sources") or []):
+            causes.append("Paid traffic có spend nhưng chất lượng/landing/conversion signal chưa ổn.")
+        if "Clarity" in (o.get("sources") or []):
+            causes.append("UX friction từ Clarity có thể làm user rời hoặc không hoàn tất hành động.")
+        t_hits = tracking_for_path(path)
+        if t_hits:
+            causes.append("Conversion tracking trên landing page có dấu hiệu thiếu/mất tín hiệu.")
+            for i in t_hits[:2]:
+                evidence.extend(i.get("evidence") or [])
+        if causes:
+            hypotheses.append({
+                "target": path,
+                "score": o.get("score", 0),
+                "root_causes": causes[:4],
+                "evidence": evidence[:7],
+                "confidence": _confidence(o.get("sources") or [], evidence),
+                "sources": sorted(set(o.get("sources") or []) | ({"Tracking"} if t_hits else set())),
+            })
+
+    for i in tracking_issues:
+        if i.get("scope") not in {"campaign", "account", "auth", "landing_page"}:
+            continue
+        hypotheses.append({
+            "target": i.get("path") or i.get("name") or i.get("scope"),
+            "score": i.get("score", 0),
+            "root_causes": ["Conversion tracking/conversion action có thể chưa ghi nhận đúng ở cấp campaign/landing/account."],
+            "evidence": i.get("evidence") or [],
+            "confidence": i.get("confidence", "medium"),
+            "sources": ["Tracking", "Ads"],
+        })
+
+    hypotheses.sort(key=lambda x: -_num_value(x.get("score")))
+    return {
+        "run": opp.get("run"),
+        "month": opp.get("month"),
+        "ads": opp.get("ads"),
+        "clarity": opp.get("clarity"),
+        "tracking": {"health": tracking.get("health"), "issues": tracking_issues[:8]},
+        "hypotheses": hypotheses[:max(1, min(int(limit or 12), 30))],
+    }
+
+
+def _filter_root_cause_report(report: dict, spec: dict) -> dict:
+    if not _filter_active(spec):
+        return report
+    out = dict(report)
+    out["hypotheses"] = _filter_rows_by_text(
+        report.get("hypotheses") or [],
+        lambda h: " ".join([
+            str(h.get("target", "")),
+            " ".join(str(c) for c in (h.get("root_causes") or [])),
+            " ".join(str(e) for e in (h.get("evidence") or [])),
+            " ".join(str(s) for s in (h.get("sources") or [])),
+        ]),
+        spec,
+    )
+    tracking = dict(report.get("tracking") or {})
+    tracking["issues"] = _filter_rows_by_text(
+        tracking.get("issues") or [],
+        lambda i: " ".join([
+            str(i.get("scope", "")),
+            str(i.get("name", "")),
+            str(i.get("path", "")),
+            str(i.get("text", "")),
+            " ".join(str(e) for e in (i.get("evidence") or [])),
+        ]),
+        spec,
+    )
+    out["tracking"] = tracking
+    out["filtered"] = True
+    return out
+
+
+def _root_cause_text(report: dict, max_items: int = 20) -> str:
+    hypos = report.get("hypotheses") or []
+    if not hypos:
+        return "Chưa có root-cause signal đủ rõ trong dữ liệu hiện tại. Nên refresh PSI/SEO/Ads hoặc bỏ bớt bộ lọc rồi thử lại."
+    lines = [
+        f"**Root Cause Engine** (PSI {report.get('run') or '—'} · SEO {report.get('month') or '—'} · tracking {(report.get('tracking') or {}).get('health') or '—'})",
+    ]
+    for idx, h in enumerate(hypos[:max_items], 1):
+        causes = h.get("root_causes") or []
+        evidence = h.get("evidence") or []
+        lines.append(
+            f"\n**{idx}. `{h.get('target')}` — score {h.get('score')}**\n"
+            f"- Sources: {', '.join(h.get('sources') or []) or '—'}\n"
+            f"- Root cause signals: {'; '.join(causes) or '—'}\n"
+            f"- Evidence: {'; '.join(evidence[:4]) or 'không có evidence chi tiết'}\n"
+            f"- Confidence: {h.get('confidence', 'medium')}"
+        )
+    if len(hypos) > max_items:
+        lines.append(
+            f"\nĐã rút gọn {len(hypos) - max_items} hypothesis ít ưu tiên hơn để chat không quá dài. "
+            "Nói rõ URL/campaign muốn xem để Đệ drill-down tiếp."
+        )
+    lines.append("\nNên làm tiếp: xử lý hypothesis có score cao nhất trước; nếu nguồn là Tracking/Ads thì QA GTM, GA4 key event và Google Ads conversion action trước khi tối ưu UX/content.")
+    return "\n".join(lines)
+
+
+def _experiment_from_opportunity(o: dict, idx: int) -> dict:
+    path = o.get("path") or f"opportunity-{idx}"
+    evidence = list(o.get("evidence") or [])
+    ev = " ".join(evidence).lower()
+    if "0 conversion" in ev or "ads cost" in ev:
+        kind = "conversion"
+        title = f"Kiểm chứng conversion path cho {path}"
+        hypothesis = "Nếu conversion event/tag và landing path được đo đúng, campaign có click/spend sẽ ghi nhận conversion hoặc micro-conversion."
+        change = "Audit GTM/GA4 key event/conversion action, test form/CTA end-to-end, bật debug view trước khi chỉnh landing."
+        success = "Conversion hoặc micro-conversion > 0, CPA đo được, không còn spend/click lớn nhưng 0 conversion."
+        rollback = "Nếu debug event không fire hoặc conversion vẫn 0 sau đủ click, dừng mở rộng spend và sửa tracking trước."
+    elif any(k in ev for k in ("lcp", "cls", "tbt", "psi", "speed")):
+        kind = "speed"
+        title = f"Thử nghiệm tăng tốc trang {path}"
+        hypothesis = "Nếu giảm LCP/CLS/TBT ở mobile, user sẽ ít rời trang hơn và SEO/Ads landing quality cải thiện."
+        change = "Tối ưu hero/ảnh, preload critical asset, defer non-critical JS, cố định kích thước khối gây layout shift."
+        success = "PSI mobile +10 điểm hoặc LCP < 2.5s, CLS < 0.1, TBT giảm rõ so với baseline."
+        rollback = "Nếu PSI/UX không cải thiện hoặc lỗi visual xuất hiện, revert phần asset/script vừa đổi."
+    elif any(k in ev for k in ("seo ctr", "clicks change", "impressions")):
+        kind = "seo"
+        title = f"Thử nghiệm snippet/content cho {path}"
+        hypothesis = "Nếu title/meta và nội dung khớp intent hơn, CTR/clicks sẽ hồi phục trên impressions hiện có."
+        change = "Viết lại title/meta theo query intent, refresh intro/FAQ, bổ sung internal link từ trang liên quan."
+        success = "CTR tăng 10-15% hoặc clicks hồi phục so với baseline tháng gần nhất."
+        rollback = "Nếu CTR giảm sau 14 ngày và impressions đủ lớn, quay lại title/meta cũ hoặc thử biến thể khác."
+    elif "clarity" in ev:
+        kind = "ux"
+        title = f"Thử nghiệm giảm friction UX cho {path}"
+        hypothesis = "Nếu xử lý vùng rage/dead click hoặc scroll drop, user sẽ hoàn tất CTA dễ hơn."
+        change = "Xem heatmap/recording, sửa CTA/vùng click lỗi, rút ngắn form hoặc đưa CTA lên vùng nhìn thấy."
+        success = "Friction signal giảm và CTR/lead click tăng trong 7-14 ngày."
+        rollback = "Nếu heatmap xấu hơn hoặc CTA click giảm, revert layout/CTA."
+    else:
+        kind = "mixed"
+        title = f"Thử nghiệm tối ưu {path}"
+        hypothesis = "Nếu xử lý tín hiệu score cao nhất, hiệu suất tổng hợp sẽ cải thiện."
+        change = "Ưu tiên hạng mục có evidence mạnh nhất, đo trước/sau cùng một cửa sổ thời gian."
+        success = "Metric chính cải thiện rõ hơn baseline và không làm xấu kênh còn lại."
+        rollback = "Nếu metric chính không cải thiện sau 14 ngày, revert hoặc chia nhỏ giả thuyết."
+    return {
+        "title": title,
+        "target": path,
+        "type": kind,
+        "priority_score": o.get("score", 0),
+        "hypothesis": hypothesis,
+        "change": change,
+        "baseline": evidence[:5],
+        "success_metric": success,
+        "target_7d": "Đo sanity/debug + early signal; không kết luận nếu sample quá thấp.",
+        "target_14d": "So sánh cùng weekday/window với baseline, giữ nguyên tracking và budget chính.",
+        "rollback_rule": rollback,
+        "confidence": o.get("confidence", "medium"),
+        "sources": o.get("sources") or [],
+    }
+
+
+def _experiment_report(limit: int = 8) -> dict:
+    limit = max(1, min(int(limit or 8), 20))
+    opp = _opportunity_report(max(limit * 2, 20))
+    experiments = [_experiment_from_opportunity(o, i + 1) for i, o in enumerate((opp.get("opportunities") or [])[:limit * 2])]
+    tracking = _conversion_tracking_report(30)
+    for issue in tracking.get("issues") or []:
+        if issue.get("scope") not in {"campaign", "account", "landing_page"}:
+            continue
+        target = issue.get("path") or issue.get("name") or issue.get("scope")
+        experiments.append({
+            "title": f"Tracking QA cho {target}",
+            "target": target,
+            "type": "tracking",
+            "priority_score": issue.get("score", 0),
+            "hypothesis": "Nếu tracking đúng, traffic có intent sẽ tạo conversion/micro-conversion đo được thay vì 0 tuyệt đối.",
+            "change": "Test conversion action, GTM trigger, GA4 key event, thank-you/form-submit path; ghi lại debug evidence.",
+            "baseline": issue.get("evidence") or [],
+            "success_metric": "Event fire ổn định trong debug + conversions/micro-conversions > 0 khi có click/spend.",
+            "target_7d": "Hoàn tất QA tracking và xác nhận event fire trên môi trường thật.",
+            "target_14d": "Theo dõi campaign/landing page cùng budget, không còn cost/click vượt ngưỡng nhưng 0 conversion.",
+            "rollback_rule": "Không tăng budget cho tới khi conversion signal đo được; revert tag nếu tạo duplicate event.",
+            "confidence": issue.get("confidence", "medium"),
+            "sources": ["Tracking", "Ads"],
+        })
+    experiments.sort(key=lambda x: -_num_value(x.get("priority_score")))
+    deduped, seen = [], set()
+    for exp in experiments:
+        key = (exp.get("type"), exp.get("target"))
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(exp)
+    return {
+        "run": opp.get("run"),
+        "month": opp.get("month"),
+        "ads": opp.get("ads"),
+        "tracking_health": tracking.get("health"),
+        "experiments": deduped[:limit],
+    }
+
+
+def _filter_experiment_report(report: dict, spec: dict) -> dict:
+    if not _filter_active(spec):
+        return report
+    out = dict(report)
+    out["experiments"] = _filter_rows_by_text(
+        report.get("experiments") or [],
+        lambda e: " ".join([
+            str(e.get("title", "")),
+            str(e.get("target", "")),
+            str(e.get("type", "")),
+            str(e.get("change", "")),
+            str(e.get("hypothesis", "")),
+            " ".join(str(b) for b in (e.get("baseline") or [])),
+        ]),
+        spec,
+    )
+    out["filtered"] = True
+    return out
+
+
+def _experiments_text(report: dict, max_items: int = 20) -> str:
+    exps = report.get("experiments") or []
+    if not exps:
+        return "Chưa có experiment candidate đủ baseline/evidence trong dữ liệu hiện tại. Nên chạy/refresh PSI, SEO, Ads hoặc tracking audit trước rồi thử lại."
+    lines = [
+        f"**Experiment Planner** (PSI {report.get('run') or '—'} · SEO {report.get('month') or '—'} · tracking {report.get('tracking_health') or '—'})",
+    ]
+    for idx, e in enumerate(exps[:max_items], 1):
+        baseline = "; ".join((e.get("baseline") or [])[:4]) or "chưa có baseline chi tiết"
+        lines.append(
+            f"\n**{idx}. {e.get('title')}**\n"
+            f"- Target: `{e.get('target')}` · Type: `{e.get('type')}` · Priority score: **{e.get('priority_score')}**\n"
+            f"- Hypothesis: {e.get('hypothesis')}\n"
+            f"- Change: {e.get('change')}\n"
+            f"- Baseline: {baseline}\n"
+            f"- Success metric: {e.get('success_metric')}\n"
+            f"- 7 ngày: {e.get('target_7d')}\n"
+            f"- 14 ngày: {e.get('target_14d')}\n"
+            f"- Rollback: {e.get('rollback_rule')}\n"
+            f"- Evidence: {baseline}\n"
+            f"- Confidence: {e.get('confidence', 'medium')}"
+        )
+    if len(exps) > max_items:
+        lines.append(
+            f"\nĐã rút gọn {len(exps) - max_items} experiment ít ưu tiên hơn để chat không quá dài. "
+            "Nói rõ URL/campaign muốn xem để Đệ drill-down tiếp."
+        )
+    return "\n".join(lines)
 
 
 def _opportunity_report(limit: int = 20) -> dict:
