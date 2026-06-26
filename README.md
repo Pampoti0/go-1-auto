@@ -22,6 +22,8 @@ Marketer, content creator, growth team quản lý website nhiều trang (case th
 - **Conversion Tracking Auditor**: soi campaign/landing page có spend/click nhưng 0 conversion, cảnh báo gap ở Google Ads conversion action, GTM, GA4 key event hoặc thank-you/form path
 - **Root Cause Engine**: gộp SEO drop, PageSpeed/CWV, Ads, Clarity và tracking gap thành giả thuyết nguyên nhân có Evidence + Confidence
 - **Experiment Planner**: biến opportunity/root-cause thành plan đo được: hypothesis, baseline, success metric, mốc 7/14 ngày và rollback rule
+- **Insights + Weekly Autopilot**: gom Opportunity, Alerts, Tracking Audit, Root Cause và Experiments thành màn drill-down tiện xem; chat "báo cáo tuần" để lấy top việc ưu tiên, chỉ đọc dữ liệu và không tự tạo task
+- **Health endpoint + Jobs**: endpoint kỹ thuật kiểm tra trạng thái PSI, SEO/GSC/GA4, Ads, Clarity, Memory, cache; có job nền để refresh insight mà không bắt người dùng mở raw JSON
 - **URL Intelligence**: hợp nhất traffic + PageSpeed theo từng URL, drill-down chi tiết
 - **DeCho mascot + memory**: nhân vật 3D/2D phản ứng theo trạng thái hệ thống, hỏi nhanh theo bối cảnh màn hình; long-term memory chỉ lưu fact khi user chủ động "ghi nhớ" và có nút reset actor local
 
@@ -32,8 +34,8 @@ Một nơi duy nhất thay cho PageSpeed Insights, Search Console, GA4, Google A
 
 ```
 ┌─ UI: static/index.html (React + Tailwind qua CDN, no build) ─┐
-│ Tổng quan · Chat với DeCho · URL Intelligence · PageSpeed    │
-│ Dashboard · Alerts · Cấu hình  +  DeCho dock (3D/sprite/pose)│
+│ Tổng quan · Chat · URL Intelligence · PageSpeed · Insights   │
+│ Paid Campaigns · Cấu hình + DeCho                            │
 └──────────────────────────┬───────────────────────────────────┘
                            │ REST + SSE
 ┌─ FastAPI (server.py) ────┴───────────────────────────────────┐
@@ -47,7 +49,7 @@ Một nơi duy nhất thay cho PageSpeed Insights, Search Console, GA4, Google A
 │ · runtime_config  — config động, đồng bộ Sheet (_config),    │
 │                     sống qua container recreate              │
 │ Scheduler nền: PSI (daily/weekly/monthly) + SEO (monthly)    │
-│ Cache đọc Sheet/API; Clarity cache RAM + disk chống quota     │
+│ Cache đọc Sheet/API RAM + disk; Clarity disk cache chống quota│
 └──────────────────────────┬───────────────────────────────────┘
               GreenNode MaaS (Gemma/Qwen/MiniMax)
               Google Sheets / PSI API / GSC / GA4 / Ads / Clarity
@@ -101,6 +103,18 @@ CLARITY_CACHE_FILE=.cache/clarity_insights.json
 
 File `.cache/` đã được ignore, không commit dữ liệu API. Response Clarity trả thêm `cache: "api" | "memory" | "disk"` để kiểm tra nguồn cache.
 
+### API/report cache
+
+Các report nặng như Opportunity, Alerts, Tracking Audit, Root Cause, Experiments và Weekly Autopilot dùng cache RAM + disk để đỡ đọc lại Sheet/API khi dev restart liên tục.
+
+```bash
+API_DISK_CACHE=true
+API_DISK_CACHE_DIR=.cache/api
+API_STALE_CACHE_TTL=21600
+```
+
+`/api/system-health` sẽ hiển thị nguồn cache, tuổi cache và trạng thái từng nguồn dữ liệu. Các report trong tab Insights dùng stale-while-revalidate: nếu cache disk đã quá TTL ngắn nhưng vẫn nằm trong `API_STALE_CACHE_TTL`, UI trả dữ liệu cũ ngay rồi refresh nền. Xóa `.cache/api` khi muốn ép DeCho đọc lại toàn bộ report.
+
 ### Test intent/filter parser
 
 Filter parser dùng hướng **entity-first**: chỉ tự lọc khi match URL/campaign entity đã học, hoặc khi user nói cue rõ như `url chứa ...`, `/path`, `campaign ...`, `trừ ...`. Câu nghiệp vụ chung như `phân tích số liệu SEO` không được biến thành filter keyword.
@@ -131,6 +145,9 @@ Secrets inject qua env lúc runtime (không bake vào image / không commit): `S
 | `GET /api/tracking-audit` | Conversion Tracking Auditor: spend/click nhưng 0 conversion, GTM/GA4/conversion action gaps |
 | `GET /api/root-cause` | Root Cause Engine: giả thuyết nguyên nhân đa nguồn, có Evidence + Confidence |
 | `GET /api/experiments` | Experiment Planner: hypothesis, baseline, success metric, mốc 7/14 ngày và rollback rule |
+| `GET /api/weekly-autopilot` | Top việc tuần này từ alerts + opportunity + tracking + root-cause + experiments |
+| `GET /api/system-health` | Trạng thái auth, freshness, cache và cấu hình nguồn dữ liệu |
+| `POST /api/jobs` · `GET /api/jobs` | Chạy nền refresh insight/weekly/tracking/root-cause/experiment và xem trạng thái |
 | `GET /api/ads/*` · `GET /api/clarity` | Google Ads/landing page/Clarity insights |
 | `GET/PUT /api/config` | Config động PSI + SEO (persist qua Sheet) |
 | `POST /api/check` · `POST /api/seo/run` | Trigger chạy trực tiếp |

@@ -94,6 +94,20 @@ def _knowledge() -> str:
     return _md_file("AGENT_FILE", "AGENT.md",
                     "\n\n# DOMAIN KNOWLEDGE & OUTPUT STANDARDS — áp dụng khi phân tích và đề xuất\n")
 
+
+def _analysis_messages(system_prompt: str, history: list[dict] | None, user_message: str, *, include_history: bool = True) -> list[dict]:
+    """Build chat-completion messages.
+
+    Data reports should usually ignore chat history because follow-up questions
+    like "đang so với đâu?" can otherwise contaminate a fresh report request.
+    """
+    msgs = [{"role": "system", "content": system_prompt}]
+    if include_history:
+        msgs.extend(history or [])
+    msgs.append({"role": "user", "content": user_message})
+    return msgs
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Startup: khôi phục config, bật scheduler, warm-up Ads (logic ở _startup bên dưới)
@@ -169,12 +183,16 @@ def _run_seo_safe(year: int | None = None, month: int | None = None, url_contain
         _invalidate_cache()
 
 
-# Đề xuất đang chờ xác nhận — TÁCH theo session (tránh 'ok' của người này dính pending người khác)
-_pending_by_session: dict = {}   # session_id -> {"range": {...}, "op": {...}}
+# Đề xuất đang chờ xác nhận — tách theo user + session
+_pending_by_session: dict = {}   # "user_id:session_id" -> {"range": {...}, "op": {...}}
 
 
-def _pending_for(sid: str) -> dict:
-    return _pending_by_session.setdefault(sid or "_global", {"range": {}, "op": {}})
+def _pending_key(user_id: str | None, session_id: str | None) -> str:
+    return f"{user_id or '_anon'}:{session_id or '_global'}"
+
+
+def _pending_for(user_id: str | None, session_id: str | None) -> dict:
+    return _pending_by_session.setdefault(_pending_key(user_id, session_id), {"range": {}, "op": {}})
 
 
 def _run_seo_range_safe(start: str, end: str, url_contains: str | None = None, filter_label: str | None = None):
@@ -304,6 +322,146 @@ def healthz():
     }
 
 
+def _latest_psi_freshness() -> dict:
+    if not (config.SHEET_ID and (config.SERVICE_ACCOUNT_FILE or config.SERVICE_ACCOUNT_JSON)):
+        return {"configured": bool(config.SHEET_ID), "latest": "", "rows": 0, "error": ""}
+    try:
+        tab, _, rows = _cached("health:psi_latest", 120, lambda: sheet_store.read_results(1))
+        return {"configured": True, "latest": tab or "", "rows": len(rows or []), "error": ""}
+    except Exception as e:  # noqa: BLE001
+        return {"configured": True, "latest": "", "rows": 0, "error": _friendly_error_text(e)}
+
+
+def _latest_seo_freshness() -> dict:
+    try:
+        tabs = _cached("health:seo_tabs", 300, _seo_list_tabs)
+        return {"configured": True, "latest": (tabs or [""])[-1], "tabs": len(tabs or []), "error": ""}
+    except Exception as e:  # noqa: BLE001
+        return {"configured": True, "latest": "", "tabs": 0, "error": _friendly_error_text(e)}
+
+
+def _clarity_freshness() -> dict:
+    from datetime import datetime
+
+    import clarity_agent
+
+    out = {"configured": clarity_agent.configured(), "cache": "", "latest": "", "error": ""}
+    try:
+        if clarity_agent._CACHE_FILE.exists():  # noqa: SLF001
+            payload = json.loads(clarity_agent._CACHE_FILE.read_text(encoding="utf-8"))  # noqa: SLF001
+            ts = float(payload.get("ts") or 0)
+            out.update(cache="disk", latest=datetime.fromtimestamp(ts, app_time.APP_TZ).isoformat(timespec="seconds"))
+    except Exception as e:  # noqa: BLE001
+        out["error"] = _friendly_error_text(e)
+    return out
+
+
+def _service_status(name: str, ok: bool, *, configured: bool = True, message: str = "", action: str = "", freshness: dict | None = None) -> dict:
+    if not configured:
+        level = "missing"
+    elif ok:
+        level = "ok"
+    else:
+        level = "error"
+    return {
+        "name": name,
+        "status": level,
+        "configured": configured,
+        "message": message,
+        "action": action,
+        "freshness": freshness or {},
+    }
+
+
+def _system_health_report() -> dict:
+    import ads_agent
+    import clarity_agent
+    import seo_agent
+
+    cfg = runtime_config.current()
+    psi_fresh = _latest_psi_freshness()
+    seo_auth = _seo_auth_health()
+    seo_fresh = _latest_seo_freshness() if seo_auth.get("auth_configured") else {"configured": False, "latest": "", "tabs": 0}
+    clarity_fresh = _clarity_freshness()
+    services = [
+        _service_status(
+            "PageSpeed Insights",
+            bool(config.PSI_API_KEY and config.SHEET_ID and not psi_fresh.get("error")),
+            configured=bool(config.PSI_API_KEY and config.SHEET_ID),
+            message=psi_fresh.get("error") or f"{len(cfg.get('urls') or [])} URL · {cfg.get('schedule_mode')} {cfg.get('schedule_time')}",
+            action="Thêm PSI_API_KEY, SHEET_ID và service account nếu thiếu.",
+            freshness=psi_fresh,
+        ),
+        _service_status(
+            "Search Console / GA4 / SEO Sheet",
+            bool(seo_auth.get("auth_usable") and not seo_fresh.get("error")),
+            configured=bool(seo_auth.get("auth_configured")),
+            message=seo_auth.get("auth_error") or seo_fresh.get("error") or f"Auth {seo_auth.get('auth_mode') or 'service account'} · latest {seo_fresh.get('latest') or '—'}",
+            action="Thêm service account vào Search Console site và GA4 property nếu 403.",
+            freshness={**seo_fresh, "auth_mode": seo_auth.get("auth_mode"), "auth_source": seo_auth.get("auth_source"), "site": seo_agent.SITE_URL, "ga4_property": seo_agent.GA4_PROPERTY_ID},
+        ),
+        _service_status(
+            "Google Ads",
+            ads_agent.configured(),
+            configured=ads_agent.configured(),
+            message="Configured" if ads_agent.configured() else "Thiếu GOOGLE_ADS_* env.",
+            action="Auth lại Google Ads nếu invalid_grant; kiểm tra customer id/developer token nếu 403.",
+            freshness={"cache": _cache_meta_for("ads:camps")},
+        ),
+        _service_status(
+            "Microsoft Clarity",
+            clarity_agent.configured() and not clarity_fresh.get("error"),
+            configured=clarity_agent.configured(),
+            message=clarity_fresh.get("error") or ("Configured" if clarity_agent.configured() else "Thiếu CLARITY_PROJECT_ID / CLARITY_API_TOKEN."),
+            action="Dùng cache/backoff để tránh hết quota; set CLARITY_CACHE_FILE để sống qua restart.",
+            freshness=clarity_fresh,
+        ),
+        _service_status(
+            "AgentBase Memory",
+            memory_agent.configured(),
+            configured=memory_agent.configured(),
+            message="Configured" if memory_agent.configured() else "Thiếu MEMORY_ID hoặc memory env.",
+            action="Nếu không dùng memory dài hạn có thể bỏ qua.",
+            freshness={},
+        ),
+        _service_status(
+            "Report Cache",
+            True,
+            configured=True,
+            message=f"Memory entries {len(_api_cache)} · disk cache {'on' if _API_DISK_CACHE else 'off'}",
+            action="API_DISK_CACHE_DIR=.cache/api; xóa cache khi cần refresh toàn bộ.",
+            freshness={"entries": len(_api_cache), "disk": str(_API_CACHE_DIR), "disk_enabled": _API_DISK_CACHE},
+        ),
+    ]
+    blocking = [s for s in services if s["status"] == "error"]
+    missing = [s for s in services if s["status"] == "missing" and s["name"] in {"PageSpeed Insights", "Search Console / GA4 / SEO Sheet"}]
+    overall = "bad" if blocking else ("warn" if missing or any(s["status"] == "missing" for s in services) else "ok")
+    return {
+        "overall": overall,
+        "generated_at": app_time.iso_now(),
+        "timezone": app_time.APP_TZ_NAME,
+        "services": services,
+        "cache": {
+            "memory": [_cache_meta_for(k) for k in sorted(_api_cache_meta)[:80]],
+            "disk_enabled": _API_DISK_CACHE,
+            "disk_dir": str(_API_CACHE_DIR),
+        },
+        "config": {
+            "urls": len(cfg.get("urls") or []),
+            "schedule": f"{cfg.get('schedule_mode')} {cfg.get('schedule_time')}",
+            "sheet_url": f"https://docs.google.com/spreadsheets/d/{config.SHEET_ID}" if config.SHEET_ID else "",
+        },
+    }
+
+
+@app.get("/api/system-health")
+def api_system_health():
+    try:
+        return _system_health_report()
+    except Exception as e:  # noqa: BLE001
+        return {"overall": "error", "error": _friendly_error_text(e), "services": []}
+
+
 @app.get("/api/config")
 def get_config():
     return runtime_config.current()
@@ -311,22 +469,163 @@ def get_config():
 
 # ── Cache đọc Sheet (tránh 429: quota 60 reads/phút) ──────────────────────────
 _api_cache: dict = {}
+_api_cache_meta: dict = {}
+_api_cache_refreshing: set[str] = set()
+_api_cache_lock = threading.Lock()
+_API_CACHE_DIR = _Path(os.getenv("API_DISK_CACHE_DIR", ".cache/api"))
+_API_DISK_CACHE = os.getenv("API_DISK_CACHE", "true").lower() != "false"
+_API_STALE_CACHE_TTL = int(os.getenv("API_STALE_CACHE_TTL", "21600"))
+_INSIGHT_CACHE_VERSION = "v2"
 
 
-def _cached(key: str, ttl: int, fn):
+def _insight_cache_key(key: str) -> str:
+    return f"insight:{_INSIGHT_CACHE_VERSION}:{key}"
+
+
+def _cache_disk_path(key: str):
+    import re
+
+    safe = re.sub(r"[^a-zA-Z0-9_.-]+", "_", key)[:160] or "cache"
+    return _API_CACHE_DIR / f"{safe}.json"
+
+
+def _cache_read_disk(key: str, ttl: int, now: float, *, allow_stale: bool = False, stale_ttl: int | None = None):
+    if not _API_DISK_CACHE:
+        return None
+    try:
+        p = _cache_disk_path(key)
+        if not p.exists():
+            return None
+        payload = json.loads(p.read_text(encoding="utf-8"))
+        ts = float(payload.get("ts") or 0)
+        age = now - ts
+        if age < ttl:
+            return ts, payload.get("value"), "disk"
+        if allow_stale and age < int(stale_ttl or _API_STALE_CACHE_TTL):
+            return ts, payload.get("value"), "stale-disk"
+        if now - ts >= ttl:
+            return None
+    except Exception as e:  # noqa: BLE001
+        log.warning("API disk cache đọc lỗi (bỏ qua): %s: %s", type(e).__name__, e)
+        return None
+
+
+def _cache_write_disk(key: str, val):
+    if not _API_DISK_CACHE:
+        return
+    try:
+        _API_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+        p = _cache_disk_path(key)
+        tmp = p.with_suffix(p.suffix + ".tmp")
+        tmp.write_text(json.dumps({"key": key, "ts": time.time(), "value": val}, ensure_ascii=False), encoding="utf-8")
+        tmp.replace(p)
+    except Exception as e:  # noqa: BLE001
+        log.warning("API disk cache ghi lỗi (bỏ qua): %s: %s", type(e).__name__, e)
+
+
+def _refresh_cache_async(key: str, ttl: int, fn):
+    with _api_cache_lock:
+        if key in _api_cache_refreshing:
+            return
+        _api_cache_refreshing.add(key)
+
+    def run():
+        try:
+            val = fn()
+            _cache_put(key, ttl, val)
+        except Exception as e:  # noqa: BLE001
+            log.warning("API stale cache refresh lỗi (bỏ qua): %s: %s", type(e).__name__, e)
+        finally:
+            with _api_cache_lock:
+                _api_cache_refreshing.discard(key)
+
+    threading.Thread(target=run, daemon=True).start()
+
+
+def _cached(key: str, ttl: int, fn, *, allow_stale: bool = False, stale_ttl: int | None = None, refresh_stale: bool = True):
     now = time.time()
     ent = _api_cache.get(key)
     if ent and now - ent[0] < ttl:
+        _api_cache_meta[key] = {"key": key, "ts": ent[0], "ttl": ttl, "source": "memory"}
         return ent[1]
+    disk = _cache_read_disk(key, ttl, now, allow_stale=allow_stale, stale_ttl=stale_ttl)
+    if disk is not None:
+        ts, val, source = disk
+        _api_cache[key] = (ts, val)
+        _api_cache_meta[key] = {"key": key, "ts": ts, "ttl": ttl, "source": source}
+        if source == "stale-disk" and refresh_stale:
+            _refresh_cache_async(key, ttl, fn)
+        return val
     val = fn()
     # không cache kết quả lỗi
     if not (isinstance(val, dict) and val.get("error")):
         _api_cache[key] = (now, val)
+        _api_cache_meta[key] = {"key": key, "ts": now, "ttl": ttl, "source": "api"}
+        _cache_write_disk(key, val)
+    return val
+
+
+def _cache_put(key: str, ttl: int, val):
+    """Warm RAM/disk cache for derived reports built from the same source data."""
+    if isinstance(val, dict) and val.get("error"):
+        return val
+    now = time.time()
+    _api_cache[key] = (now, val)
+    _api_cache_meta[key] = {"key": key, "ts": now, "ttl": ttl, "source": "api"}
+    _cache_write_disk(key, val)
     return val
 
 
 def _invalidate_cache():
     _api_cache.clear()
+    _api_cache_meta.clear()
+
+
+def _cache_meta_for(key: str) -> dict:
+    from datetime import datetime
+
+    meta = dict(_api_cache_meta.get(key) or {})
+    if meta.get("ts"):
+        meta["fetched_at"] = datetime.fromtimestamp(float(meta["ts"]), app_time.APP_TZ).isoformat(timespec="seconds")
+        meta["age_seconds"] = max(0, int(time.time() - float(meta["ts"])))
+        meta["fresh"] = meta["age_seconds"] < int(meta.get("ttl") or 0)
+    return meta
+
+
+def _report_meta(source: str, *, window: str | None = None, cache_key: str | None = None, note: str | None = None) -> dict:
+    meta = {
+        "source": source,
+        "window": window or "",
+        "generated_at": app_time.iso_now(),
+        "timezone": app_time.APP_TZ_NAME,
+    }
+    if cache_key:
+        meta["cache"] = _cache_meta_for(cache_key)
+    if note:
+        meta["note"] = note
+    return meta
+
+
+def _with_meta(data: dict, source: str, *, window: str | None = None, cache_key: str | None = None, note: str | None = None) -> dict:
+    out = dict(data or {})
+    out["_meta"] = _report_meta(source, window=window, cache_key=cache_key, note=note)
+    return out
+
+
+def _friendly_error_text(err) -> str:
+    raw = str(err or "")
+    low = raw.lower()
+    if "invalid_grant" in low or "expired or revoked" in low:
+        return "Token Google đã hết hạn/bị revoke. Nếu còn refresh token hợp lệ thì DeCho sẽ tự refresh; nếu Google revoke refresh token thì cần auth lại."
+    if "403" in low or "sufficient permission" in low or "permission" in low:
+        return "Thiếu quyền truy cập. Kiểm tra service account/user đã được thêm vào Search Console/GA4/Google Ads đúng property/customer chưa."
+    if "429" in low or "quota" in low or "rate limit" in low:
+        return "Đang bị quota/rate limit. DeCho sẽ ưu tiên cache/backoff để tránh đốt limit thêm."
+    if "timeout" in low or "connecttimeout" in low or "timed out" in low:
+        return "Kết nối timeout. Có thể mạng/API chậm; thử lại sau hoặc dùng dữ liệu cache nếu có."
+    if "not configured" in low or "chưa cấu hình" in low:
+        return "Thiếu cấu hình env hoặc credential cho nguồn dữ liệu này."
+    return raw[:500]
 
 
 @app.get("/api/results")
@@ -465,9 +764,11 @@ def api_opportunities(limit: int = 20):
     """Opportunity Score: PSI + SEO + Ads + Clarity, kèm evidence/confidence."""
     try:
         limit = max(1, min(int(limit or 20), 50))
-        return _cached(f"opportunities:{limit}", 300, lambda: _opportunity_report(limit))
+        key = _insight_cache_key(f"opportunities:{limit}")
+        out = _cached(key, 300, lambda: _opportunity_report(limit), allow_stale=True)
+        return _with_meta(out, "PSI Sheet + SEO Sheet + Google Ads + Clarity", window=f"latest · limit {limit}", cache_key=key)
     except Exception as e:  # noqa: BLE001
-        return {"error": f"{type(e).__name__}: {e}", "opportunities": []}
+        return {"error": _friendly_error_text(e), "opportunities": []}
 
 
 @app.get("/api/alerts")
@@ -475,9 +776,11 @@ def api_alerts(limit: int = 50):
     """Alert monitor hợp nhất: PSI, SEO, Ads, Clarity."""
     try:
         limit = max(1, min(int(limit or 50), 100))
-        return _cached(f"alerts:{limit}", 300, lambda: _alert_report(limit))
+        key = _insight_cache_key(f"alerts:{limit}")
+        out = _cached(key, 300, lambda: _alert_report(limit), allow_stale=True)
+        return _with_meta(out, "PSI Sheet + SEO Sheet + Google Ads + Clarity", window=f"latest · limit {limit}", cache_key=key)
     except Exception as e:  # noqa: BLE001
-        return {"error": f"{type(e).__name__}: {e}", "alerts": []}
+        return {"error": _friendly_error_text(e), "alerts": []}
 
 
 @app.get("/api/entities")
@@ -491,9 +794,11 @@ def api_tracking_audit(days: int = 30):
     """Conversion tracking audit from Ads campaign + landing page metrics."""
     try:
         days = max(1, min(int(days or 30), 90))
-        return _cached(f"tracking_audit:{days}", 300, lambda: _conversion_tracking_report(days))
+        key = _insight_cache_key(f"tracking_audit:{days}")
+        out = _cached(key, 300, lambda: _conversion_tracking_report(days), allow_stale=True)
+        return _with_meta(out, "Google Ads campaign + landing page metrics", window=f"{days} days", cache_key=key)
     except Exception as e:  # noqa: BLE001
-        return {"error": f"{type(e).__name__}: {e}", "issues": []}
+        return {"error": _friendly_error_text(e), "issues": []}
 
 
 @app.get("/api/root-cause")
@@ -501,9 +806,11 @@ def api_root_cause(limit: int = 12):
     """Root-cause signals across SEO, PSI, Ads, Clarity and tracking."""
     try:
         limit = max(1, min(int(limit or 12), 30))
-        return _cached(f"root_cause:{limit}", 300, lambda: _root_cause_report(limit))
+        key = _insight_cache_key(f"root_cause:{limit}")
+        out = _cached(key, 300, lambda: _root_cause_report(limit), allow_stale=True)
+        return _with_meta(out, "Opportunity + Tracking Audit", window=f"latest · limit {limit}", cache_key=key)
     except Exception as e:  # noqa: BLE001
-        return {"error": f"{type(e).__name__}: {e}", "hypotheses": []}
+        return {"error": _friendly_error_text(e), "hypotheses": []}
 
 
 @app.get("/api/experiments")
@@ -511,9 +818,226 @@ def api_experiments(limit: int = 8):
     """Suggested measurement plans for top opportunities."""
     try:
         limit = max(1, min(int(limit or 8), 20))
-        return _cached(f"experiments:{limit}", 300, lambda: _experiment_report(limit))
+        key = _insight_cache_key(f"experiments:{limit}")
+        out = _cached(key, 300, lambda: _experiment_report(limit), allow_stale=True)
+        return _with_meta(out, "Opportunity + Tracking Audit", window=f"latest · limit {limit}", cache_key=key)
     except Exception as e:  # noqa: BLE001
-        return {"error": f"{type(e).__name__}: {e}", "experiments": []}
+        return {"error": _friendly_error_text(e), "experiments": []}
+
+
+def _weekly_autopilot_report() -> dict:
+    # Build the heavy cross-source snapshot once, then derive the other reports
+    # from it. This keeps the first Insights load from repeating Ads/Sheet reads
+    # for Alerts, Root Cause and Experiments.
+    opportunity_base = _cached(_insight_cache_key("opportunities:50"), 300, lambda: _opportunity_report(50))
+    opportunities = _cache_put(_insight_cache_key("opportunities:20"), 300, _slice_opportunity_report(opportunity_base, 20))
+    _cache_put(_insight_cache_key("opportunities:30"), 300, _slice_opportunity_report(opportunity_base, 30))
+    tracking = _cached(_insight_cache_key("tracking_audit:30"), 300, lambda: _conversion_tracking_report(30))
+    alerts = _cache_put(_insight_cache_key("alerts:50"), 300, _alert_report_from_opportunity(opportunity_base, 50))
+    root = _cache_put(_insight_cache_key("root_cause:12"), 300, _root_cause_report_from_inputs(opportunity_base, tracking, 12))
+    _cache_put(_insight_cache_key("root_cause:20"), 300, _root_cause_report_from_inputs(opportunity_base, tracking, 20))
+    experiments = _cache_put(_insight_cache_key("experiments:8"), 300, _experiment_report_from_inputs(opportunity_base, tracking, 8))
+    _cache_put(_insight_cache_key("experiments:12"), 300, _experiment_report_from_inputs(opportunity_base, tracking, 12))
+
+    actions: list[dict] = []
+    for a in (alerts.get("alerts") or [])[:8]:
+        actions.append({
+            "priority": "P0" if a.get("lv") == "high" else "P1",
+            "title": a.get("text") or "Alert cần xử lý",
+            "why": "; ".join((a.get("evidence") or [])[:2]),
+            "confidence": a.get("confidence") or "medium",
+            "source": a.get("source") or "Alerts",
+            "target": a.get("path") or a.get("name") or "",
+        })
+    for o in (opportunities.get("opportunities") or [])[:8]:
+        actions.append({
+            "priority": "P1" if _num_value(o.get("score")) >= 70 else "P2",
+            "title": f"Tối ưu {o.get('path')} (score {o.get('score')})",
+            "why": "; ".join((o.get("evidence") or [])[:3]),
+            "confidence": o.get("confidence") or "medium",
+            "source": ",".join(o.get("sources") or []),
+            "target": o.get("path") or "",
+        })
+    for i in (tracking.get("issues") or [])[:5]:
+        actions.append({
+            "priority": "P0" if i.get("lv") == "high" else "P1",
+            "title": i.get("text") or "Kiểm tra tracking",
+            "why": "; ".join((i.get("evidence") or [])[:2]),
+            "confidence": i.get("confidence") or "medium",
+            "source": "Tracking",
+            "target": i.get("path") or i.get("name") or i.get("scope") or "",
+        })
+
+    rank = {"P0": 0, "P1": 1, "P2": 2}
+    deduped, seen = [], set()
+    for item in sorted(actions, key=lambda x: (rank.get(x.get("priority"), 9), x.get("target") or "", x.get("title") or "")):
+        key = (item.get("target"), item.get("title"))
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(item)
+
+    return {
+        "generated_at": app_time.iso_now(),
+        "timezone": app_time.APP_TZ_NAME,
+        "summary": {
+            "alerts": len(alerts.get("alerts") or []),
+            "high_alerts": len([a for a in (alerts.get("alerts") or []) if a.get("lv") == "high"]),
+            "opportunities": len(opportunities.get("opportunities") or []),
+            "tracking_health": tracking.get("health"),
+            "root_hypotheses": len(root.get("hypotheses") or []),
+            "experiments": len(experiments.get("experiments") or []),
+        },
+        "next_actions": deduped[:10],
+        "top_opportunities": (opportunities.get("opportunities") or [])[:8],
+        "top_alerts": (alerts.get("alerts") or [])[:8],
+        "tracking_issues": (tracking.get("issues") or [])[:8],
+        "root_causes": (root.get("hypotheses") or [])[:8],
+        "experiments": (experiments.get("experiments") or [])[:8],
+        "_meta": _report_meta(
+            "Alerts + Opportunity + Tracking + Root Cause + Experiments",
+            window="weekly planning snapshot",
+            cache_key=_insight_cache_key("weekly_autopilot"),
+            note="Read-only planning report; does not create tasks or change campaigns.",
+        ),
+    }
+
+
+def _weekly_autopilot_text(report: dict, max_items: int = 8) -> str:
+    if report.get("error"):
+        return f"Không lập được Weekly Autopilot: {report['error']}"
+    summary = report.get("summary") or {}
+    lines = [
+        "**Weekly Autopilot**",
+        f"- Alerts: **{summary.get('alerts', 0)}** ({summary.get('high_alerts', 0)} high)",
+        f"- Opportunities: **{summary.get('opportunities', 0)}** · Root hypotheses: **{summary.get('root_hypotheses', 0)}** · Tracking: **{summary.get('tracking_health') or '—'}**",
+        "",
+        "**Top việc tuần này:**",
+    ]
+    actions = report.get("next_actions") or []
+    if not actions:
+        lines.append("- Chưa có action đủ rõ. Nên refresh PSI/SEO/Ads hoặc kiểm tra cấu hình nguồn dữ liệu.")
+        return "\n".join(lines)
+    for idx, a in enumerate(actions[:max_items], 1):
+        lines.append(
+            f"{idx}. **{a.get('priority')} — {a.get('title')}**\n"
+            f"   Evidence: {a.get('why') or '—'}\n"
+            f"   Source: {a.get('source') or '—'} · Confidence: {a.get('confidence') or 'medium'}"
+        )
+    if len(actions) > max_items:
+        lines.append(f"\nCòn {len(actions) - max_items} việc ít ưu tiên hơn trong tab Insights.")
+    lines.append("\nGợi ý vận hành: xử lý P0 trước, sau đó chọn 1 experiment có success metric rõ để đo 7-14 ngày.")
+    return "\n".join(lines)
+
+
+@app.get("/api/weekly-autopilot")
+def api_weekly_autopilot():
+    try:
+        key = _insight_cache_key("weekly_autopilot")
+        out = _cached(key, 300, _weekly_autopilot_report, allow_stale=True)
+        return _with_meta(out, "Alerts + Opportunity + Tracking + Root Cause + Experiments", window="weekly planning snapshot", cache_key=key)
+    except Exception as e:  # noqa: BLE001
+        return {"error": _friendly_error_text(e), "next_actions": []}
+
+
+_jobs: dict = {}
+_jobs_lock = threading.Lock()
+
+
+class JobRequest(BaseModel):
+    kind: str = "refresh_insights"
+    params: dict | None = None
+
+
+def _job_result_summary(result) -> dict:
+    if not isinstance(result, dict):
+        return {}
+    counts = {}
+    for key in ("next_actions", "opportunities", "alerts", "issues", "hypotheses", "experiments", "root_causes", "tracking_issues"):
+        val = result.get(key)
+        if isinstance(val, list):
+            counts[key] = len(val)
+    summary = {
+        "overall": result.get("overall"),
+        "health": result.get("health"),
+        "summary": result.get("summary") if isinstance(result.get("summary"), dict) else None,
+        "counts": counts,
+        "error": result.get("error"),
+    }
+    return {k: v for k, v in summary.items() if v not in (None, {}, "")}
+
+
+def _job_public(job: dict) -> dict:
+    return {k: v for k, v in job.items() if k not in {"result", "result_raw"}}
+
+
+def _run_job(job_id: str, kind: str, params: dict):
+    with _jobs_lock:
+        _jobs[job_id].update(status="running", started_at=app_time.iso_now(), message="Đang chạy...")
+    try:
+        if kind == "weekly_autopilot":
+            result = _weekly_autopilot_report()
+        elif kind == "tracking_audit":
+            result = _conversion_tracking_report(int((params or {}).get("days") or 30))
+        elif kind == "root_cause":
+            result = _root_cause_report(int((params or {}).get("limit") or 12))
+        elif kind == "experiments":
+            result = _experiment_report(int((params or {}).get("limit") or 8))
+        elif kind == "opportunities":
+            result = _opportunity_report(int((params or {}).get("limit") or 20))
+        elif kind == "alerts":
+            result = _alert_report(int((params or {}).get("limit") or 50))
+        else:
+            _invalidate_cache()
+            result = {
+                "system_health": _system_health_report(),
+                "weekly": _weekly_autopilot_report(),
+            }
+        with _jobs_lock:
+            _jobs[job_id].update(
+                status="done",
+                finished_at=app_time.iso_now(),
+                message="Xong",
+                result_summary=_job_result_summary(result),
+                result_raw=result,
+            )
+    except Exception as e:  # noqa: BLE001
+        with _jobs_lock:
+            _jobs[job_id].update(status="error", finished_at=app_time.iso_now(), message=_friendly_error_text(e), error=_friendly_error_text(e))
+
+
+@app.post("/api/jobs")
+def api_start_job(req: JobRequest):
+    import uuid
+
+    kind = (req.kind or "refresh_insights").strip()
+    params = req.params or {}
+    allowed = {"refresh_insights", "weekly_autopilot", "tracking_audit", "root_cause", "experiments", "opportunities", "alerts"}
+    if kind not in allowed:
+        return {"error": f"Unsupported job kind: {kind}", "allowed": sorted(allowed)}
+    job_id = uuid.uuid4().hex[:12]
+    job = {"id": job_id, "kind": kind, "params": params, "status": "queued", "created_at": app_time.iso_now(), "message": "Đang xếp hàng..."}
+    with _jobs_lock:
+        _jobs[job_id] = job
+    threading.Thread(target=_run_job, args=(job_id, kind, params), daemon=True).start()
+    return _job_public(job)
+
+
+@app.get("/api/jobs")
+def api_jobs():
+    with _jobs_lock:
+        vals = [_job_public(v) for v in _jobs.values()]
+    vals.sort(key=lambda x: x.get("created_at", ""), reverse=True)
+    return {"jobs": vals[:30]}
+
+
+@app.get("/api/jobs/{job_id}")
+def api_job(job_id: str):
+    with _jobs_lock:
+        job = _jobs.get(job_id)
+    if not job:
+        return {"error": "Job không tồn tại."}
+    return _job_public(job)
 
 
 class CreateCampaignRequest(BaseModel):
@@ -881,7 +1405,7 @@ _KNOWN_ACTIONS = {
     "ldp_perf", "clarity", "combined", "create_campaign",
     "status", "help", "web_search", "web_fetch", "priority_fix", "action_plan",
     "diagnose_drop", "fix_suggest", "tracking_audit", "experiment_plan",
-    "alerts", "remember", "reply",
+    "weekly_autopilot", "alerts", "remember", "reply",
 }
 _TOOL_ALIAS = {"search": "web_search", "websearch": "web_search", "fetch": "web_fetch",
                "read_url": "web_fetch", "readurl": "web_fetch", "open_url": "web_fetch", "browse": "web_fetch"}
@@ -994,9 +1518,240 @@ def _looks_confirm(msg: str) -> bool:
     return m in _CONFIRM_CUES or any(m == c or m.startswith(c + " ") for c in _CONFIRM_CUES)
 
 
+def _looks_comparison_period_question(msg: str) -> bool:
+    """Follow-up hỏi mốc/baseline của số so sánh, không phải yêu cầu phân tích mới."""
+    text = _filter_norm(msg)
+    text = (
+        text.replace("so zoi", "so voi")
+        .replace("so vs", "so voi")
+        .replace("chaneg", "change")
+    )
+    words = text.split()
+    business_not_followup = (
+        "baseline experiment",
+        "baseline success metric",
+        "change request",
+        "change log",
+        "changelog",
+        "period pricing",
+        "moc launch",
+        "kpi muc tieu",
+        "doi thu",
+        "product va tutorial",
+        "product voi tutorial",
+        "psi voi seo",
+        "pagespeed voi seo",
+        "gia thi truong",
+    )
+    if any(p in text for p in business_not_followup):
+        return False
+    has_period_word = any(p in text for p in ("thang", "ky", "period", "khoang", "moc"))
+    short_period_only = (
+        len(words) <= 4
+        and any(p in text for p in ("ky nao", "ki nao", "moc nao", "thang nao", "thang may", "period nao"))
+    )
+    if short_period_only:
+        return True
+    compare = (
+        any(p in text for p in ("so sanh", "compare", "doi chieu", "so voi", "baseline", "change", "tang giam"))
+        or "truoc" in text
+    )
+    period = (
+        any(p in text for p in ("thang may", "thang nao", "ky nao", "period nao", "khoang nao", "moc nao"))
+        or ("so voi" in text and has_period_word)
+        or ("baseline" in text and any(p in text for p in ("month", "thang", "ky", "period", "moc")))
+        or ("change" in text and has_period_word)
+        or ("change" in text and any(p in text for p in ("la sao", "sao a", "sao vay", "tinh tu dau", "so voi gi", "so voi dau", "moc nao", "ky nao")))
+        or ("tang giam" in text and has_period_word)
+        or any(p in text for p in (
+            "so voi dau", "so voi cai gi", "so voi cai nao",
+            "so voi gi",
+            "doi chieu voi dau", "tinh tu dau", "lay moc",
+            "moc so sanh", "moc doi chieu", "ky truoc cu the",
+            "ky truoc la khi nao", "thang truoc la khi nao",
+            "dot truoc cu the",
+        ))
+    )
+    return compare and period
+
+
+def _prev_month_label(month: str) -> str | None:
+    import re
+    from datetime import date
+
+    from dateutil.relativedelta import relativedelta
+
+    mt = re.match(r"^(20\d{2})-(\d{2})$", str(month or "").strip())
+    if not mt:
+        return None
+    cur = date(int(mt.group(1)), int(mt.group(2)), 1)
+    prev = cur - relativedelta(months=1)
+    return f"{prev.year}-{prev.month:02d}"
+
+
+def _latest_month_from_history(history: list[dict] | None) -> str | None:
+    import re
+
+    items = list(history or [])
+    preferred_patterns = (
+        r"(?i)report\s*(?:[—\-:]\s*)?(?:tháng|thang)?\s*(20\d{2}-\d{2})",
+        r"(?i)seo\s+(?:tháng|thang)\s*(20\d{2}-\d{2})",
+        r"(?i)seo\s+sheet\s+tab\s*(20\d{2}-\d{2})",
+        r"(?i)(?:đọc|doc)\s+\d+\s+(?:dòng|dong)\s+(?:từ|tu)\s+seo\s+sheet\s+tab\s*(20\d{2}-\d{2})",
+    )
+    for item in reversed(items):
+        content = str(item.get("content") or "")
+        if _looks_comparison_period_answer(content):
+            continue
+        preferred = [m for pat in preferred_patterns for m in re.findall(pat, content)]
+        if preferred:
+            return max(preferred)
+    all_months = []
+    for item in items:
+        content = str(item.get("content") or "")
+        if _looks_comparison_period_answer(content):
+            continue
+        norm = _filter_norm(content)
+        if any(k in norm for k in ("seo", "gsc", "ga4", "traffic", "clicks", "impressions", "views", "users")):
+            all_months.extend(re.findall(r"\b20\d{2}-\d{2}\b", content))
+    if all_months:
+        return max(all_months)
+    return None
+
+
+def _looks_comparison_period_answer(text: str) -> bool:
+    norm = _filter_norm(text)
+    return (
+        ("thang lien truoc" in norm and ("so voi" in norm or "dang so voi" in norm or "so sanh" in norm))
+        or "khong co baseline co dinh" in norm
+        or "khong dung mot moc so sanh co dinh" in norm
+        or ("cac lan do psi" in norm and "moc so sanh co dinh" in norm)
+    )
+
+
+def _looks_metric_relationship_answer(text: str) -> bool:
+    norm = _filter_norm(text)
+    return (
+        "khong phai cung mot loai so lieu" in norm
+        or "cach decho noi hai phan nay" in norm
+        or "vua cham vua co traffic" in norm
+    )
+
+
+def _history_looks_psi_only(history: list[dict] | None) -> bool:
+    text = _filter_norm("\n".join(str(m.get("content") or "") for m in (history or [])[-6:]))
+    has_psi = any(k in text for k in ("pagespeed", "page speed", "psi", "core web", "web vitals", "lcp", "cls", "tbt", "fcp", "inp", "performance score"))
+    has_seo = any(k in text for k in ("seo", "gsc", "ga4", "traffic", "clicks", "impressions", "views", "users"))
+    return has_psi and not has_seo
+
+
+def _latest_data_context(history: list[dict] | None) -> str | None:
+    """Classify the latest analytics answer as psi/seo.
+
+    PageSpeed reports can mention "SEO blog" or a tab month, so the newest
+    context type has to win before we infer month-over-month SEO.
+    """
+    for item in reversed(list(history or [])):
+        content = str(item.get("content") or "")
+        if not content or _looks_comparison_period_answer(content) or _looks_metric_relationship_answer(content):
+            continue
+        norm = _filter_norm(content)
+        psi = any(k in norm for k in (
+            "pagespeed", "page speed", "psi sheet", "core web", "web vitals",
+            "performance score", "fcp", "lcp", "cls", "tbt", "inp", "ttfb",
+            "mobile score", "desktop score",
+        ))
+        seo = any(k in norm for k in (
+            "seo sheet", "gsc", "ga4", "search console", "organic", "traffic",
+            "clicks", "impressions", "views", "users", "ctr", "position",
+            "clicks_change", "views_change", "change_",
+        ))
+        if psi and (not seo or any(k in norm for k in ("pagespeed report", "bao cao pagespeed", "psi sheet", "phan tich ket qua pagespeed", "core web", "lcp", "cls", "tbt"))):
+            return "psi"
+        if seo:
+            return "seo"
+    return None
+
+
+def _psi_comparison_reply() -> str:
+    return (
+        "Với báo cáo PageSpeed vừa rồi, DeCho **không dùng một mốc so sánh cố định**. "
+        "Nó đang đọc các lần đo PSI có trong tab hiện tại rồi nhận xét theo chuỗi đo: "
+        "điểm mới nhất, điểm thấp/cao, xu hướng giữa các lần đo, và các URL đang kém.\n\n"
+        "Nói gọn: nếu thấy câu 'giảm/tăng/phục hồi' trong PageSpeed, đó là so giữa các lần đo PSI đang có."
+    )
+
+
+_SESSION_DATA_CONTEXT: dict[str, dict] = {}
+
+
+def _data_context_key(user_id: str | None, session_id: str | None) -> str | None:
+    if not session_id:
+        return None
+    return f"{user_id or '_anon'}:{session_id}"
+
+
+def _remember_data_context(user_id: str | None, session_id: str | None, kind: str, month: str | None = None):
+    key = _data_context_key(user_id, session_id)
+    if not key or kind not in {"seo", "psi"}:
+        return
+    _SESSION_DATA_CONTEXT[key] = {"kind": kind, "month": month or ""}
+
+
+def _session_data_context(user_id: str | None, session_id: str | None) -> dict | None:
+    key = _data_context_key(user_id, session_id)
+    if not key:
+        return None
+    ctx = _SESSION_DATA_CONTEXT.get(key)
+    return dict(ctx) if ctx else None
+
+
+def _seo_comparison_reply(month: str | None, source: str) -> str:
+    prev = _prev_month_label(month or "")
+    if not (month and prev):
+        return (
+            "Với báo cáo SEO, mặc định DeCho so sánh **tháng đang phân tích** với "
+            "**tháng liền trước**. Câu vừa rồi chưa có đủ context tháng cụ thể nên Đệ không đoán bừa."
+        )
+    return (
+        f"Với báo cáo SEO trong context hiện tại: **SEO tháng {month}** đang so với **{prev}** "
+        "(tháng liền trước). "
+        f"Đệ xác định từ {source}.\n\n"
+        "Lưu ý: PageSpeed chỉ là các lần đo trong tab/tháng đang xem; phần so sánh tăng/giảm theo tháng là dữ liệu SEO "
+        "(các cột *_change_% trong SEO Sheet)."
+    )
+
+
+def _comparison_period_reply(history: list[dict] | None = None, user_id: str | None = None, session_id: str | None = None) -> str:
+    ctx = _session_data_context(user_id, session_id)
+    if ctx and ctx.get("kind") == "psi":
+        return _psi_comparison_reply()
+    if ctx and ctx.get("kind") == "seo":
+        return _seo_comparison_reply(ctx.get("month"), "phiên chat hiện tại")
+
+    if _latest_data_context(history) == "psi":
+        return _psi_comparison_reply()
+    month = _latest_month_from_history(history)
+    source = "context chat"
+    if not month:
+        if _history_looks_psi_only(history):
+            return _psi_comparison_reply()
+        source = "SEO Sheet"
+        try:
+            tabs = _seo_list_tabs()
+            month = tabs[-1] if tabs else None
+        except Exception as e:  # noqa: BLE001
+            return (
+                "Với báo cáo SEO, mặc định DeCho so sánh **tháng đang phân tích** với "
+                "**tháng liền trước**.\n\n"
+                f"Hiện Đệ chưa đọc được danh sách tab SEO để nói chính xác tháng nào: {_friendly_error_text(e)}"
+            )
+    return _seo_comparison_reply(month, source)
+
+
 _INTENT_OVERRIDE_ACTIONS = {
     "ads_list", "ads_perf",
-    "action_plan", "priority_fix", "diagnose_drop", "fix_suggest", "tracking_audit", "experiment_plan", "alerts",
+    "action_plan", "priority_fix", "diagnose_drop", "fix_suggest", "tracking_audit", "experiment_plan", "weekly_autopilot", "alerts",
 }
 
 
@@ -1007,6 +1762,8 @@ def _hard_intent_override(msg: str, current_action: str) -> dict | None:
     to SEO report/query can trigger expensive or blocked work.
     """
     if current_action == "confirm":
+        return None
+    if _looks_comparison_period_question(msg):
         return None
     kw = _all_keyword_intent(msg)
     if kw and kw.get("action") == "query_results" and current_action in ("run_check", "run_report", "seo_query", "seo_range"):
@@ -1080,6 +1837,116 @@ def _strip_think(text: str) -> str:
     return re.sub(r"<think>.*?</think>", "", text, flags=re.S).strip()
 
 
+def _capability_gap_reply(message: str) -> str | None:
+    """Deterministic guard for unsupported delivery/notification features.
+
+    The LLM tends to be overly helpful here ("send me a webhook and I'll set it
+    up"). In this codebase there is no Slack/Discord/webhook sender yet, so keep
+    the answer grounded and explicit.
+    """
+    import unicodedata
+
+    raw = (message or "").lower()
+    norm = unicodedata.normalize("NFD", raw)
+    norm = "".join(ch for ch in norm if unicodedata.category(ch) != "Mn")
+    destinations = ("slack", "discord", "webhook", "teams", "telegram", "zalo", "email", "mail")
+    send_cues = ("gui", "send", "notify", "notification", "thong bao", "tu dong gui", "auto gui", "day vao", "push")
+    report_cues = ("bao cao", "report", "alert", "canh bao", "weekly", "hang tuan", "hang ngay")
+    if not any(d in norm for d in destinations):
+        return None
+    if not (any(c in norm for c in send_cues) or any(c in norm for c in report_cues)):
+        return None
+    return (
+        "Chưa có tính năng tự gửi báo cáo/alert ra Slack, Discord, email hay webhook trong bản hiện tại.\n\n"
+        "Hiện DeCho đọc dữ liệu, tổng hợp báo cáo và hiển thị trong app. Các báo cáo có thể ghi vào Sheet/cache, "
+        "nhưng chưa có bước tự đẩy thông báo ra kênh bên ngoài.\n\n"
+        "Muốn thêm phần này thì cần bổ sung nơi nhận webhook, mẫu nội dung gửi, cơ chế gửi lại khi lỗi "
+        "và cách bảo vệ webhook URL trong giao diện/log. Chỉ đưa webhook URL thôi thì DeCho chưa tự gửi được."
+    )
+
+
+def _metric_relationship_reply(message: str) -> str | None:
+    """Grounded answer for natural questions about how data sources relate."""
+    norm = _filter_norm(message)
+    has_pagespeed = any(k in norm for k in ("pagespeed", "page speed", "psi", "core web", "web vitals", "toc do", "speed"))
+    has_seo = any(k in norm for k in ("seo", "gsc", "search console", "organic", "traffic", "clicks", "impressions"))
+    asks_relation = any(k in norm for k in ("lien quan", "so voi", "khac nhau", "anh huong", "co lien he", "relation", "compare"))
+    if not (has_pagespeed and has_seo and asks_relation):
+        return None
+    return (
+        "Có liên quan, nhưng không phải cùng một loại số liệu nha Đại ca.\n\n"
+        "- **PageSpeed/PSI** cho biết trang nhanh hay chậm: Performance Score, LCP, CLS, TBT, INP, TTFB.\n"
+        "- **SEO/GSC/GA4** cho biết trang có kéo được traffic không: clicks, impressions, views, users, CTR.\n\n"
+        "Cách DeCho nối hai phần này: trang nào **vừa chậm vừa có traffic/clicks/impressions cao** thì ưu tiên tối ưu trước. "
+        "PageSpeed thấp không tự động nghĩa là SEO tụt, nhưng nó có thể làm UX, conversion và khả năng giữ traffic kém hơn."
+    )
+
+
+def _insights_grounded_reply(message: str) -> str | None:
+    """Grounded answer for Insights data/cache/quota questions."""
+    norm = _filter_norm(message)
+    mentions_insights = any(k in norm for k in (
+        "insights", "opportunity", "root cause", "experiments", "experiment", "tracking audit", "weekly autopilot",
+    ))
+    asks_about_data_or_cache = any(k in norm for k in (
+        "data", "du lieu", "lay tu dau", "nguon", "source", "cache", "api", "goi moi", "goi lai",
+        "lien tuc", "limit", "quota", "luu", "luu o dau", "fresh", "tai lai",
+    ))
+    asks_about_purpose = any(k in norm for k in ("dung de lam gi", "lam gi", "de lam gi", "la gi"))
+    if not mentions_insights or not (asks_about_data_or_cache or asks_about_purpose):
+        return None
+    return (
+        "Có cache nha Đại ca, không phải cứ mở Insights hay bấm **Tải lại** là DeCho gọi lại toàn bộ nguồn dữ liệu.\n\n"
+        "Luồng hiện tại là:\n"
+        "- Nếu dữ liệu vừa được lấy gần đây, DeCho dùng lại bản cache để tránh chậm và tránh đụng quota.\n"
+        "- Nếu cache đã cũ, DeCho mới đọc lại các nguồn thật: PageSpeed Sheet, SEO Sheet, Google Ads và Clarity nếu có cấu hình.\n"
+        "- Riêng Clarity được giữ cache lâu hơn vì nguồn này dễ hết limit hơn.\n\n"
+        "Nói đơn giản: **Tải lại** nghĩa là “lấy bản tốt nhất hiện có”; còn cache mới thì trả nhanh, cache hết hạn thì mới refresh dữ liệu thật.\n\n"
+        "Cache chỉ là bản lưu tạm cho app đang chạy, không phải nơi lưu báo cáo lâu dài. Muốn ép đọc mới hoàn toàn thì xóa cache hoặc đợi cache hết hạn."
+    )
+
+
+def _repair_response_prefix(text: str) -> str:
+    """Fix occasional clipped first characters before sending final text."""
+    base_fixes = (
+        ("ưa có", "Chưa có"),
+        ("ổng quan", "Tổng quan"),
+        ("ưới đây", "Dưới đây"),
+        ("áo cáo", "Báo cáo"),
+        ("óm tắt", "Tóm tắt"),
+        ("huyến nghị", "Khuyến nghị"),
+        ("ên làm tiếp", "Nên làm tiếp"),
+        ("hận xét", "Nhận xét"),
+    )
+    leading = text[:len(text) - len(text.lstrip())]
+    body = text.lstrip()
+    for prefix in ("", "# ", "## ", "### "):
+        for bad, good in base_fixes:
+            candidate = prefix + bad
+            if body.startswith(candidate):
+                return leading + prefix + good + body[len(candidate):]
+    return text
+
+
+def _repair_pagespeed_report_prefix(text: str) -> str:
+    """Fix occasional clipped first characters in PageSpeed report titles."""
+    text = _repair_response_prefix(text)
+    fixes = (
+        ("# Speed Report", "# PageSpeed Report"),
+        ("Speed Report", "PageSpeed Report"),
+        ("# áo cáo PageSpeed", "# Báo cáo PageSpeed"),
+        ("áo cáo PageSpeed", "Báo cáo PageSpeed"),
+        ("# 📊 áo cáo PageSpeed", "# 📊 Báo cáo PageSpeed"),
+        ("📊 áo cáo PageSpeed", "📊 Báo cáo PageSpeed"),
+    )
+    leading = text[:len(text) - len(text.lstrip())]
+    body = text.lstrip()
+    for bad, good in fixes:
+        if body.startswith(bad):
+            return leading + good + body[len(bad):]
+    return text
+
+
 def _results_prompt(tab: str, headers: list, rows: list) -> str:
     keep = list(range(min(11, len(headers))))  # bỏ các cột label, giữ metric chính
     lines = [" | ".join(str(headers[i]) for i in keep)]
@@ -1092,7 +1959,8 @@ def _results_prompt(tab: str, headers: list, rows: list) -> str:
         + "\n".join(lines) +
         "\n\nTrả lời câu hỏi dựa trên dữ liệu trên. Yêu cầu: TIẾNG VIỆT, ngắn gọn (tối đa ~15 dòng), "
         "nêu số liệu cụ thể, có thể dùng **đậm** và gạch đầu dòng. Với mọi khuyến nghị, kèm "
-        "Evidence (URL + metric) và Confidence (high/medium/low). KHÔNG dùng ký hiệu LaTeX "
+        "Evidence (URL + metric) và Confidence (high/medium/low). Không tự so với benchmark/industry nếu dữ liệu không có; "
+        "không nói Google penalty, chỉ nói ảnh hưởng UX/conversion/Core Web Vitals nếu phù hợp. KHÔNG dùng ký hiệu LaTeX "
         "(viết mũi tên là →, không viết $\\rightarrow$). Trả lời trực tiếp, không suy luận dài. /no_think"
         + _knowledge() + _persona()
     )
@@ -1187,7 +2055,7 @@ class ChatStreamRequest(BaseModel):
     session_id: str | None = None  # AgentBase Memory: sessionId (đổi khi xóa lịch sử)
 
 
-def _sanitize_history(history: list[dict] | None, limit: int = 10) -> list[dict]:
+def _sanitize_history(history: list[dict] | None, limit: int = 24) -> list[dict]:
     out = []
     for m in (history or [])[-limit:]:
         role, content = m.get("role"), str(m.get("content") or "")[:2000]
@@ -1255,6 +2123,7 @@ def _unified_prompt() -> str:
         '- TÌM TRÊN WEB (thông tin NGOÀI dữ liệu nội bộ: tin tức/cập nhật mới, đối thủ, xu hướng thị trường, "best practice mới nhất", giá dịch vụ bên ngoài, sự kiện sau tháng 5/2025): {"action":"web_search","query":"<từ khoá tìm kiếm súc tích>"}. CHỦ ĐỘNG chọn web_search khi câu cần thông tin CẬP NHẬT/ngoài hệ thống — đừng trả lời chung chung từ trí nhớ rồi thôi.\n'
         '- ĐỌC 1 URL cụ thể (người dùng dán link hoặc nói "đọc/tóm tắt trang này"): {"action":"web_fetch","url":"<url>"}\n'
         '- ƯU TIÊN TỐI ƯU / Opportunity Score ("nên tối ưu trang nào", "trang nào vừa chậm vừa nhiều traffic", "ưu tiên fix"): {"action":"priority_fix"}\n'
+        '- WEEKLY AUTOPILOT / báo cáo vận hành tuần đầy đủ ("weekly autopilot", "báo cáo tuần", "top việc tuần này", "weekly report"): {"action":"weekly_autopilot"}\n'
         '- KẾ HOẠCH HÀNH ĐỘNG từ Opportunity Score + alerts ("tuần này nên làm gì", "cần làm gì", "lên kế hoạch", "to-do", "ưu tiên công việc"): {"action":"action_plan"}\n'
         '- CHẨN ĐOÁN SỤT GIẢM ("tại sao clicks/traffic/views giảm", "vì sao tụt", "trang nào kéo xuống", "phân tích nguyên nhân giảm"): {"action":"diagnose_drop"}\n'
         '- GỢI Ý CÁCH SỬA trang chậm ("làm sao tăng tốc", "cách tối ưu trang X", "fix LCP/CLS thế nào", "trang chậm sửa sao"): {"action":"fix_suggest","url":"<path nếu có>"}\n'
@@ -2350,6 +3219,8 @@ def _all_keyword_intent(message: str) -> dict | None:
     m = message.lower()
     if m.strip() in ("ok", "oke", "okay", "đồng ý", "dong y", "chạy đi", "chay di", "xác nhận", "xac nhan", "confirm", "yes", "lgtm"):
         return {"action": "confirm"}
+    if _looks_comparison_period_question(message):
+        return None
     _health = any(k in m for k in ("ổn không", "on khong", "tốt không", "tot khong", "khoẻ không", "khoe khong",
                                    "tình hình", "tinh hinh", "thế nào", "the nao", "ra sao", "ổn chứ", "hiệu quả"))
     # Insight xuyên mảng
@@ -2364,6 +3235,9 @@ def _all_keyword_intent(message: str) -> dict | None:
         return {"action": "experiment_plan"}
     if any(k in m for k in ("alert", "alerts", "cảnh báo", "canh bao", "bất thường", "bat thuong", "monitor")):
         return {"action": "alerts"}
+    if any(k in m for k in ("weekly autopilot", "báo cáo tuần", "bao cao tuan", "top việc tuần", "top viec tuan",
+                            "weekly report")):
+        return {"action": "weekly_autopilot"}
     if any(k in m for k in ("ưu tiên", "uu tien", "nên tối ưu", "nen toi uu", "fix trước", "fix truoc", "trang nào nên")):
         return {"action": "priority_fix"}
     if any(k in m for k in ("nên làm gì", "nen lam gi", "kế hoạch", "ke hoach", "to-do", "todo", "việc tuần", "cần làm gì", "can lam gi", "ưu tiên công việc")):
@@ -2551,12 +3425,13 @@ async def agent_chat_stream(req: ChatStreamRequest, request: Request = None):
     model = req.model if req.model in ALLOWED_MODELS else MAAS_MODEL
 
     final_parts: list[str] = []  # gom câu trả lời để ghi AgentBase Memory
-    _pend = _pending_for(req.session_id)
+    _pend = _pending_for(req.user_id, req.session_id)
     pend_range, pend_op = _pend["range"], _pend["op"]  # đề xuất chờ xác nhận — riêng theo phiên
 
     async def gen():
         def ev(obj):
             if obj.get("type") == "final" and obj.get("text"):
+                obj = {**obj, "text": _repair_response_prefix(str(obj["text"]))}
                 final_parts.append(str(obj["text"]))
             return f"data: {json.dumps(obj, ensure_ascii=False)}\n\n"
 
@@ -2587,6 +3462,29 @@ async def agent_chat_stream(req: ChatStreamRequest, request: Request = None):
                     log.warning("Memory identity lookup lỗi (bỏ qua): %s: %s", type(e).__name__, e)
             matches = _identity_fact_matches(facts, identity_name, trusted_only=True)
             yield ev({"type": "final", "text": _identity_memory_answer(identity_name, matches)})
+            yield ev({"type": "done"})
+            return
+        gap = _capability_gap_reply(req.message)
+        if gap:
+            yield ev({"type": "step", "text": "🧭 Kiểm tra năng lực hiện có"})
+            yield ev({"type": "final", "text": gap})
+            yield ev({"type": "done"})
+            return
+        relation_reply = _metric_relationship_reply(req.message)
+        if relation_reply:
+            yield ev({"type": "step", "text": "🧭 Giải thích quan hệ PageSpeed và SEO"})
+            yield ev({"type": "final", "text": relation_reply})
+            yield ev({"type": "done"})
+            return
+        insights_reply = _insights_grounded_reply(req.message)
+        if insights_reply:
+            yield ev({"type": "step", "text": "🧭 Tra cấu trúc dữ liệu Insights"})
+            yield ev({"type": "final", "text": insights_reply})
+            yield ev({"type": "done"})
+            return
+        if _looks_comparison_period_question(req.message):
+            yield ev({"type": "step", "text": "🧭 Xác định kỳ so sánh từ context"})
+            yield ev({"type": "final", "text": await asyncio.to_thread(_comparison_period_reply, history, req.user_id, req.session_id)})
             yield ev({"type": "done"})
             return
         yield ev({"type": "step", "text": f"🧠 Phân tích yêu cầu ({model})..."})
@@ -2652,15 +3550,22 @@ async def agent_chat_stream(req: ChatStreamRequest, request: Request = None):
                   "priority_fix": "Ưu tiên tối ưu", "action_plan": "Kế hoạch hành động",
                   "diagnose_drop": "Chẩn đoán sụt giảm", "fix_suggest": "Gợi ý cách sửa",
                   "tracking_audit": "Audit conversion tracking", "experiment_plan": "Experiment planner",
+                  "weekly_autopilot": "Weekly Autopilot",
                   "remember": "Ghi nhớ", "reply": "Trả lời"}
         yield ev({"type": "step", "text": f"⚙️ Action: {labels.get(action, action)}"})
 
-        async def stream_analysis(system_prompt: str, fallback_on_deflect: str | None = None):
+        async def stream_analysis(
+            system_prompt: str,
+            fallback_on_deflect: str | None = None,
+            *,
+            include_history: bool = True,
+            buffer_until_final: bool = False,
+            final_transform=None,
+        ):
             payload = {"model": model, "stream": True, "temperature": 0.2, "max_tokens": 4096,
-                       "messages": [{"role": "system", "content": system_prompt + mem_block},
-                                    *history, {"role": "user", "content": req.message}]}
+                       "messages": _analysis_messages(system_prompt + mem_block, history, req.message, include_history=include_history)}
             think_re = _re.compile(r"<think>.*?(?:</think>|$)", _re.S)
-            buffer_until_final = fallback_on_deflect is not None
+            buffer_until_final = buffer_until_final or fallback_on_deflect is not None
             raw_acc, sent, reasoning_acc = "", 0, []
             try:
                 async with httpx.AsyncClient(timeout=300) as client:
@@ -2687,7 +3592,7 @@ async def agent_chat_stream(req: ChatStreamRequest, request: Request = None):
                             if not c:
                                 continue
                             raw_acc += c
-                            visible = think_re.sub("", raw_acc)
+                            visible = think_re.sub("", raw_acc).lstrip()
                             safe = max(0, len(visible) - 12)
                             if safe > sent and not buffer_until_final:
                                 yield ev({"type": "delta", "delta": visible[sent:safe]})
@@ -2699,6 +3604,9 @@ async def agent_chat_stream(req: ChatStreamRequest, request: Request = None):
             if visible:
                 if fallback_on_deflect and _seo_deflected(visible):
                     visible = fallback_on_deflect
+                    sent = 0
+                if final_transform:
+                    visible = final_transform(visible)
                     sent = 0
                 if len(visible) > sent:
                     yield ev({"type": "delta", "delta": visible[sent:]})
@@ -2820,6 +3728,14 @@ async def agent_chat_stream(req: ChatStreamRequest, request: Request = None):
             if desc:
                 yield ev({"type": "step", "text": f"🔎 Áp bộ lọc: {desc}"})
             yield ev({"type": "final", "text": _alerts_text(report)})
+            yield ev({"type": "done"})
+            return
+
+        # ── Weekly Autopilot: read-only weekly operating plan ──
+        if action == "weekly_autopilot":
+            yield ev({"type": "step", "text": "🧭 Lập Weekly Autopilot từ alerts + opportunity + tracking..."})
+            report = await asyncio.to_thread(_weekly_autopilot_report)
+            yield ev({"type": "final", "text": _weekly_autopilot_text(report)})
             yield ev({"type": "done"})
             return
 
@@ -2960,6 +3876,7 @@ async def agent_chat_stream(req: ChatStreamRequest, request: Request = None):
                 yield ev({"type": "final", "text": "Chưa có dữ liệu PageSpeed nào — nói 'chạy kiểm tra ngay' trước nhé."})
                 yield ev({"type": "done"})
                 return
+            _remember_data_context(req.user_id, req.session_id, "psi", tab)
             spec = _filter_spec_from_action({**data, "action": action}, req.message, "url")
             rows, used_terms = _filter_psi_rows(headers, rows, spec)
             desc = _filter_desc(spec)
@@ -2973,7 +3890,12 @@ async def agent_chat_stream(req: ChatStreamRequest, request: Request = None):
             extra = ("\nLƯU Ý: đây là dữ liệu ĐÃ ĐO trong tháng " + tab +
                      " (PageSpeed không đo lại quá khứ được). Kết thúc câu trả lời bằng đúng 1 câu mời theo tính cách: "
                      "nếu Đại ca muốn số liệu mới nhất thì nói 'chạy kiểm tra ngay' để Đệ đo liền.") if month else ""
-            async for chunk in stream_analysis(_results_prompt(tab, headers, rows) + extra + _proactive_suffix()):
+            async for chunk in stream_analysis(
+                _results_prompt(tab, headers, rows) + extra + _proactive_suffix(),
+                include_history=False,
+                buffer_until_final=True,
+                final_transform=_repair_pagespeed_report_prefix,
+            ):
                 yield chunk
             yield ev({"type": "done"})
             return
@@ -3341,6 +4263,7 @@ async def agent_chat_stream(req: ChatStreamRequest, request: Request = None):
                         try:
                             tab, headers, rows = await asyncio.to_thread(_seo_read_results, mt.group(1))
                             if rows:
+                                _remember_data_context(req.user_id, req.session_id, "seo", tab)
                                 yield ev({"type": "step", "text": f"✅ {result}"})
                                 yield ev({"type": "step", "text": f"🧠 Phân tích {tab} ({model})..."})
                                 async for chunk in stream_analysis(
@@ -3381,6 +4304,7 @@ async def agent_chat_stream(req: ChatStreamRequest, request: Request = None):
                     yield ev({"type": "final", "text": f"Không tìm thấy tháng nào khớp. Các tháng đang có: {', '.join(tabs_all) or 'chưa có'}."})
                     yield ev({"type": "done"})
                     return
+                _remember_data_context(req.user_id, req.session_id, "seo", sel[-1])
                 yield ev({"type": "step", "text": f"📚 Đọc {len(sel)} tháng: {', '.join(sel)}"})
                 try:  # đọc tất cả tháng bằng 1 lệnh batchGet
                     data_map = await asyncio.to_thread(_seo_read_many, sel, 2000)
@@ -3415,6 +4339,7 @@ async def agent_chat_stream(req: ChatStreamRequest, request: Request = None):
                 yield ev({"type": "final", "text": "Chưa có báo cáo SEO nào — nói 'chạy báo cáo SEO' trước nhé."})
                 yield ev({"type": "done"})
                 return
+            _remember_data_context(req.user_id, req.session_id, "seo", tab)
             rows = _filter_table_rows(headers, rows, spec, fallback_idx=0)
             if _filter_active(spec) and not rows:
                 yield ev({"type": "final", "text": f"Không thấy dòng SEO nào trong tab {tab} khớp bộ lọc: {desc}."})
@@ -3534,6 +4459,27 @@ def decho_ask(req: DechoAskRequest, request: Request = None):
                              args=(req.user_id, req.session_id,
                                    [("user", req.question), ("assistant", reply)]), daemon=True).start()
         return {"reply": reply}
+    if _looks_comparison_period_question(req.question):
+        reply = _comparison_period_reply([], req.user_id, req.session_id)
+        if memory_agent.configured() and req.user_id and req.session_id:
+            threading.Thread(target=memory_agent.persist_turns_safe,
+                             args=(req.user_id, req.session_id,
+                                   [("user", req.question), ("assistant", reply)]), daemon=True).start()
+        return {"reply": reply}
+    relation_reply = _metric_relationship_reply(req.question)
+    if relation_reply:
+        if memory_agent.configured() and req.user_id and req.session_id:
+            threading.Thread(target=memory_agent.persist_turns_safe,
+                             args=(req.user_id, req.session_id,
+                                   [("user", req.question), ("assistant", relation_reply)]), daemon=True).start()
+        return {"reply": relation_reply}
+    insights_reply = _insights_grounded_reply(req.question)
+    if insights_reply:
+        if memory_agent.configured() and req.user_id and req.session_id:
+            threading.Thread(target=memory_agent.persist_turns_safe,
+                             args=(req.user_id, req.session_id,
+                                   [("user", req.question), ("assistant", insights_reply)]), daemon=True).start()
+        return {"reply": insights_reply}
     mem_block = ""
     if memory_agent.configured() and req.user_id:
         mem_block = memory_agent.memory_block(req.user_id, req.question)
@@ -3933,7 +4879,10 @@ def _path_only(u: str) -> str:
     raw = str(u or "")
     raw = raw.split("#", 1)[0].split("?", 1)[0]
     raw = re.split(r"&(?:utm_|gclid|gbraid|wbraid|fbclid)", raw, maxsplit=1)[0]
-    return re.sub(r"^https?://[^/]+", "", raw) or "/"
+    path = re.sub(r"^https?://[^/]+", "", raw).strip() or "/"
+    if path != "/":
+        path = path.rstrip("/") or "/"
+    return path
 
 
 def _num_value(x, default: float = 0.0) -> float:
@@ -3968,6 +4917,62 @@ def _confidence(sources: list[str], evidence: list[str]) -> str:
     if nsrc >= 2 and len(evidence) >= 2:
         return "medium"
     return "low"
+
+
+def _unique_strings(values, limit: int | None = None) -> list[str]:
+    out, seen = [], set()
+    for v in values or []:
+        s = str(v or "").strip()
+        if not s or s in seen:
+            continue
+        seen.add(s)
+        out.append(s)
+        if limit and len(out) >= limit:
+            break
+    return out
+
+
+def _stronger_confidence(*values) -> str:
+    rank = {"low": 0, "medium": 1, "high": 2}
+    best = "low"
+    for v in values:
+        s = str(v or "low").lower()
+        if rank.get(s, 0) > rank.get(best, 0):
+            best = s
+    return best
+
+
+def _target_key(value) -> str:
+    raw = str(value or "").strip()
+    if raw.startswith(("http://", "https://", "/")):
+        return _path_only(raw)
+    return raw.lower()
+
+
+def _merge_hypotheses_by_target(hypotheses: list[dict], limit: int) -> list[dict]:
+    merged: dict[str, dict] = {}
+    for h in sorted(hypotheses or [], key=lambda x: -_num_value(x.get("score"))):
+        key = _target_key(h.get("target")) or str(h.get("target") or "")
+        if not key:
+            key = str(h.get("evidence") or h)
+        if key not in merged:
+            clone = dict(h)
+            if key.startswith("/"):
+                clone["target"] = key
+            clone["root_causes"] = _unique_strings(clone.get("root_causes") or [], 6)
+            clone["evidence"] = _unique_strings(clone.get("evidence") or [], 10)
+            clone["sources"] = sorted(set(clone.get("sources") or []))
+            merged[key] = clone
+            continue
+        cur = merged[key]
+        cur["score"] = max(_num_value(cur.get("score")), _num_value(h.get("score")))
+        cur["root_causes"] = _unique_strings([*(cur.get("root_causes") or []), *(h.get("root_causes") or [])], 6)
+        cur["evidence"] = _unique_strings([*(cur.get("evidence") or []), *(h.get("evidence") or [])], 10)
+        cur["sources"] = sorted(set(cur.get("sources") or []) | set(h.get("sources") or []))
+        cur["confidence"] = _stronger_confidence(cur.get("confidence"), h.get("confidence"))
+    out = list(merged.values())
+    out.sort(key=lambda x: -_num_value(x.get("score")))
+    return out[:max(1, min(int(limit or 12), 30))]
 
 
 def _psi_latest_by_path() -> tuple[dict, str | None]:
@@ -4239,7 +5244,7 @@ def _conversion_tracking_report(days: int = 30) -> dict:
     if perf.get("rows"):
         entity_resolver.register_campaigns(perf.get("rows") or [])
     landing_pages = _ads_metric_groups(ldp.get("rows") or [],
-                                       lambda r: r.get("base_url") or r.get("url"),
+                                       lambda r: _path_only(r.get("base_url") or r.get("url") or ""),
                                        lambda r: _path_only(r.get("base_url") or r.get("url") or ""))
     for lp in landing_pages:
         lp["path"] = _path_only(lp.get("key") or lp.get("url") or "")
@@ -4424,9 +5429,7 @@ def _tracking_audit_text(report: dict, max_items: int = 8) -> str:
     return "\n".join(lines)
 
 
-def _root_cause_report(limit: int = 12) -> dict:
-    opp = _opportunity_report(max(limit * 2, 20))
-    tracking = _conversion_tracking_report(30)
+def _root_cause_report_from_inputs(opp: dict, tracking: dict, limit: int = 12) -> dict:
     tracking_issues = tracking.get("issues") or []
     hypotheses: list[dict] = []
 
@@ -4484,15 +5487,21 @@ def _root_cause_report(limit: int = 12) -> dict:
             "sources": ["Tracking", "Ads"],
         })
 
-    hypotheses.sort(key=lambda x: -_num_value(x.get("score")))
+    hypotheses = _merge_hypotheses_by_target(hypotheses, limit)
     return {
         "run": opp.get("run"),
         "month": opp.get("month"),
         "ads": opp.get("ads"),
         "clarity": opp.get("clarity"),
         "tracking": {"health": tracking.get("health"), "issues": tracking_issues[:8]},
-        "hypotheses": hypotheses[:max(1, min(int(limit or 12), 30))],
+        "hypotheses": hypotheses,
     }
+
+
+def _root_cause_report(limit: int = 12) -> dict:
+    opp = _opportunity_report(max(limit * 2, 20))
+    tracking = _conversion_tracking_report(30)
+    return _root_cause_report_from_inputs(opp, tracking, limit)
 
 
 def _filter_root_cause_report(report: dict, spec: dict) -> dict:
@@ -4608,11 +5617,9 @@ def _experiment_from_opportunity(o: dict, idx: int) -> dict:
     }
 
 
-def _experiment_report(limit: int = 8) -> dict:
+def _experiment_report_from_inputs(opp: dict, tracking: dict, limit: int = 8) -> dict:
     limit = max(1, min(int(limit or 8), 20))
-    opp = _opportunity_report(max(limit * 2, 20))
     experiments = [_experiment_from_opportunity(o, i + 1) for i, o in enumerate((opp.get("opportunities") or [])[:limit * 2])]
-    tracking = _conversion_tracking_report(30)
     for issue in tracking.get("issues") or []:
         if issue.get("scope") not in {"campaign", "account", "landing_page"}:
             continue
@@ -4647,6 +5654,13 @@ def _experiment_report(limit: int = 8) -> dict:
         "tracking_health": tracking.get("health"),
         "experiments": deduped[:limit],
     }
+
+
+def _experiment_report(limit: int = 8) -> dict:
+    limit = max(1, min(int(limit or 8), 20))
+    opp = _opportunity_report(max(limit * 2, 20))
+    tracking = _conversion_tracking_report(30)
+    return _experiment_report_from_inputs(opp, tracking, limit)
 
 
 def _filter_experiment_report(report: dict, spec: dict) -> dict:
@@ -4772,8 +5786,13 @@ def _opportunity_report(limit: int = 20) -> dict:
             "clarity": clarity, "opportunities": opps[:max(1, min(int(limit or 20), 50))]}
 
 
-def _alert_report(limit: int = 50) -> dict:
-    opp = _opportunity_report(50)
+def _slice_opportunity_report(report: dict, limit: int) -> dict:
+    out = dict(report or {})
+    out["opportunities"] = (report.get("opportunities") or [])[:max(1, min(int(limit or 20), 50))]
+    return out
+
+
+def _alert_report_from_opportunity(opp: dict, limit: int = 50) -> dict:
     alerts = []
     for o in opp.get("opportunities", []):
         lv = "high" if o["score"] >= 75 else "med"
@@ -4792,6 +5811,11 @@ def _alert_report(limit: int = 50) -> dict:
     alerts.sort(key=lambda a: (0 if a.get("lv") == "high" else 1, -a.get("score", 0)))
     return {"alerts": alerts[:max(1, min(int(limit or 50), 100))], "opportunities": opp.get("opportunities", [])[:10],
             "run": opp.get("run"), "month": opp.get("month")}
+
+
+def _alert_report(limit: int = 50) -> dict:
+    opp = _opportunity_report(50)
+    return _alert_report_from_opportunity(opp, limit)
 
 
 def _filter_alert_report(report: dict, spec: dict) -> dict:
@@ -5054,7 +6078,7 @@ async def seo_chat_stream(req: ChatStreamRequest, request: Request = None):
                             if not c:
                                 continue
                             raw_acc += c
-                            visible = think_re.sub("", raw_acc)
+                            visible = think_re.sub("", raw_acc).lstrip()
                             safe = max(0, len(visible) - 12)
                             if safe > sent and not buffer_until_final:
                                 yield ev({"type": "delta", "delta": visible[sent:safe]})
@@ -5329,7 +6353,7 @@ async def chat_stream(req: ChatStreamRequest, request: Request = None):
                             if not c:
                                 continue
                             raw_acc += c
-                            visible = think_re.sub("", raw_acc)
+                            visible = think_re.sub("", raw_acc).lstrip()
                             # giữ lại 12 ký tự cuối phòng thẻ <think>/</think> đang gõ dở
                             safe = max(0, len(visible) - 12)
                             if safe > sent:
