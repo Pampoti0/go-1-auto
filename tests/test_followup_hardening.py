@@ -111,7 +111,7 @@ class FollowupHardeningTest(unittest.TestCase):
         self.assertEqual(server._latest_data_context(history), "psi")
         reply = server._comparison_period_reply(history)
         self.assertIn("PageSpeed", reply)
-        self.assertIn("không dùng một mốc so sánh cố định", reply)
+        self.assertIn("không có một mốc so sánh cố định", reply)
         self.assertNotIn("SEO tháng 2026-06", reply)
 
         history = history[:2]
@@ -138,7 +138,7 @@ class FollowupHardeningTest(unittest.TestCase):
         reply = server._comparison_period_reply(noisy_history, user_id, session_id)
         self.assertIn("SEO tháng 2026-06", reply)
         self.assertIn("2026-05", reply)
-        self.assertNotIn("không dùng một mốc so sánh cố định", reply)
+        self.assertNotIn("không có một mốc so sánh cố định", reply)
 
         self.remember_context(user_id, session_id, "psi", "2026-06")
         reply = server._comparison_period_reply(noisy_history, user_id, session_id)

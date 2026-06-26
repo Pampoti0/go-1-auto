@@ -1,0 +1,2854 @@
+const {useState,useEffect,useRef,useCallback} = React;
+
+/* ───────────────────────── utils ───────────────────────── */
+function useLS(key,init){
+  const [v,setV]=useState(()=>{try{return localStorage.getItem(key)??init}catch(e){return init}});
+  useEffect(()=>{try{localStorage.setItem(key,v)}catch(e){}},[key,v]);
+  return [v,setV];
+}
+const esc=s=>s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+/* AgentBase Memory: định danh người dùng + phiên chat (đổi sid khi xóa lịch sử) */
+const memIds={
+  uid:(()=>{try{return localStorage.decho_uid||(localStorage.decho_uid=crypto.randomUUID())}catch(e){return 'anon'}})(),
+  sid:(()=>{try{return localStorage.decho_sid||(localStorage.decho_sid=crypto.randomUUID())}catch(e){return 'sess'}})(),
+  newSession(){try{localStorage.decho_sid=crypto.randomUUID();this.sid=localStorage.decho_sid}catch(e){}},
+  resetActor(){try{localStorage.decho_uid=crypto.randomUUID();localStorage.decho_sid=crypto.randomUUID();this.uid=localStorage.decho_uid;this.sid=localStorage.decho_sid}catch(e){}}
+};
+
+/* Subtitle theo trang — header đọc qua event, thay cho dòng Online mặc định */
+function setPageSub(t){window.dispatchEvent(new CustomEvent('page-sub',{detail:t||''}))}
+
+/* Thời điểm chat: cùng ngày → chỉ giờ; khác ngày → +ngày/tháng; khác năm → +năm */
+function fmtChatTime(ts){
+  const d=new Date(ts),n=new Date();
+  const hm=d.toLocaleTimeString('vi-VN',{hour:'2-digit',minute:'2-digit'});
+  if(d.toDateString()===n.toDateString())return hm;
+  if(d.getFullYear()===n.getFullYear())
+    return d.toLocaleDateString('vi-VN',{day:'2-digit',month:'2-digit'})+' '+hm;
+  return d.toLocaleDateString('vi-VN',{day:'2-digit',month:'2-digit',year:'numeric'})+' '+hm;
+}
+
+/* Render con vào ô actions bên phải header (portal) */
+function HeaderSlot({children}){
+  const [node,setNode]=useState(null);
+  useEffect(()=>{setNode(document.getElementById('header-actions'))},[]);
+  return node?ReactDOM.createPortal(children,node):null;
+}
+
+function openInsightTab(id){
+  const map={alerts:'alerts',tracking:'tracking',experiments:'all',root:'all',opportunities:'all',weekly:'all'};
+  window.__dechoInsightFilter=map[id]||id||'all';
+  window.dispatchEvent(new CustomEvent('decho-insight-filter',{detail:window.__dechoInsightFilter}));
+}
+
+function md(s){
+  /* ── LaTeX → văn bản thường (model thỉnh thoảng vẫn xổ LaTeX dù bị cấm) ── */
+  /* cấu trúc trước (\frac, \text, \left/\right) — làm trước khi đổi ký hiệu lệnh */
+  s=s.replace(/\\left\s*([([{|.])/g,(m,b)=>b==='.'?'':b).replace(/\\right\s*([)\]}|.])/g,(m,b)=>b==='.'?'':b);
+  /* \text{} trước (gỡ ngoặc nhọn lồng) rồi mới \frac{}{} */
+  for(let i=0;i<3;i++)
+    s=s.replace(/\\(?:text|mathrm|mathbf|mathit|operatorname|textbf|textit)\s*\{([^{}]*)\}/g,'$1');
+  for(let i=0;i<3;i++)
+    s=s.replace(/\\(?:d?frac|tfrac|cfrac)\s*\{([^{}]*)\}\s*\{([^{}]*)\}/g,'($1) / ($2)');
+  /* ký hiệu lệnh — \b chặn nuốt prefix (vd \left không bị \le ăn) */
+  const sym=[['(?:rightarrow|to)','→'],['leftarrow','←'],['(?:downarrow|searrow)','↓'],
+    ['(?:uparrow|nearrow)','↑'],['(?:updownarrow|leftrightarrow)','↔'],['times','×'],
+    ['(?:leq|le)','≤'],['(?:geq|ge)','≥'],['(?:neq|ne)','≠'],['approx','≈'],['(?:pm|mp)','±'],
+    ['div','÷'],['(?:cdot|ast)','·'],['Delta','Δ'],['delta','δ'],['percent','%'],
+    ['alpha','α'],['beta','β'],['sum','Σ'],['infty','∞']];
+  for(const [pat,ch] of sym) s=s.replace(new RegExp('\\\\(?:'+pat+')(?![a-zA-Z])','g'),ch);
+  s=s.replace(/\\[,;:!\s]/g,' ');                 /* khoảng trắng LaTeX */
+  s=s.replace(/\$\$([\s\S]*?)\$\$/g,'$1').replace(/\$([^$\n]+?)\$/g,'$1'); /* bỏ $...$ và $$...$$ */
+  s=s.replace(/\\([%$&#_{}])/g,'$1');              /* ký tự escape: \% \$ \& \# \_ \{ \} */
+  s=s.replace(/\\[()[\]]/g,'');                    /* \( \) \[ \] còn sót */
+  s=esc(s);
+  /* code block ``` → tách ra placeholder (bảo vệ khỏi bold/bullet/table/autolink), khôi phục ở cuối */
+  const _cb=[];
+  s=s.replace(/```[a-z]*\n?([\s\S]*?)```/g,(m,c)=>{_cb.push('<pre class="cb">'+c.replace(/\s+$/,'')+'</pre>');return '\x00CB'+(_cb.length-1)+'\x00'});
+  s=s.replace(/`([^`\n]+)`/g,'<code>$1</code>');
+  s=s.replace(/\*\*([^*\n]+)\*\*/g,'<b>$1</b>');
+  s=s.replace(/(^|\n)#{1,4} (.*)/g,'$1<b>$2</b>');
+  s=s.replace(/(^|\n)[ \t]*[-*] /g,'$1• ');
+  /* bảng markdown | a | b | → <table> */
+  {
+    const lines=s.split('\n');const out=[];let buf=[];
+    const isRow=l=>/^\s*\|.*\|\s*$/.test(l);
+    const isSep=l=>/^\s*\|[\s:•\-|]+\|\s*$/.test(l);
+    const cells=r=>r.trim().replace(/^\||\|$/g,'').split('|').map(c=>c.trim());
+    const flush=()=>{
+      const rows=buf.filter(l=>!isSep(l));
+      if(rows.length>=2){
+        let h='<table><thead><tr>'+cells(rows[0]).map(c=>'<th>'+c+'</th>').join('')+'</tr></thead><tbody>';
+        rows.slice(1).forEach(r=>{h+='<tr>'+cells(r).map(c=>'<td>'+c+'</td>').join('')+'</tr>'});
+        out.push(h+'</tbody></table>');
+      }else out.push(...buf);
+      buf=[];
+    };
+    for(const l of lines){ if(isRow(l))buf.push(l); else {flush();out.push(l)} }
+    flush();
+    s=out.join('\n');
+    s=s.replace(/\n?(<table>)/g,'$1').replace(/(<\/table>)\n?/g,'$1');
+  }
+  /* auto-link URL (sau esc nên & đã thành &amp;) — không đụng URL đã nằm trong thẻ <a href> */
+  s=s.replace(/(^|[\s(>])((?:https?:\/\/|www\.)[^\s<>"')\]]+[^\s<>"')\].,;:])/g,
+    (m,pre,url)=>pre+'<a href="'+(url.startsWith('www.')?'https://'+url:url)+'" target="_blank" rel="noopener" class="text-violet-500 hover:underline break-all">'+url+'</a>');
+  s=s.replace(/\n{3,}/g,'\n\n');
+  s=iconizeHtml(s);
+  s=s.replace(/\x00CB(\d+)\x00/g,(m,i)=>_cb[+i]||'');  /* khôi phục code block */
+  return s;
+}
+const scoreColor=n=>n>=90?'#0ea371':(n>=50?'#d97706':'#dc2626');
+const pathOf=u=>{try{const x=new URL(u);return x.pathname==='/'?x.hostname:x.pathname}catch(e){return u}};
+const MODELS=[['google/gemma-4-31b-it','Gemma 4 31B'],['qwen/qwen3-5-27b','Qwen3.5 27B'],['minimax/minimax-m2.5','MiniMax M2.5']];
+
+/* SVG icons (lucide-style, stroke) */
+const ICON_PATHS={
+  home:'M3 10.5L12 3l9 7.5M5 9.5V21h14V9.5',
+  chat:'M21 12a8 8 0 0 1-8 8H4l2-3a8 8 0 1 1 15-5z',
+  urls:'M11 19a8 8 0 1 0 0-16 8 8 0 0 0 0 16zM21 21l-4.35-4.35',
+  dash:'M4 20V10M10 20V4M16 20v-7M22 20H2',
+  insights:'M4 19V5M4 19h16M8 15l3-3 3 2 5-7M17 7h2v2',
+  ads:'M3 11l14-5v12L3 13v-2zM17 8a4 4 0 0 1 0 8M7 13v5a2 2 0 0 0 4 0v-4',
+  alerts:'M18 8a6 6 0 1 0-12 0c0 7-3 9-3 9h18s-3-2-3-9M10.3 21a1.9 1.9 0 0 0 3.4 0',
+  health:'M20 13c0 5-3.5 7-8 9-4.5-2-8-4-8-9V5l8-3 8 3v8zM9 12l2 2 4-5',
+  config:'M12 15a3 3 0 1 0 0-6 3 3 0 0 0 0 6zM19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06A1.65 1.65 0 0 0 15 19.4a1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.6 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.6a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9c.14.31.22.65.22 1h.29a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.42 1z',
+  psiSheet:'M14 3v5h5M5 3h9l5 5v13H5V3zM9 13h6M9 17h6',
+  link:'M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71',
+  device:'M2 5h20v12H2zM8 21h8M12 17v4',
+  clock:'M12 22a10 10 0 1 0 0-20 10 10 0 0 0 0 20zM12 7v5l3.5 2',
+  trend:'M22 7l-8.5 8.5-5-5L2 17M15 7h7v7',
+  play:'M6 4l14 8-14 8V4z',
+  news:'M14 3v5h5M5 3h9l5 5v13H5V3zM9 12h6M9 16h6',
+  clipboard:'M9 3h6v3H9zM9 4H6a1 1 0 0 0-1 1v15a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1V5a1 1 0 0 0-1-1h-3M9 11h6M9 15h4',
+  trash:'M3 6h18M8 6V4h8v2M6 6l1 15h10l1-15M10 10v7M14 10v7',
+  refresh:'M21 12a9 9 0 1 1-2.64-6.36M21 3v6h-6',
+  save:'M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2zM17 21v-8H7v8M7 3v5h7',
+  undo:'M3 7v6h6M3 13a9 9 0 1 0 3-7.7',
+  warn:'M12 9v4M12 17h.01M10.3 3.9L1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z',
+  zap:'M13 2L3 14h7l-1 8 10-12h-7l1-8z',down:'M3 7l6 6 4-4 8 8M21 13v6h-6',
+  seoSheet:'M14 3v5h5M5 3h9l5 5v13H5V3zM9 13h6M9 17h6',
+  lock:'M7 10V7a5 5 0 0 1 10 0v3M5 10h14v11H5zM12 15v2',
+  check:'M20 6L9 17l-5-5',
+  x:'M18 6L6 18M6 6l12 12',
+  chart:'M4 20V10M10 20V4M16 20v-7M22 20H2',
+  brain:'M8.5 6.5A3.5 3.5 0 0 1 12 3a3.5 3.5 0 0 1 3.5 3.5A4.5 4.5 0 0 1 18 15a4 4 0 0 1-4 4h-1v-5M11 19h-1a4 4 0 0 1-4-4 4.5 4.5 0 0 1 2.5-8.5M8 11h8M9 15h4',
+  money:'M12 2v20M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6',
+  web:'M12 22a10 10 0 1 0 0-20 10 10 0 0 0 0 20zM2 12h20M12 2a15 15 0 0 1 0 20M12 2a15 15 0 0 0 0 20',
+  book:'M4 19.5A2.5 2.5 0 0 1 6.5 17H20M4 4.5A2.5 2.5 0 0 1 6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5z',
+  folder:'M3 7h6l2 2h10v10a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z',
+  eye:'M2 12s4-7 10-7 10 7 10 7-4 7-10 7S2 12 2 12zM12 15a3 3 0 1 0 0-6 3 3 0 0 0 0 6z',
+  rocket:'M4.5 16.5c-1.5 1.2-2 3-2 5 2 0 3.8-.5 5-2M9 15l-4-4 6-6c3-3 6-3 9-3 0 3 0 6-3 9l-6 6-4-4M15 9h.01',
+  trophy:'M8 21h8M12 17v4M7 4h10v4a5 5 0 0 1-10 0V4zM5 5H3v2a4 4 0 0 0 4 4M19 5h2v2a4 4 0 0 1-4 4',
+  stop:'M6 6h12v12H6z',
+  send:'M22 2L11 13M22 2l-7 20-4-9-9-4 20-7z',
+  turn:'M15 10l5 5-5 5M4 4v7a4 4 0 0 0 4 4h12',
+  bot:'M12 8V4M8 4h8M6 8h12v10H6zM9 13h.01M15 13h.01M9 17h6',
+};
+const NavIcon=({id,cls})=>(
+  <svg viewBox="0 0 24 24" className={cls||"w-[17px] h-[17px] flex-none"} fill="none"
+       stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+    <path d={ICON_PATHS[id]||ICON_PATHS.home}/>
+  </svg>
+);
+
+const EMOJI_ICON_IDS={
+  '🔒':'lock','❌':'x','✅':'check','⚠️':'warn','⚠':'warn','📊':'chart','🧠':'brain','💰':'money',
+  '🌐':'web','📖':'book','📚':'book','🗂️':'folder','🗂':'folder','⚙️':'config','⚙':'config',
+  '▶':'play','🚀':'rocket','🏆':'trophy','👁️':'eye','👁':'eye','👉':'send','⏹':'stop',
+  '📈':'trend','📉':'down','🔍':'urls','↪️':'turn','↪':'turn',
+  '🤖':'bot','🚨':'warn','🔴':'x','🟢':'check','🟡':'warn'
+};
+const EMOJI_ICON_RE=/⚠️|🗂️|⚙️|👁️|↪️|🔒|❌|✅|⚠|📊|📈|📉|🔍|🧠|💰|🌐|📖|📚|🗂|⚙|▶|🚀|🏆|👁|👉|⏹|↪|🤖|🚨|🔴|🟢|🟡/g;
+function inlineIconHtml(id){
+  return `<svg viewBox="0 0 24 24" class="emoji-svg-icon" aria-hidden="true" focusable="false"><path d="${ICON_PATHS[id]||ICON_PATHS.home}"/></svg>`;
+}
+function iconizeHtml(s){
+  return String(s??'').replace(EMOJI_ICON_RE,m=>inlineIconHtml(EMOJI_ICON_IDS[m]));
+}
+function IconText({text,className}){
+  return <span className={className} dangerouslySetInnerHTML={{__html:iconizeHtml(esc(String(text??''))).replace(/\n/g,'<br/>')}}/>;
+}
+
+/* ───────────────────────── shared bits ───────────────────────── */
+const Dots=()=> <span className="inline-flex gap-1"><i className="dot1 w-1.5 h-1.5 rounded-full bg-slate-400 inline-block"/><i className="dot2 w-1.5 h-1.5 rounded-full bg-slate-400 inline-block"/><i className="dot3 w-1.5 h-1.5 rounded-full bg-slate-400 inline-block"/></span>;
+
+const Spinner=({label})=>(
+  <div className="flex-1 grid place-items-center py-16">
+    <div className="flex flex-col items-center gap-3">
+      <svg className="w-9 h-9 animate-spin text-violet-500" viewBox="0 0 24 24" fill="none">
+        <circle cx="12" cy="12" r="10" stroke="currentColor" strokeOpacity=".15" strokeWidth="4"/>
+        <path d="M22 12A10 10 0 0 0 12 2" stroke="currentColor" strokeWidth="4" strokeLinecap="round"/>
+      </svg>
+      <span className="text-xs font-medium text-slate-600 dark:text-slate-200 bg-white/75 dark:bg-slate-900/70 backdrop-blur px-2.5 py-1 rounded-full shadow-sm">{label||'Đệ đang lấy dữ liệu…'}</span>
+    </div>
+  </div>
+);
+
+function Select({value,onChange,options,className}){
+  const [open,setOpen]=useState(false);
+  const ref=useRef(null);
+  useEffect(()=>{
+    const h=e=>{if(ref.current&&!ref.current.contains(e.target))setOpen(false)};
+    document.addEventListener('mousedown',h);
+    return()=>document.removeEventListener('mousedown',h);
+  },[]);
+  const opts=options.map(o=>typeof o==='object'?o:{value:o,label:String(o)});
+  const cur=opts.find(o=>String(o.value)===String(value));
+  return (
+    <div ref={ref} className={"relative "+(className||'')}>
+      <button type="button" onClick={()=>setOpen(!open)}
+        className="w-full flex items-center gap-2 bg-white dark:bg-slate-900 text-slate-700 dark:text-slate-200 border border-slate-300 dark:border-slate-600 rounded-lg px-3 py-2 text-sm transition hover:border-slate-400 focus:outline-none focus:border-violet-400 focus:ring-2 focus:ring-violet-500/20">
+        <span className="truncate">{cur?cur.label:String(value)}</span>
+        <svg className={"w-3.5 h-3.5 ml-auto flex-none text-slate-400 transition-transform "+(open?'rotate-180':'')} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M6 9l6 6 6-6"/></svg>
+      </button>
+      {open&&(
+        <div className="absolute z-50 mt-1.5 w-full min-w-max max-h-64 overflow-y-auto rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 shadow-xl py-1.5">
+          {opts.map(o=>{
+            const sel=String(o.value)===String(value);
+            return (
+              <button key={o.value} type="button" onClick={()=>{onChange(o.value);setOpen(false)}}
+                className={"w-full text-left px-3 py-1.5 text-sm flex items-center gap-2 transition hover:bg-violet-50 dark:hover:bg-violet-900/25 "+(sel?'text-violet-600 dark:text-violet-400 font-semibold':'text-slate-600 dark:text-slate-300')}>
+                <svg className={"w-3.5 h-3.5 flex-none "+(sel?'':'opacity-0')} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><path d="M20 6L9 17l-5-5"/></svg>
+                <span className="truncate">{o.label}</span>
+              </button>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function DateRangePicker({value,onApply,className}){
+  const [open,setOpen]=useState(false);
+  const [draft,setDraft]=useState({start:value.start,end:value.end});
+  const todayIso=new Date().toISOString().slice(0,10);
+  const [view,setView]=useState(()=>{const s=value.start||todayIso;return {y:+s.slice(0,4),m:+s.slice(5,7)-1}});
+  const ref=useRef(null);
+  useEffect(()=>{
+    const h=e=>{if(ref.current&&!ref.current.contains(e.target))setOpen(false)};
+    document.addEventListener('mousedown',h);
+    return()=>document.removeEventListener('mousedown',h);
+  },[]);
+  useEffect(()=>{
+    setDraft({start:value.start,end:value.end});
+    if(open&&value.start)setView({y:+value.start.slice(0,4),m:+value.start.slice(5,7)-1});
+  },[value.start,value.end,open]);
+  const iso=d=>d.toISOString().slice(0,10);
+  const today=new Date(),yest=new Date(today-864e5);
+  const lastN=n=>({start:iso(new Date(yest-(n-1)*864e5)),end:iso(yest)});
+  const mStart=(y,m)=>new Date(Date.UTC(y,m,1));
+  const quicks=[
+    ['7 ngày gần nhất',()=>lastN(7)],
+    ['14 ngày gần nhất',()=>lastN(14)],
+    ['30 ngày gần nhất',()=>lastN(30)],
+    ['90 ngày gần nhất',()=>lastN(90)],
+    ['Tháng này',()=>({start:iso(mStart(today.getFullYear(),today.getMonth())),end:iso(yest<mStart(today.getFullYear(),today.getMonth())?today:yest)})],
+    ['Tháng trước',()=>({start:iso(mStart(today.getFullYear(),today.getMonth()-1)),end:iso(new Date(mStart(today.getFullYear(),today.getMonth())-864e5))})],
+    ['Quý này',()=>({start:iso(mStart(today.getFullYear(),Math.floor(today.getMonth()/3)*3)),end:iso(yest)})],
+    ['Năm nay',()=>({start:iso(mStart(today.getFullYear(),0)),end:iso(yest)})],
+  ];
+  const fmt=s=>{if(!s)return '—';const[y,m,d]=s.split('-');return `${d}/${m}/${y}`};
+  const apply=(rng,label)=>{onApply({...rng,label:label||''});setOpen(false)};
+  const pick=d=>{ /* click 1: chọn từ ngày · click 2: đến ngày */
+    setDraft(cur=>{
+      if(!cur.start||(cur.start&&cur.end))return {start:d,end:''};
+      if(d<cur.start)return {start:d,end:cur.start};
+      return {start:cur.start,end:d};
+    });
+  };
+  /* lưới 42 ô, tuần bắt đầu thứ 2 */
+  const first=mStart(view.y,view.m);
+  const off=(first.getUTCDay()+6)%7;
+  const cells=Array.from({length:42},(_,i)=>{
+    const d=new Date(Date.UTC(view.y,view.m,1-off+i));
+    return {iso:iso(d),day:d.getUTCDate(),inMonth:d.getUTCMonth()===((view.m%12)+12)%12};
+  });
+  const nav=k=>setView(v=>{const m=v.m+k;return {y:v.y+Math.floor(m/12),m:((m%12)+12)%12}});
+  const monthLb=`Tháng ${((view.m%12)+12)%12+1}, ${view.y}`;
+  const cellCls=c=>{
+    const sel=c.iso===draft.start||c.iso===draft.end;
+    const mid=draft.start&&draft.end&&c.iso>draft.start&&c.iso<draft.end;
+    return "h-8 grid place-items-center text-[12.5px] transition select-none "
+      +(c.iso>todayIso?"opacity-25 pointer-events-none ":"cursor-pointer ")
+      +(sel?"bg-violet-500 text-white font-semibold rounded-lg shadow-sm "
+        :mid?"bg-violet-100 dark:bg-violet-900/30 text-violet-700 dark:text-violet-300 "
+        :(c.inMonth?"text-slate-600 dark:text-slate-300 ":"text-slate-300 dark:text-slate-600 ")+"rounded-lg hover:bg-slate-100 dark:hover:bg-slate-800 ")
+      +(c.iso===todayIso&&!sel?"ring-1 ring-inset ring-violet-400 rounded-lg ":"");
+  };
+  return (
+    <div ref={ref} className={"relative "+(className||'')}>
+      <button type="button" onClick={()=>setOpen(!open)}
+        className="flex items-center gap-2 bg-white dark:bg-slate-900 text-slate-700 dark:text-slate-200 border border-slate-300 dark:border-slate-600 rounded-lg px-3 py-2 text-sm transition hover:border-slate-400 focus:outline-none focus:border-violet-400 focus:ring-2 focus:ring-violet-500/20">
+        <svg className="w-4 h-4 text-slate-400 flex-none" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="3" y="4" width="18" height="18" rx="2"/><path d="M16 2v4M8 2v4M3 10h18"/></svg>
+        <span className="whitespace-nowrap">{value.label||`${fmt(value.start)} → ${fmt(value.end)}`}</span>
+        <svg className={"w-3.5 h-3.5 text-slate-400 transition-transform "+(open?'rotate-180':'')} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M6 9l6 6 6-6"/></svg>
+      </button>
+      {open&&(
+        <div className="absolute z-50 right-0 mt-1.5 flex w-max max-w-[90vw] rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 shadow-xl overflow-hidden">
+          <div className="py-1.5 border-r border-slate-100 dark:border-slate-800 w-[150px] flex-none">
+            {quicks.map(([lb,fn])=>(
+              <button key={lb} type="button" onClick={()=>apply(fn(),lb)}
+                className={"w-full text-left px-3.5 py-1.5 text-[13px] transition hover:bg-violet-50 dark:hover:bg-violet-900/25 "+(value.label===lb?'text-violet-600 dark:text-violet-400 font-semibold':'text-slate-600 dark:text-slate-300')}>{lb}</button>
+            ))}
+          </div>
+          <div className="p-3 flex flex-col gap-2 w-[268px] flex-none">
+            <div className="flex items-center px-0.5">
+              <span className="text-[13px] font-semibold whitespace-nowrap">{monthLb}</span>
+              <div className="ml-auto flex gap-1">
+                <button type="button" onClick={()=>nav(-1)} className="w-7 h-7 grid place-items-center rounded-lg text-slate-400 hover:text-slate-600 hover:bg-slate-100 dark:hover:bg-slate-800">
+                  <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M15 18l-6-6 6-6"/></svg>
+                </button>
+                <button type="button" onClick={()=>nav(1)} className="w-7 h-7 grid place-items-center rounded-lg text-slate-400 hover:text-slate-600 hover:bg-slate-100 dark:hover:bg-slate-800">
+                  <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M9 6l6 6-6 6"/></svg>
+                </button>
+              </div>
+            </div>
+            <div className="grid gap-y-0.5" style={{gridTemplateColumns:"repeat(7,34px)"}}>
+              {['T2','T3','T4','T5','T6','T7','CN'].map(d=>
+                <span key={d} className="h-7 grid place-items-center text-[10.5px] font-semibold text-slate-400">{d}</span>)}
+              {cells.map(c=><button key={c.iso} type="button" onClick={()=>pick(c.iso)} className={cellCls(c)}>{c.day}</button>)}
+            </div>
+            <div className="flex items-center gap-2 pt-1.5 border-t border-slate-100 dark:border-slate-800">
+              <span className="text-[11px] text-slate-400 whitespace-nowrap">{fmt(draft.start)} → {fmt(draft.end)}</span>
+              <button type="button" disabled={!(draft.start&&draft.end)} onClick={()=>apply(draft)}
+                className="ml-auto px-3 py-1.5 rounded-lg text-[12.5px] font-medium text-white bg-violet-500 hover:bg-violet-600 disabled:opacity-40 disabled:cursor-not-allowed whitespace-nowrap">Áp dụng</button>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+const card="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-2xl shadow-sm";
+const input="bg-white dark:bg-slate-900 text-slate-700 dark:text-slate-200 border border-slate-300 dark:border-slate-600 rounded-lg px-3 py-2 text-sm outline-none transition hover:border-slate-400 dark:hover:border-slate-500 focus:border-violet-400 focus:ring-2 focus:ring-violet-500/20";
+const chipCls="text-xs px-3.5 py-1.5 rounded-full border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 shadow-sm hover:border-accent hover:text-accent transition disabled:opacity-40 disabled:pointer-events-none";
+
+/* ───────────────────────── DeCho event bus ─────────────────────────
+   Mọi nơi trong app đều nói chuyện được với DeCho:
+   dechoBus.say(text)  — DeCho nói (speech bubble cạnh dock)
+   dechoBus.busy(bool) — DeCho rung lắc khi hệ thống đang chạy việc
+   dechoBus.act('jump'|'nod') — animation                                 */
+const dechoBus={
+  listeners:new Set(),
+  emit(e){this.listeners.forEach(f=>f(e))},
+  on(f){this.listeners.add(f);return()=>this.listeners.delete(f)},
+  /* thời gian hiện theo độ dài + số dòng (thơ đọc lâu hơn), tối thiểu 12s, tối đa 60s */
+  say(text,ms){
+    const dur=text?Math.min(60000,Math.max(12000,text.length*70+(text.split('\n').length-1)*2200)):1;
+    this.emit({type:'say',text,ms:ms||dur});
+  },
+  busy(b){this.emit({type:'busy',b})},
+  act(a){this.emit({type:'act',a})},
+};
+/* Bối cảnh màn hình hiện tại — các view tự cập nhật, DeCho dùng khi được hỏi */
+const dechoCtx={view:'',info:'',model:''};
+
+/* ───────────────────────── Decho 3D stage ───────────────────────── */
+/* Lời thoại nhàn rỗi của DeCho (tĩnh — gồm vài bài lục bát/haiku) */
+const QUIPS=[
+  'Vibe check ✅ Đệ đứng đây canh số liệu, Đại ca cứ chill.',
+  'Đại ca hỏi gì hỏi đi, Đệ đứng đây mãi cũng mỏi chân á.',
+  'No cap, qua tab Dashboard xem điểm đi Đại ca, Đệ vẽ chart đẹp lắm.',
+  'Cần gì cứ gọi Đệ: PageSpeed, SEO, Google Ads — chill thôi nhưng output xịn.',
+  'Lục bát tặng Đại ca:\nWeb nhanh thì khách mới vui,\nLCP chậm chạp thì lui khách liền.',
+  'Lục bát nhắc Đại ca:\nTrang nhà tải chậm như rùa,\nkhách chờ mất kiên, lượt mua cũng rời.',
+  'Lục bát SEO nè:\nTừ khoá lên top mỗi ngày,\nkhách vào nườm nượp, click bay đầy nhà.',
+  'Lục bát động viên:\nĐiểm xanh chín chục trở lên,\nĐại ca cứ ngủ, Đệ nền tảng lo.',
+  'Lục bát quảng cáo:\nTiền tiêu mỗi sáng mỗi giờ,\nchi mà đúng chỗ, lời chờ sẵn tay.',
+  'Haiku nè Đại ca:\nĐiểm xanh trên bảng,\nclicks về như lá mùa thu —\nSEO thắng lớn.',
+];
+/* Mặt tuỳ chỉnh của DeCho — lưu localStorage (data URL), đồng bộ qua event 'decho-face' */
+const FACE_KEY='decho_face';
+function getFace(){try{return localStorage.getItem(FACE_KEY)||''}catch(e){return ''}}
+function setFace(d){try{d?localStorage.setItem(FACE_KEY,d):localStorage.removeItem(FACE_KEY)}catch(e){}window.dispatchEvent(new CustomEvent('decho-face',{detail:d||''}))}
+function useFace(){
+  const [f,setF]=useState(getFace());
+  useEffect(()=>{const h=e=>setF(e.detail||'');window.addEventListener('decho-face',h);return()=>window.removeEventListener('decho-face',h)},[]);
+  return f;
+}
+
+function useDechoSpeech(){
+  const [bubble,setBubble]=useState(null);
+  const [busy,setBusy]=useState(false);
+  const timer=useRef(null);
+  useEffect(()=>dechoBus.on(e=>{
+    if(e.type==='say'){
+      clearTimeout(timer.current);
+      if(!e.text){setBubble(null);return}
+      setBubble({text:e.text});
+      timer.current=setTimeout(()=>setBubble(null),e.ms);
+    }else if(e.type==='busy')setBusy(e.b);
+  }),[]);
+  return {bubble,busy};
+}
+
+function SpeechBubble({bubble,busy,fallback,className}){
+  if(!bubble&&!busy&&!fallback)return null;
+  return (
+    <div className={"speech px-4 py-3 rounded-2xl text-[13px] leading-relaxed bg-white/95 dark:bg-slate-800/95 backdrop-blur border border-slate-200 dark:border-slate-700 shadow-xl whitespace-pre-wrap overflow-y-auto "+(className||'')}>
+      {busy
+        ?<span className="text-slate-400">Đệ xem qua cái này cho Đại ca nhé <Dots/></span>
+        :<span className="md" dangerouslySetInnerHTML={{__html:md(bubble?bubble.text:fallback)}}/>}
+    </div>
+  );
+}
+
+function DechoScene3D({className}){
+  const mountRef=useRef(null);
+  const animRef=useRef({busy:false,action:null,talkUntil:0,held:false,shockLvl:0});
+  useEffect(()=>dechoBus.on(e=>{
+    if(e.type==='busy')animRef.current.busy=e.b;
+    else if(e.type==='act')animRef.current.action={type:e.a,start:performance.now()};
+    else if(e.type==='say')animRef.current.talkUntil=e.text?performance.now()+Math.min(e.ms||3000,3500):0;
+  }),[]);
+  useEffect(()=>{
+    const el=mountRef.current;
+    if(!el||!window.THREE)return;
+    const W=()=>el.clientWidth,H=()=>el.clientHeight;
+
+    const scene=new THREE.Scene();
+    const camera=new THREE.PerspectiveCamera(40,W()/Math.max(H(),1),0.1,100);
+    camera.position.set(0,1.05,3.4);
+    const renderer=new THREE.WebGLRenderer({alpha:true,antialias:true});
+    renderer.setPixelRatio(Math.min(devicePixelRatio,2));
+    renderer.setSize(W(),H());
+    renderer.outputEncoding=THREE.sRGBEncoding;
+    el.appendChild(renderer.domElement);
+
+    scene.add(new THREE.HemisphereLight(0xffffff,0x335544,1.15));
+    const dir=new THREE.DirectionalLight(0xffffff,0.9);
+    dir.position.set(2,4,3);scene.add(dir);
+
+    const controls=new THREE.OrbitControls(camera,renderer.domElement);
+    controls.enablePan=false;controls.enableZoom=false;
+    controls.target.set(0,1,0);controls.update();
+
+    const group=new THREE.Group();group.position.y=1;scene.add(group);   // pivot ở tâm model (world y=1)
+    const body=new THREE.Group();group.add(body);                        // body: squash/scale quanh tâm
+    let model=null;
+    new THREE.GLTFLoader().load('/static/decho.glb',g=>{
+      model=g.scene;
+      const box=new THREE.Box3().setFromObject(model);
+      const size=box.getSize(new THREE.Vector3()),center=box.getCenter(new THREE.Vector3());
+      const s=2.1/Math.max(size.y,0.001);
+      model.scale.setScalar(s);
+      box.setFromObject(model);box.getCenter(center);
+      model.position.sub(center);            // canh tâm model về gốc local của body
+      body.add(model);
+      animRef.current.action={type:'wave',start:performance.now()};  // vẫy chào khi xuất hiện
+      model.traverse(o=>{if(!decalTarget&&o.isMesh&&o.geometry&&o.geometry.attributes&&o.geometry.attributes.position)decalTarget=o;});
+      buildFaceDecal();          // dựng decal mặt (nếu có DecalGeometry)
+      applyFace(getFace());
+    });
+
+    // ── Mặt tuỳ chỉnh: ưu tiên DECAL chiếu lên bề mặt blob (bỏ qua UV vụn), fallback patch cong ──
+    const faceTex=new THREE.Texture();faceTex.encoding=THREE.sRGBEncoding;
+    const faceMat=new THREE.MeshBasicMaterial({map:faceTex,transparent:true,depthWrite:false});  // patch fallback
+    const decalMat=new THREE.MeshBasicMaterial({map:faceTex,transparent:true,depthTest:true,depthWrite:false,polygonOffset:true,polygonOffsetFactor:-4});
+    const faceGeo=new THREE.PlaneGeometry(1.0,1.0,28,28);
+    {const _p=faceGeo.attributes.position;
+     for(let i=0;i<_p.count;i++){const x=_p.getX(i),y=_p.getY(i);_p.setZ(i,-0.5*(x*x+y*y));}
+     _p.needsUpdate=true;faceGeo.computeVertexNormals();}
+    const faceMesh=new THREE.Mesh(faceGeo,faceMat);
+    faceMesh.position.set(0,0.12,0.88);faceMesh.visible=false;faceMesh.renderOrder=5;group.add(faceMesh);
+    let decalTarget=null,decalMesh=null;
+    // máy chiếu decal trong body-local — tinh chỉnh nếu lệch: vị trí trước-trên + cỡ hộp chiếu
+    const DECAL_POS=new THREE.Vector3(0,0.18,1.25),DECAL_ROT=new THREE.Euler(0,0,0),DECAL_SIZE=new THREE.Vector3(1.5,1.5,2.6);
+    function buildFaceDecal(){
+      if(!decalTarget||!THREE.DecalGeometry)return;   // thiếu DecalGeometry → dùng patch fallback
+      const gp=group.position.clone(),gr=group.rotation.clone(),bs=body.scale.clone();
+      group.position.set(0,0,0);group.rotation.set(0,0,0);body.scale.set(1,1,1);group.updateMatrixWorld(true);
+      try{
+        const geo=new THREE.DecalGeometry(decalTarget,DECAL_POS,DECAL_ROT,DECAL_SIZE);
+        if(decalMesh){body.remove(decalMesh);decalMesh.geometry.dispose()}
+        decalMesh=new THREE.Mesh(geo,decalMat);decalMesh.renderOrder=6;decalMesh.visible=false;body.add(decalMesh);
+      }catch(err){decalMesh=null}
+      finally{group.position.copy(gp);group.rotation.copy(gr);body.scale.copy(bs);group.updateMatrixWorld(true)}
+    }
+    const applyFace=url=>{
+      if(!url){faceMesh.visible=false;if(decalMesh)decalMesh.visible=false;return}
+      const im=new Image();
+      im.onload=()=>{faceTex.image=im;faceTex.needsUpdate=true;
+        if(decalMesh){decalMesh.visible=true;faceMesh.visible=false}else{faceMesh.visible=true}};
+      im.onerror=()=>{faceMesh.visible=false;if(decalMesh)decalMesh.visible=false};
+      im.src=url;
+    };
+    const onFace=e=>applyFace(e.detail||'');
+    window.addEventListener('decho-face',onFace);
+
+    // Chuột: liếc/nghiêng về phía con trỏ; tự nhìn quanh khi rảnh; ngưng liếc khi đang kéo xoay
+    const aim={x:0,y:0,tx:0,ty:0,drag:false};
+    const onMove=ev=>{if(aim.drag)return;const r=el.getBoundingClientRect();
+      aim.tx=((ev.clientX-r.left)/Math.max(r.width,1))*2-1;
+      aim.ty=((ev.clientY-r.top)/Math.max(r.height,1))*2-1;};
+    const onLeave=()=>{aim.tx=0;aim.ty=0;};
+    const onDown=()=>{aim.drag=true};const onUp=()=>{aim.drag=false};
+    const onPress=()=>{animRef.current.held=true};const onRelease=()=>{animRef.current.held=false};
+    el.addEventListener('pointermove',onMove);el.addEventListener('pointerleave',onLeave);
+    el.addEventListener('pointerdown',onPress);window.addEventListener('pointerup',onRelease);
+    controls.addEventListener('start',onDown);controls.addEventListener('end',onUp);
+
+    const ease=p=>p*p*(3-2*p);
+    let nextBlink=2+Math.random()*3,nextLook=3+Math.random()*4,lookX=0;
+
+    /* ── Hiệu ứng khi bị click: tia điện (spark) + sùi bọt mép (foam) ── */
+    const sparkMat=new THREE.MeshBasicMaterial({color:0xffe24d,transparent:true,opacity:0.8,blending:THREE.AdditiveBlending,depthWrite:false,depthTest:false,side:THREE.DoubleSide});
+    const SEG=60,SW=0.03,sparkGeo=new THREE.BufferGeometry();   /* SW = nửa bề dày tia (world units) */
+    sparkGeo.setAttribute('position',new THREE.BufferAttribute(new Float32Array(SEG*6*3),3)); /* mỗi tia = 1 quad (2 tam giác) */
+    const sparks=new THREE.Mesh(sparkGeo,sparkMat);sparks.visible=false;sparks.renderOrder=999;sparks.frustumCulled=false;group.add(sparks);
+    const updateSparks=k=>{
+      const a=sparkGeo.attributes.position.array;let i=0;
+      for(let s=0;s<SEG;s++){
+        const ang=Math.random()*6.28,rad=1.05+Math.random()*0.55,L=0.42;
+        const ax=Math.cos(ang)*rad,ay=(Math.random()-0.5)*1.85,az=Math.sin(ang)*rad;
+        const bx=ax+(Math.random()-0.5)*L,by=ay+(Math.random()-0.5)*L,bz=az+(Math.random()-0.5)*L;
+        let dx=bx-ax,dy=by-ay;const dl=Math.hypot(dx,dy)||1;            /* vuông góc trong mặt phẳng xy (hướng camera) */
+        let px=(dy/dl)*SW,py=(-dx/dl)*SW;
+        const v=[ax+px,ay+py,az, ax-px,ay-py,az, bx+px,by+py,bz, ax-px,ay-py,az, bx-px,by-py,bz, bx+px,by+py,bz];
+        for(let j=0;j<18;j++)a[i++]=v[j];
+      }
+      sparkGeo.attributes.position.needsUpdate=true;
+      sparkMat.opacity=(0.3+Math.random()*0.4)*Math.max(0.3,k);
+    };
+    const foamGeo=new THREE.SphereGeometry(1,8,8),foam=[];
+    for(let i=0;i<32;i++){
+      const m=new THREE.Mesh(foamGeo,new THREE.MeshBasicMaterial({color:0xffffff,transparent:true,opacity:0}));
+      m.visible=false;scene.add(m);foam.push({m,life:0,vx:0,vy:0,vz:0,r:0.04});
+    }
+    const emitFoam=n=>{let c=0;const b=group.position;
+      for(const f of foam){ if(c>=n)break; if(f.life>0)continue;
+        f.life=0.9+Math.random()*0.7;f.r=0.025+Math.random()*0.04;
+        f.m.position.set(b.x+(Math.random()-0.5)*0.26,b.y-0.02+(Math.random()-0.3)*0.12,b.z+0.8+Math.random()*0.12);
+        f.vx=(Math.random()-0.5)*0.12;f.vy=(Math.random()-0.5)*0.06;f.vz=(Math.random()-0.5)*0.1;
+        f.m.scale.setScalar(f.r);f.m.material.opacity=0.95;f.m.visible=true;c++;
+      }};
+    let foamT=0;
+    /* ── Khói bốc lên khi bị giật ── */
+    const smoke=[];
+    for(let i=0;i<14;i++){
+      const m=new THREE.Mesh(foamGeo,new THREE.MeshBasicMaterial({color:0x9a9a9a,transparent:true,opacity:0,depthWrite:false}));
+      m.visible=false;scene.add(m);smoke.push({m,life:0,max:1,vx:0,vy:0,vz:0,r:0.08});
+    }
+    const emitSmoke=n=>{let c=0;const b=group.position;
+      for(const s of smoke){ if(c>=n)break; if(s.life>0)continue;
+        s.max=1.1+Math.random()*0.8;s.life=s.max;s.r=0.07+Math.random()*0.06;
+        s.m.position.set(b.x+(Math.random()-0.5)*0.5,b.y+0.6+Math.random()*0.3,b.z+(Math.random()-0.5)*0.4);
+        s.vx=(Math.random()-0.5)*0.18;s.vy=0.4+Math.random()*0.35;s.vz=(Math.random()-0.5)*0.18;
+        s.m.scale.setScalar(s.r);s.m.material.opacity=0;s.m.visible=true;c++;
+      }};
+    let smokeT=0;
+    const clock=new THREE.Clock();
+    let raf;
+    const tick=()=>{
+      raf=requestAnimationFrame(tick);
+      const dt=clock.getDelta(),t=clock.elapsedTime,st=animRef.current,now=performance.now();
+      /* ── liếc theo chuột + tự nhìn quanh khi rảnh ── */
+      nextLook-=dt;
+      if(nextLook<=0){lookX=(Math.random()*2-1)*0.6;nextLook=4+Math.random()*5}
+      const active=Math.abs(aim.tx)+Math.abs(aim.ty)>0.02;
+      const aimX=aim.drag?aim.x:(active?aim.tx:lookX*0.5),aimY=aim.drag?aim.y:(active?aim.ty:0);
+      aim.x+=(aimX-aim.x)*Math.min(1,dt*4);aim.y+=(aimY-aim.y)*Math.min(1,dt*4);
+      let rotX=aim.y*0.18,rotY=aim.x*0.32,rotZ=0;
+      /* ── idle: bồng bềnh + thở + lắc jelly ── */
+      let posY=Math.sin(t*1.8)*0.06;
+      let sqY=(1+Math.sin(t*2.3)*0.02)*(1+Math.sin(t*1.1+0.5)*0.012);
+      /* ── chớp/nảy nhẹ định kỳ (đời hơn) ── */
+      nextBlink-=dt;st._bl=st._bl||0;
+      if(nextBlink<=0){st._bl=0.32;nextBlink=4+Math.random()*4}
+      if(st._bl>0){sqY*=1-Math.sin((1-st._bl/0.32)*Math.PI)*0.045;st._bl-=dt}
+      /* ── busy/think: lắc nhẹ kiểu đang nghĩ ── */
+      if(st.busy){rotZ+=Math.sin(t*9)*0.04;rotX+=Math.sin(t*3.2)*0.05}
+      /* ── talking: nhún + gật nhẹ, êm (không co giật) ── */
+      if(now<st.talkUntil){posY+=Math.sin(t*5)*0.018;rotX+=Math.sin(t*5)*0.03}
+      /* ── action transient ── */
+      if(st.action){
+        const a=st.action.type;
+        const dur={jump:850,nod:1000,sad:2200,wave:1400,shake:900,happy:1200,spin:1100,shock:1700}[a]||1000;
+        const p=(now-st.action.start)/dur;
+        if(p>=1)st.action=null;
+        else if(a==='jump'){const e=Math.sin(p*Math.PI);posY+=e*0.55;sqY*=(p<0.18?1-(0.18-p)/0.18*0.22:1+e*0.18)}
+        else if(a==='nod')rotX+=Math.sin(p*Math.PI*3)*0.11*(1-p);
+        else if(a==='shake')rotY+=Math.sin(p*Math.PI*4)*0.18*(1-p);
+        else if(a==='sad'){const e=ease(Math.min(1,p*2));rotX+=e*0.26*(1-ease(Math.max(0,(p-0.6)/0.4)));posY-=e*0.05;sqY*=1-e*0.08}
+        else if(a==='wave'){rotZ+=Math.sin(p*Math.PI*4)*0.20*(1-p);rotX-=0.05*Math.sin(p*Math.PI)}
+        else if(a==='happy'){const e=Math.sin(p*Math.PI*2);posY+=Math.abs(e)*0.18;sqY*=1+e*0.10}
+        else if(a==='spin')rotY+=p*Math.PI*2;
+      }
+      /* ── giật điện: giữ chuột (held) → giật + tia + bọt liên tục; thả ra → tắt dần ── */
+      const tgt=st.held?1:0;
+      st.shockLvl+=(tgt-st.shockLvl)*Math.min(1,dt*(st.held?14:6));
+      if(st.shockLvl>0.03){const k=st.shockLvl;
+        rotZ+=Math.sin(t*55)*0.17*k;rotX+=Math.sin(t*48)*0.13*k;rotY+=Math.sin(t*63)*0.10*k;
+        posY+=Math.sin(t*78)*0.05*k;sqY*=1+Math.sin(t*44)*0.10*k;
+        sparks.visible=true;updateSparks(k);
+        foamT-=dt;if(foamT<=0){emitFoam(2);foamT=0.06}
+        smokeT-=dt;if(smokeT<=0){emitSmoke(1);smokeT=0.12}
+      }else if(sparks.visible)sparks.visible=false;
+      for(const f of foam){ if(f.life<=0)continue; f.life-=dt;
+        if(f.life<=0){f.m.visible=false;continue;}
+        f.m.position.x+=f.vx*dt;f.m.position.y+=f.vy*dt;f.m.position.z+=f.vz*dt;  /* không rơi: chỉ lăn tăn rồi mờ */
+        f.m.material.opacity=Math.min(0.92,f.life*2.5);
+      }
+      for(const s of smoke){ if(s.life<=0)continue; s.life-=dt;
+        if(s.life<=0){s.m.visible=false;continue;}
+        s.vy*=(1-0.4*dt);                                   /* bốc lên chậm dần */
+        s.m.position.x+=s.vx*dt;s.m.position.y+=s.vy*dt;s.m.position.z+=s.vz*dt;
+        const age=1-s.life/s.max;
+        s.m.scale.setScalar(s.r*(1+age*3.5));               /* nở to dần */
+        s.m.material.opacity=Math.sin(Math.min(1,age*1.1)*Math.PI)*0.5;  /* mờ vào rồi mờ ra */
+      }
+      const sxz=1/Math.sqrt(Math.max(sqY,0.2));   /* squash-and-stretch giữ thể tích */
+      group.position.y=1+posY;
+      group.rotation.set(rotX,rotY,rotZ);
+      body.scale.set(sxz,sqY,sxz);
+      controls.update();
+      renderer.render(scene,camera);
+    };
+    tick();
+
+    const ro=new ResizeObserver(()=>{
+      camera.aspect=W()/Math.max(H(),1);camera.updateProjectionMatrix();
+      renderer.setSize(W(),H());
+    });
+    ro.observe(el);
+
+    return()=>{cancelAnimationFrame(raf);ro.disconnect();
+      el.removeEventListener('pointermove',onMove);el.removeEventListener('pointerleave',onLeave);
+      el.removeEventListener('pointerdown',onPress);window.removeEventListener('pointerup',onRelease);
+      window.removeEventListener('decho-face',onFace);
+      controls.dispose();renderer.dispose();
+      foamGeo.dispose();sparkGeo.dispose();sparkMat.dispose();faceMat.dispose();decalMat.dispose();faceTex.dispose();if(decalMesh)decalMesh.geometry.dispose();foam.forEach(f=>f.m.material.dispose());smoke.forEach(s=>s.m.material.dispose());
+      el.contains(renderer.domElement)&&el.removeChild(renderer.domElement)};
+  },[]);
+
+  const poke=()=>{
+    dechoBus.say(QUIPS[Math.floor(Math.random()*QUIPS.length)]);  /* giật điện do GIỮ chuột (pointerdown) lo */
+  };
+  return <div ref={mountRef} onClick={poke} className={"cursor-pointer "+(className||'')} title="Click Đệ đi Đại ca"/>;
+}
+
+/* ───────────── DeCho sprite engine (thay 3D khi có spritesheet) ─────────────
+   Đặt 4 file PNG NỀN TRONG SUỐT vào static/sprites/: idle.png, happy.png,
+   think.png, sad.png — mỗi file 12 frame xếp lưới cols×rows (chỉnh bên dưới). */
+const SPRITE_CFG={
+  base:'/static/sprites/',
+  fps:12, cols:2, rows:6, frames:12,
+  states:{idle:'idle.png',happy:'happy.png',think:'think.png',sad:'sad.png'},
+};
+
+function DechoSprite({className}){
+  const canvasRef=useRef(null);
+  const stRef=useRef({mood:'idle',until:0,busy:false});
+
+  useEffect(()=>dechoBus.on(e=>{
+    const st=stRef.current,now=performance.now();
+    if(e.type==='busy'){st.busy=e.b;if(!st.until)st.mood=e.b?'think':'idle'}
+    else if(e.type==='act'){
+      if(e.a==='sad'){st.mood='sad';st.until=now+2600}
+      else{st.mood='happy';st.until=now+1800} /* jump/nod → happy loop */
+    }
+  }),[]);
+
+  useEffect(()=>{
+    const cv=canvasRef.current,ctx=cv.getContext('2d');
+    const imgs={};
+    Object.entries(SPRITE_CFG.states).forEach(([k,f])=>{
+      const im=new Image();im.src=SPRITE_CFG.base+f;imgs[k]=im;
+    });
+    const parent=cv.parentElement;
+    const fit=()=>{cv.width=parent.clientWidth*devicePixelRatio;cv.height=parent.clientHeight*devicePixelRatio};
+    fit();
+    const ro=new ResizeObserver(fit);ro.observe(parent);
+    let raf;
+    const tick=()=>{
+      raf=requestAnimationFrame(tick);
+      const st=stRef.current,now=performance.now();
+      if(st.until&&now>st.until){st.until=0;st.mood=st.busy?'think':'idle'}
+      const img=imgs[st.mood]&&imgs[st.mood].complete&&imgs[st.mood].naturalWidth?imgs[st.mood]:imgs.idle;
+      if(!img||!img.complete||!img.naturalWidth)return;
+      const {cols,rows,frames,fps}=SPRITE_CFG;
+      const i=Math.floor(now/1000*fps)%frames;
+      const fw=img.naturalWidth/cols,fh=img.naturalHeight/rows;
+      const sx=(i%cols)*fw,sy=Math.floor(i/cols)*fh;
+      ctx.clearRect(0,0,cv.width,cv.height);
+      const sc=Math.min(cv.width/fw,cv.height/fh)*0.92;
+      const dw=fw*sc,dh=fh*sc;
+      ctx.drawImage(img,sx,sy,fw,fh,(cv.width-dw)/2,cv.height-dh,dw,dh);
+    };
+    tick();
+    return()=>{cancelAnimationFrame(raf);ro.disconnect()};
+  },[]);
+
+  const poke=()=>{
+    dechoBus.act('jump');
+    dechoBus.say(QUIPS[Math.floor(Math.random()*QUIPS.length)]);
+  };
+  return (
+    <div onClick={poke} className={"cursor-pointer relative "+(className||'')} title="Click Đệ đi Đại ca">
+      <canvas ref={canvasRef} className="w-full h-full"/>
+    </div>
+  );
+}
+
+/* ───────── DeCho pose engine: 1 ảnh PNG / cảm xúc + CSS animation ─────────
+   Đặt 4 file PNG NỀN TRONG SUỐT vào static/poses/:
+   idle.png (nằm lê/đứng thường) · think.png (hoang mang/suy nghĩ)
+   happy.png (hào hứng/yeahhh) · sad.png (buồn/mệt mỏi)                     */
+const POSE_CFG={base:'/static/poses/',states:{idle:'idle.png',think:'think.png',happy:'happy.png',sad:'sad.png'}};
+
+function DechoPose({className}){
+  const [mood,setMood]=useState('idle');
+  const stRef=useRef({busy:false,timer:null});
+  useEffect(()=>{ /* preload */
+    Object.values(POSE_CFG.states).forEach(f=>{const im=new Image();im.src=POSE_CFG.base+f});
+  },[]);
+  useEffect(()=>dechoBus.on(e=>{
+    const st=stRef.current;
+    if(e.type==='busy'){st.busy=e.b;if(!st.timer)setMood(e.b?'think':'idle')}
+    else if(e.type==='act'){
+      const m=e.a==='sad'?'sad':'happy',ms=m==='sad'?2600:1800;
+      setMood(m);
+      clearTimeout(st.timer);
+      st.timer=setTimeout(()=>{st.timer=null;setMood(st.busy?'think':'idle')},ms);
+    }
+  }),[]);
+  const poke=()=>{
+    dechoBus.act('jump');
+    dechoBus.say(QUIPS[Math.floor(Math.random()*QUIPS.length)]);
+  };
+  const motion={idle:'pose-float',think:'pose-think',happy:'pose-bounce',sad:'pose-sad'}[mood];
+  return (
+    <div onClick={poke} className={"cursor-pointer flex items-end justify-center "+(className||'')} title="Click Đệ đi Đại ca">
+      <img src={POSE_CFG.base+POSE_CFG.states[mood]} alt="DeCho"
+           className={"max-h-[92%] max-w-[88%] object-contain "+motion} draggable={false}/>
+    </div>
+  );
+}
+
+/* Wrapper: có spritesheet → dùng 2D animation, chưa có → fallback 3D */
+/* Đặt true khi đã thêm ảnh vào static/poses hoặc static/sprites để bật dò 2D.
+   Để false thì dùng thẳng 3D, tránh request 404 idle.png trong log. */
+const DECHO_PROBE_2D=false;
+function DechoScene(props){
+  const [mode,setMode]=useState(DECHO_PROBE_2D?'probe':'3d');
+  useEffect(()=>{
+    if(!DECHO_PROBE_2D)return;
+    const test=u=>new Promise(res=>{const im=new Image();im.onload=()=>res(true);im.onerror=()=>res(false);im.src=u});
+    (async()=>{
+      if(await test(POSE_CFG.base+POSE_CFG.states.idle))setMode('pose');
+      else if(await test(SPRITE_CFG.base+SPRITE_CFG.states.idle))setMode('sprite');
+      else setMode('3d');
+    })();
+  },[]);
+  if(mode==='pose')return <DechoPose {...props}/>;
+  if(mode==='sprite')return <DechoSprite {...props}/>;
+  if(mode==='3d')return <DechoScene3D {...props}/>;
+  return <div className={props.className}/>;
+}
+
+/* DeCho dock — góc sidebar, kèm ô hỏi đáp có bối cảnh màn hình */
+function DechoDock({showAsk}){
+  const {bubble,busy}=useDechoSpeech();
+  const [q,setQ]=useState('');
+  const [asking,setAsking]=useState(false);
+  const face=useFace();
+  const faceRef=useRef(null);
+  const onPickFace=file=>{   // crop vuông giữa → 256px → lưu data URL
+    if(!file||!file.type.startsWith('image/'))return;
+    const rd=new FileReader();
+    rd.onload=()=>{
+      const im=new Image();
+      im.onload=()=>{
+        const S=256,c=document.createElement('canvas');c.width=c.height=S;
+        const ctx=c.getContext('2d');
+        const m=Math.min(im.width,im.height),sx=(im.width-m)/2,sy=(im.height-m)/2;
+        ctx.save();ctx.beginPath();ctx.arc(S/2,S/2,S/2,0,6.2832);ctx.clip();   // bo tròn → góc trong suốt
+        ctx.drawImage(im,sx,sy,m,m,0,0,S,S);ctx.restore();
+        try{setFace(c.toDataURL('image/png'))}catch(e){setFace(rd.result)}     // PNG giữ alpha
+      };
+      im.onerror=()=>setFace(rd.result);
+      im.src=rd.result;
+    };
+    rd.readAsDataURL(file);
+  };
+
+  async function ask(e){
+    e.preventDefault();
+    const question=q.trim();
+    if(!question||asking)return;
+    setQ('');setAsking(true);dechoBus.busy(true);
+    try{
+      const r=await(await fetch('/api/decho/ask',{
+        method:'POST',headers:{'Content-Type':'application/json'},
+        body:JSON.stringify({question,model:dechoCtx.model||undefined,
+          user_id:memIds.uid,session_id:memIds.sid,
+          context:`Người dùng đang mở màn hình: ${dechoCtx.view}\n${dechoCtx.info||''}`})
+      })).json();
+      if(r.reply){
+        dechoBus.act('nod');dechoBus.say(r.reply,15000);
+        if(r.action)window.dispatchEvent(new CustomEvent('decho-ui',{detail:r.action}));
+      }
+      else{dechoBus.act('sad');dechoBus.say('❌ '+(r.error||'Đệ hỏi không được'),8000)}
+    }catch(err){dechoBus.act('sad');dechoBus.say('❌ Lỗi: '+err.message,8000)}
+    finally{setAsking(false);dechoBus.busy(false)}
+  }
+
+  return (
+    <div className="relative flex-none">
+      {(bubble||busy)&&(
+        <div className="absolute bottom-full left-0.5 right-0.5 mb-2 z-50" onClick={()=>dechoBus.say(null)} title="Click để đóng">
+          <SpeechBubble bubble={bubble} busy={busy} className="max-h-[55vh] cursor-pointer text-[12.5px]"/>
+        </div>
+      )}
+      <div className="rounded-2xl mx-0.5 mb-1 overflow-hidden border border-slate-200 dark:border-slate-800 bg-gradient-to-b from-emerald-50 via-cyan-50/40 to-transparent dark:from-emerald-950/40 dark:via-cyan-950/20">
+        <div className="relative">
+          <div className="absolute bottom-2 left-1/2 -translate-x-1/2 w-28 h-5 rounded-full blur-xl opacity-40" style={{background:'radial-gradient(ellipse,#0ea371,transparent 70%)'}}/>
+          <DechoScene className="h-40"/>
+          <input ref={faceRef} type="file" accept="image/*" className="hidden" onChange={e=>{onPickFace(e.target.files[0]);e.target.value=''}}/>
+          <button onClick={()=>faceRef.current&&faceRef.current.click()} title="Thay mặt DeCho bằng ảnh của bạn"
+            className="absolute top-1.5 right-1.5 z-10 w-7 h-7 grid place-items-center rounded-full bg-white/85 dark:bg-slate-900/80 backdrop-blur border border-slate-200 dark:border-slate-700 text-slate-500 hover:text-violet-500 transition">
+            <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"/><circle cx="12" cy="13" r="4"/></svg>
+          </button>
+          {face&&<button onClick={()=>setFace('')} title="Về mặt mặc định"
+            className="absolute top-1.5 left-1.5 z-10 w-7 h-7 grid place-items-center rounded-full bg-white/85 dark:bg-slate-900/80 backdrop-blur border border-slate-200 dark:border-slate-700 text-slate-500 hover:text-red-500 transition">
+            <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M3 12a9 9 0 1 0 9-9 9 9 0 0 0-6.4 2.6L3 8"/><path d="M3 3v5h5"/></svg>
+          </button>}
+        </div>
+        {showAsk&&<form onSubmit={ask} className="flex gap-1 px-2 pb-1.5">
+          <input value={q} onChange={e=>setQ(e.target.value)} placeholder="Hỏi Đệ về màn hình này…"
+            className="flex-1 min-w-0 text-[11.5px] px-2 py-1.5 rounded-lg bg-white/80 dark:bg-slate-900/60 border border-slate-200 dark:border-slate-700 outline-none transition focus:border-violet-400 focus:ring-2 focus:ring-violet-500/20"/>
+          <button disabled={asking} className="px-2.5 rounded-lg bg-violet-500 hover:bg-violet-600 text-white grid place-items-center disabled:opacity-50 transition">
+            {asking
+              ?<svg className="w-3 h-3 animate-spin" viewBox="0 0 24 24" fill="none"><circle cx="12" cy="12" r="10" stroke="currentColor" strokeOpacity=".3" strokeWidth="4"/><path d="M22 12A10 10 0 0 0 12 2" stroke="currentColor" strokeWidth="4" strokeLinecap="round"/></svg>
+              :<svg className="w-3 h-3" viewBox="0 0 24 24" fill="currentColor"><path d="M3.5 20.3c-.4.9.5 1.8 1.4 1.4l16.5-8.3c.9-.4.9-1.7 0-2.1L4.9 2.9c-.9-.4-1.8.5-1.4 1.4L6 11.2c.1.3.1.6 0 .9l-2.5 8.2z"/></svg>}
+          </button>
+        </form>}
+        <div className="pb-1.5 text-center text-[10px] text-slate-400 select-none">
+          <span className="inline-flex items-center justify-center gap-1.5">
+            <span className={"w-1.5 h-1.5 rounded-full flex-none "+(busy?'bg-amber-400 animate-pulse':'bg-emerald-500')}/>
+            {busy?'Đệ đang chạy việc':(showAsk?'Đệ đang rảnh · hỏi Đệ bên trên':'Đệ đang rảnh · nhắn Đệ ở khung chat')}
+          </span>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+
+/* ───────────────────────── Chat ───────────────────────── */
+function Lightbox(){
+  const [src,setSrc]=useState(null);
+  useEffect(()=>{
+    const h=e=>setSrc(e.detail);
+    window.addEventListener('view-image',h);
+    return()=>window.removeEventListener('view-image',h);
+  },[]);
+  useEffect(()=>{
+    const k=e=>{if(e.key==='Escape')setSrc(null)};
+    window.addEventListener('keydown',k);return()=>window.removeEventListener('keydown',k);
+  },[]);
+  if(!src)return null;
+  return ReactDOM.createPortal(
+    <div onClick={()=>setSrc(null)} className="fixed inset-0 z-[100] bg-black/80 backdrop-blur-sm grid place-items-center p-6 cursor-zoom-out">
+      <img src={src} alt="ảnh" className="max-w-[92vw] max-h-[92vh] rounded-xl shadow-2xl" onClick={e=>e.stopPropagation()}/>
+      <button onClick={()=>setSrc(null)} className="absolute top-4 right-4 w-10 h-10 grid place-items-center rounded-full bg-white/15 hover:bg-white/30 text-white">
+        <svg className="w-5 h-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M18 6L6 18M6 6l12 12"/></svg>
+      </button>
+    </div>, document.body);
+}
+
+function Bubble({m}){
+  const face=useFace();
+  return (
+    <div className={"chat-row msg-in flex gap-2.5 items-end "+(m.me?"flex-row-reverse":"")}>
+      {m.me
+        ?<div className={"chat-avatar w-8 h-8 rounded-full flex-none grid place-items-center text-violet-600 dark:text-violet-200 bg-gradient-to-br from-violet-100 to-fuchsia-100 dark:from-violet-900 dark:to-fuchsia-900 border border-violet-200/70 dark:border-violet-700/70 "+(m.ts?'mb-5':'')}><svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg></div>
+        :<div className={"chat-avatar w-8 h-8 rounded-full flex-none overflow-hidden grid place-items-center bg-gradient-to-br from-emerald-100 to-cyan-100 dark:from-emerald-900 dark:to-cyan-900 border border-slate-200 dark:border-slate-700 "+(m.ts?'mb-5':'')} title="DeCho">
+            <img src={face||"/static/decho-avatar.png"} alt="DeCho" className="w-full h-full object-cover"
+              onError={e=>{e.currentTarget.style.display='none';e.currentTarget.nextSibling.style.display='block'}}/>
+            <span className="text-[12px] font-extrabold text-emerald-600 dark:text-emerald-300" style={{display:'none'}}>Đệ</span>
+          </div>}
+      <div className={"chat-bubble-wrap max-w-[82%] flex flex-col gap-0.5 "+(m.me?"items-end":"items-start")}>
+      <div className={"chat-bubble px-4 py-3 text-[14.5px] leading-relaxed whitespace-pre-wrap break-words rounded-2xl w-fit max-w-full "+(m.me?"bg-violet-500 text-white rounded-br-md shadow-sm":"bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 shadow-sm rounded-bl-md")}>
+        {!m.me&&m.steps&&(
+          <details open={m.streaming||m.stepsOpen} className="mb-2 border border-dashed border-slate-300 dark:border-slate-600 rounded-lg px-2.5 py-1.5 bg-slate-50 dark:bg-slate-800">
+            <summary className="cursor-pointer text-[11.5px] font-semibold text-slate-500 select-none"><span className="inline-flex items-center gap-1.5 align-middle"><NavIcon id="config" cls="w-3.5 h-3.5"/>Actions</span></summary>
+            <div className="mt-1.5 text-[12px] leading-relaxed text-slate-500 font-mono whitespace-pre-wrap max-h-72 overflow-y-auto"
+                 ref={el=>{if(el&&m.streaming)el.scrollTop=el.scrollHeight}}><IconText text={m.steps}/></div>
+          </details>
+        )}
+        {m.image&&<img src={m.image} alt="ảnh" onClick={()=>window.dispatchEvent(new CustomEvent('view-image',{detail:m.image}))}
+          className="mb-2 max-w-[200px] max-h-56 w-auto rounded-xl border border-white/40 cursor-zoom-in hover:opacity-90 transition"/>}
+        {m.me
+          ? <IconText text={m.text}/>
+          : m.error
+            ? <span className="text-red-500"><IconText text={m.text}/></span>
+            : m.text
+              ? <span className="md" dangerouslySetInnerHTML={{__html:md(m.text)}}/>
+              : <Dots/>}
+      </div>
+      {m.ts&&<span className="text-[10px] text-slate-500 dark:text-slate-300 px-1.5 py-0.5 rounded-full bg-white/70 dark:bg-slate-900/60 backdrop-blur-sm select-none">{fmtChatTime(m.ts)}</span>}
+      </div>
+    </div>
+  );
+}
+
+function ChatView({cfg,model}){
+  const [msgs,setMsgs]=useState([]);
+  const [busy,setBusy]=useState(false);
+  const [inp,setInp]=useState('');
+  const [img,setImg]=useState(null);   // ảnh đính kèm (data URL đã nén)
+  const [rec,setRec]=useState(false);  // đang ghi âm STT
+  const scrollRef=useRef(null), aborterRef=useRef(null), histRef=useRef([]), fileRef=useRef(null), mediaRef=useRef(null), inpRef=useRef(null);
+
+  /* Whisper MaaS chỉ nhận WAV (header RIFF). MediaRecorder ra WebM/Opus (Chrome/FF)
+     hoặc MP4/AAC (Safari) → decode rồi encode lại thành WAV 16kHz mono 16-bit PCM. */
+  async function blobToWav(blob, targetRate=16000){
+    const AC=window.AudioContext||window.webkitAudioContext;
+    const ac=new AC();
+    let audio;
+    try{ audio=await ac.decodeAudioData(await blob.arrayBuffer()); }
+    finally{ if(ac.close)ac.close(); }
+    // mix các kênh xuống mono
+    const ch=audio.numberOfChannels, len=audio.length, mono=new Float32Array(len);
+    for(let c=0;c<ch;c++){const d=audio.getChannelData(c);for(let i=0;i<len;i++)mono[i]+=d[i]/ch;}
+    // resample tuyến tính về targetRate
+    let samples=mono;
+    if(audio.sampleRate!==targetRate){
+      const ratio=audio.sampleRate/targetRate, outLen=Math.max(1,Math.round(len/ratio)), out=new Float32Array(outLen);
+      for(let i=0;i<outLen;i++){const pos=i*ratio,i0=Math.floor(pos),i1=Math.min(i0+1,len-1),f=pos-i0;out[i]=mono[i0]*(1-f)+mono[i1]*f;}
+      samples=out;
+    }
+    // encode WAV PCM 16-bit mono
+    const n=samples.length, ab=new ArrayBuffer(44+n*2), dv=new DataView(ab);
+    const ws=(o,s)=>{for(let i=0;i<s.length;i++)dv.setUint8(o+i,s.charCodeAt(i));};
+    ws(0,'RIFF'); dv.setUint32(4,36+n*2,true); ws(8,'WAVE');
+    ws(12,'fmt '); dv.setUint32(16,16,true); dv.setUint16(20,1,true); dv.setUint16(22,1,true);
+    dv.setUint32(24,targetRate,true); dv.setUint32(28,targetRate*2,true); dv.setUint16(32,2,true); dv.setUint16(34,16,true);
+    ws(36,'data'); dv.setUint32(40,n*2,true);
+    let off=44;
+    for(let i=0;i<n;i++){const s=Math.max(-1,Math.min(1,samples[i]));dv.setInt16(off,s<0?s*0x8000:s*0x7FFF,true);off+=2;}
+    return new Blob([ab],{type:'audio/wav'});
+  }
+
+  /* Speech-to-Text: ghi âm rồi gửi /api/decho/stt (Whisper), chèn vào ô nhập */
+  async function toggleMic(){
+    if(rec){mediaRef.current&&mediaRef.current.stop();return}
+    if(!navigator.mediaDevices||!window.MediaRecorder){alert('Trình duyệt không hỗ trợ ghi âm.');return}
+    let stream;
+    try{stream=await navigator.mediaDevices.getUserMedia({audio:true})}
+    catch(e){alert('Không truy cập được micro: '+e.message);return}
+    const mr=new MediaRecorder(stream);mediaRef.current=mr;const chunks=[];
+    mr.ondataavailable=e=>{if(e.data.size)chunks.push(e.data)};
+    mr.onstop=async()=>{
+      stream.getTracks().forEach(t=>t.stop());mediaRef.current=null;setRec(false);
+      const blob=new Blob(chunks,{type:mr.mimeType||'audio/webm'});
+      if(!blob.size)return;
+      setInp(v=>v+(v?' ':'')+'…'); // báo đang xử lý
+      try{
+        const wav=await blobToWav(blob);              // convert sang WAV cho Whisper (RIFF)
+        const fd=new FormData();fd.append('audio',wav,'audio.wav');
+        const r=await(await fetch('/api/decho/stt',{method:'POST',body:fd})).json();
+        setInp(v=>v.replace(/…$/,'').trim());
+        if(r.text){
+          setInp(v=>(v?v+' ':'')+r.text);
+          // focus ô chat + caret cuối dòng để Đại ca nhấn Enter gửi luôn (chờ value cập nhật xong)
+          requestAnimationFrame(()=>{const el=inpRef.current;if(el){el.focus();const n=el.value.length;try{el.setSelectionRange(n,n)}catch(_){}}});
+        }
+        else dechoBus.say('❌ Nghe không rõ: '+(r.error||'thử lại nhé'),6000);
+      }catch(e){setInp(v=>v.replace(/…$/,'').trim());dechoBus.say('❌ Lỗi STT: '+e.message,6000)}
+    };
+    mr.start();setRec(true);
+  }
+
+  /* đọc + nén ảnh xuống ≤1280px JPEG để payload nhẹ */
+  const pickImage=file=>{
+    if(!file||!file.type.startsWith('image/'))return;
+    const rd=new FileReader();
+    rd.onload=()=>{
+      const im=new Image();
+      im.onload=()=>{
+        const max=1280,sc=Math.min(1,max/Math.max(im.width,im.height));
+        const c=document.createElement('canvas');
+        c.width=Math.round(im.width*sc);c.height=Math.round(im.height*sc);
+        c.getContext('2d').drawImage(im,0,0,c.width,c.height);
+        try{setImg(c.toDataURL('image/jpeg',0.85))}catch(e){setImg(rd.result)}
+      };
+      im.onerror=()=>setImg(rd.result);
+      im.src=rd.result;
+    };
+    rd.readAsDataURL(file);
+  };
+
+  async function sendImage(text,image){
+    if(busy)return;
+    const now=Date.now();
+    setMsgs(m=>[...m,{me:true,text,image,ts:now},{me:false,text:'',streaming:true}]); // ts của DeCho gán lúc trả lời xong
+    saveHist(true,text||'[ảnh]');
+    setBusy(true);dechoBus.busy(true);
+    const upd=patch=>setMsgs(m=>{const n=[...m];n[n.length-1]={...n[n.length-1],...patch};return n});
+    try{
+      const r=await(await fetch('/api/decho/vision',{method:'POST',headers:{'Content-Type':'application/json'},
+        body:JSON.stringify({image,question:text,model,user_id:memIds.uid,session_id:memIds.sid})})).json();
+      const t=r.reply||('❌ '+(r.error||'Đệ đọc ảnh không được'));
+      const err=!r.reply;
+      upd({text:t,streaming:false,error:err,ts:Date.now()});
+      saveHist(false,t);
+      dechoBus.act(err?'sad':'nod');
+    }catch(e){
+      upd({text:'❌ Lỗi gửi ảnh: '+e.message,error:true,streaming:false,ts:Date.now()});
+    }finally{setBusy(false);dechoBus.busy(false)}
+  }
+
+  useEffect(()=>{ /* load history: localStorage trước, trống thì kéo từ AgentBase Memory */
+    let h=[];try{h=JSON.parse(localStorage.getItem(cfg.storageKey)||'[]')}catch(e){}
+    histRef.current=h;
+    setMsgs([{me:false,text:cfg.greeting,stepsOpen:false},...h.map(x=>({me:x.me,text:x.text,steps:x.steps,ts:x.ts,error:(x.text||'').startsWith('❌')}))]);
+    if(!h.length){
+      fetch(`/api/memory/history?user_id=${memIds.uid}&session_id=${memIds.sid}`)
+        .then(r=>r.json()).then(d=>{
+          if(!d.configured||!d.messages||!d.messages.length)return;
+          histRef.current=d.messages.map(x=>({me:x.me,text:x.text}));
+          try{localStorage.setItem(cfg.storageKey,JSON.stringify(histRef.current))}catch(e){}
+          setMsgs([{me:false,text:cfg.greeting,stepsOpen:false},...d.messages.map(x=>({me:x.me,text:x.text,error:(x.text||'').startsWith('❌')}))]);
+        }).catch(()=>{});
+    }
+  },[cfg.storageKey]);
+
+  useEffect(()=>{const el=scrollRef.current;if(el)el.scrollTop=el.scrollHeight},[msgs]);
+
+  useEffect(()=>{ /* khai báo bối cảnh cho DeCho */
+    const name='Chat với DeCho (đa năng PSI + SEO)';
+    dechoCtx.info=`Khung ${name}. Các tin gần nhất:\n`+msgs.slice(-6)
+      .map(m=>(m.me?'User: ':'Agent: ')+(m.text||'').slice(0,250)).join('\n');
+  },[msgs,cfg.storageKey]);
+
+  const saveHist=(me,text,steps)=>{
+    histRef.current.push({me,text,ts:Date.now(),...(steps?{steps}:{})});
+    histRef.current=histRef.current.slice(-100);
+    try{localStorage.setItem(cfg.storageKey,JSON.stringify(histRef.current))}catch(e){}
+  };
+  const clearHist=()=>{
+    histRef.current=[];try{localStorage.removeItem(cfg.storageKey)}catch(e){}
+    memIds.newSession(); /* phiên memory mới — DeCho vẫn giữ trí nhớ dài hạn */
+    setMsgs([{me:false,text:cfg.greeting}]);
+  };
+
+  async function send(text){
+    if(busy)return;
+    saveHist(true,text);
+    const now=Date.now();
+    setMsgs(m=>[...m,{me:true,text,ts:now},{me:false,text:'',steps:'',streaming:true}]); // ts của DeCho gán lúc trả lời xong
+    setBusy(true);
+    dechoBus.busy(true);
+    const aborter=new AbortController();aborterRef.current=aborter;
+    const upd=patch=>setMsgs(m=>{const n=[...m];n[n.length-1]={...n[n.length-1],...patch};return n});
+    let steps='',ansRaw='',finalText='',isErr=false;
+    try{
+      const history=histRef.current.slice(0,-1).slice(-24)
+        .map(x=>({role:x.me?'user':'assistant',content:x.text}))
+        .filter(x=>x.content&&!x.content.startsWith('❌'));
+      const r=await fetch(cfg.endpoint,{method:'POST',headers:{'Content-Type':'application/json'},
+        body:JSON.stringify({message:text,model,history,user_id:memIds.uid,session_id:memIds.sid}),signal:aborter.signal});
+      if(!r.ok||!r.body)throw new Error('HTTP '+r.status);
+      const reader=r.body.getReader(),dec=new TextDecoder();
+      let buf='';
+      const handleEvent=e=>{
+        const line=e.split('\n').find(l=>l.startsWith('data:'));
+        if(!line)return;
+        let msg;try{msg=JSON.parse(line.slice(5))}catch(_){return}
+        if(msg.type==='step'){steps+=(steps?'\n':'')+msg.text;upd({steps})}
+        else if(msg.type==='delta'){ansRaw+=msg.delta;finalText=ansRaw;upd({text:ansRaw})}
+        else if(msg.type==='final'){finalText=msg.text;upd({text:msg.text})}
+        else if(msg.type==='error'){finalText=msg.text;isErr=true;upd({text:msg.text,error:true})}
+        else if(msg.type==='ui'){window.dispatchEvent(new CustomEvent('decho-ui',{detail:msg.ui}))}
+      };
+      while(true){
+        const{done,value}=await reader.read();
+        if(done)break;
+        buf+=dec.decode(value,{stream:true});
+        const events=buf.split('\n\n');buf=events.pop();
+        for(const e of events)handleEvent(e);
+      }
+      if(buf.trim())handleEvent(buf);
+      if(!finalText){finalText='❌ Không nhận được phản hồi.';isErr=true;upd({text:finalText,error:true})}
+      upd({streaming:false,stepsOpen:steps.split('\n').length>3,ts:Date.now()});
+      saveHist(false,finalText,steps||undefined);
+      dechoBus.act(isErr?'sad':'nod'); /* câu trả lời đã nằm trong chat — dock chỉ diễn cảm xúc */
+    }catch(e){
+      if(e.name==='AbortError'){
+        const note='⏹ Đã dừng theo yêu cầu.';
+        finalText=finalText?finalText+'\n\n'+note:note;
+        upd({text:finalText,streaming:false,ts:Date.now()});
+        saveHist(false,finalText,steps||undefined);
+      }else{
+        upd({text:'❌ Lỗi kết nối server: '+e.message,error:true,streaming:false,ts:Date.now()});
+        saveHist(false,'❌ Lỗi kết nối server: '+e.message);
+      }
+    }finally{aborterRef.current=null;setBusy(false);dechoBus.busy(false)}
+  }
+
+  const submit=e=>{
+    e.preventDefault();
+    if(busy){aborterRef.current&&aborterRef.current.abort();return}
+    const v=inp.trim();
+    if(img){const im=img;setImg(null);setInp('');sendImage(v,im);return}
+    if(!v)return;setInp('');send(v);
+  };
+
+  return (
+    <div className="flex-1 flex flex-col min-h-0">
+      <Lightbox/>
+      <div className="chat-chipbar flex gap-1.5 flex-wrap items-center px-3 pt-3.5 pb-3 border-b border-slate-200 dark:border-slate-800 max-w-[1150px] w-full mx-auto">
+        {cfg.chips.map(([ic,label,m])=>
+          <button key={label} disabled={busy} className={chipCls+" !px-2.5 inline-flex items-center gap-1"} onClick={()=>send(m)}>
+            <span className="text-violet-500"><NavIcon id={ic} cls="w-3.5 h-3.5"/></span>{label}
+          </button>)}
+        <button disabled={busy} className={chipCls+" !px-2.5 inline-flex items-center gap-1"} onClick={clearHist}>
+          <span className="text-slate-400"><NavIcon id="trash" cls="w-3.5 h-3.5"/></span>Xóa lịch sử
+        </button>
+        {cfg.meta&&<span className="ml-auto text-xs text-slate-400"><IconText text={cfg.meta}/></span>}
+      </div>
+      <div ref={scrollRef} className="flex-1 min-h-0 overflow-y-auto scroll-smooth bg-transparent">
+        <div className="chat-scroll-inner max-w-[1150px] mx-auto px-6 py-4 flex flex-col gap-3.5">
+          {msgs.map((m,i)=><Bubble key={i} m={m}/>)}
+        </div>
+      </div>
+      <div className="chat-composer-wrap px-6 pb-4 pt-2">
+        {img&&(
+          <div className="max-w-[1150px] mx-auto mb-2"><div className="flex items-center gap-3 w-fit p-2 pr-4 rounded-xl bg-white/95 dark:bg-slate-900/95 backdrop-blur border border-slate-200 dark:border-slate-700 shadow-sm">
+            <div className="relative flex-none">
+              <img src={img} alt="đính kèm" className="h-14 w-14 object-cover rounded-lg border border-slate-300 dark:border-slate-600"/>
+              <button onClick={()=>setImg(null)} title="Bỏ ảnh"
+                className="absolute -top-2 -right-2 w-5 h-5 grid place-items-center rounded-full bg-slate-800 text-white shadow hover:bg-slate-700">
+                <svg className="w-3 h-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><path d="M18 6L6 18M6 6l12 12"/></svg>
+              </button>
+            </div>
+            <span className="text-[13px] leading-snug text-slate-600 dark:text-slate-300">Đã đính ảnh — nhập câu hỏi<br/>(tùy chọn) rồi gửi để Đệ đọc.</span>
+          </div></div>
+        )}
+        <form onSubmit={submit} className={"chat-composer max-w-[1150px] mx-auto flex gap-2.5 p-2 rounded-2xl transition focus-within:border-violet-400 focus-within:ring-2 focus-within:ring-violet-500/20 "+card}>
+          <input ref={fileRef} type="file" accept="image/*" className="hidden"
+                 onChange={e=>{pickImage(e.target.files[0]);e.target.value=''}}/>
+          <button type="button" onClick={()=>fileRef.current&&fileRef.current.click()} disabled={busy} title="Đính ảnh"
+                  className="composer-icon w-11 h-11 rounded-xl flex-none grid place-items-center text-slate-500 hover:text-violet-500 hover:bg-slate-100 dark:hover:bg-slate-800 transition disabled:opacity-40">
+            <svg className="w-5 h-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="9" cy="9" r="2"/><path d="M21 15l-5-5L5 21"/></svg>
+          </button>
+          <button type="button" onClick={toggleMic} disabled={busy} title={rec?'Dừng ghi âm':'Nói (giọng nói → chữ)'}
+                  className={"composer-icon w-11 h-11 rounded-xl flex-none grid place-items-center transition disabled:opacity-40 "+(rec?"text-white bg-red-500 hover:bg-red-600 animate-pulse":"text-slate-500 hover:text-violet-500 hover:bg-slate-100 dark:hover:bg-slate-800")}>
+            <svg className="w-5 h-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="9" y="2" width="6" height="12" rx="3"/><path d="M5 10a7 7 0 0 0 14 0M12 17v4"/></svg>
+          </button>
+          <input ref={inpRef} value={inp} onChange={e=>setInp(e.target.value)} placeholder={img?'Hỏi gì về ảnh này…':cfg.placeholder}
+                 className="composer-input flex-1 bg-transparent outline-none pl-0 pr-2.5 text-[14.5px]"/>
+          <button className={"composer-send w-11 h-11 rounded-xl text-white grid place-items-center transition "+(busy?"bg-red-500 hover:bg-red-600":"bg-violet-500 hover:bg-violet-600")}
+                  title={busy?'Dừng':'Gửi'}>
+            {busy
+              ?<svg className="w-4 h-4" viewBox="0 0 24 24" fill="currentColor"><rect x="5" y="5" width="14" height="14" rx="3"/></svg>
+              :<svg className="w-[18px] h-[18px] -mr-0.5" viewBox="0 0 24 24" fill="currentColor"><path d="M3.5 20.3c-.4.9.5 1.8 1.4 1.4l16.5-8.3c.9-.4.9-1.7 0-2.1L4.9 2.9c-.9-.4-1.8.5-1.4 1.4L6 11.2c.1.3.1.6 0 .9l-2.5 8.2z" transform="rotate(0 12 12)"/></svg>}
+          </button>
+        </form>
+      </div>
+    </div>
+  );
+}
+
+/* ───────────────────────── Dashboard (Mosaic style) ───────────────────────── */
+const TH={3:[90,50,'hi'],4:[1800,3000,'lo'],5:[2500,4000,'lo'],6:[0.1,0.25,'lo'],7:[200,600,'lo'],8:[200,500,'lo'],9:[800,1800,'lo'],10:[3400,5800,'lo']};
+function cellCls(i,v){
+  if(!(i in TH)||v===''||v==null)return'';
+  const n=parseFloat(v);if(isNaN(n))return'';
+  const[good,mid,dir]=TH[i];
+  const ok=dir==='hi'?n>=good:n<=good, soso=dir==='hi'?n>=mid:n<=mid;
+  return ok?'bg-emerald-100 dark:bg-emerald-900/40':(soso?'bg-amber-100 dark:bg-amber-900/40':'bg-red-100 dark:bg-red-900/40');
+}
+const VIOLET='#8b5cf6',SKY='#0ea5e9';
+const mosaicCard="bg-white dark:bg-slate-900 shadow-xs rounded-xl border border-slate-200 dark:border-slate-800 overflow-hidden";
+
+function Sparkline({points,color}){
+  if(!points||points.length<2)return <div className="h-9"/>;
+  const w=128,h=36,min=Math.min(...points),max=Math.max(...points),rg=(max-min)||1;
+  const pts=points.map((v,i)=>[(i/(points.length-1))*w,h-3-((v-min)/rg)*(h-8)]);
+  const line=pts.map(p=>p.join(',')).join(' ');
+  const id='sg'+color.slice(1);
+  return (
+    <svg viewBox={`0 0 ${w} ${h}`} className="w-32 h-9">
+      <defs><linearGradient id={id} x1="0" y1="0" x2="0" y2="1">
+        <stop offset="0%" stopColor={color} stopOpacity=".25"/><stop offset="100%" stopColor={color} stopOpacity="0"/>
+      </linearGradient></defs>
+      <title>{`Thấp nhất ${min} · Cao nhất ${max} · Mới nhất ${points[points.length-1]}`}</title>
+      <polygon points={`0,${h} ${line} ${w},${h}`} fill={`url(#${id})`}/>
+      <polyline points={line} fill="none" stroke={color} strokeWidth="2"/>
+      <circle cx={pts[pts.length-1][0]} cy={pts[pts.length-1][1]} r="2.5" fill={color}/>
+    </svg>
+  );
+}
+
+function StatCard({label,value,sub,pill,pillColor,spark,sparkColor}){
+  return (
+    <div className={mosaicCard+" p-5 h-full flex flex-col"}>
+      <div className="text-xs font-semibold text-slate-400 uppercase tracking-wide mb-1">{label}</div>
+      <div className="flex items-end justify-between gap-2 flex-1">
+        <div>
+          <div className="flex items-center gap-2">
+            <span className="text-3xl font-bold text-slate-800 dark:text-slate-100">{value??'—'}</span>
+            {pill!=null&&<span className={"text-xs font-semibold px-1.5 py-0.5 rounded-full "+pillColor}>{pill}</span>}
+          </div>
+          <div className="text-[11.5px] text-slate-400 mt-1 truncate max-w-[180px] min-h-[17px]"><IconText text={sub||''}/></div>
+        </div>
+        {spark&&<Sparkline points={spark} color={sparkColor||VIOLET}/>}
+      </div>
+    </div>
+  );
+}
+
+/* Grouped bar — Mosaic palette: violet = Mobile, sky = Desktop */
+function ScoreChart({groups}){
+  const labelW=230,chartW=820,rowH=34,padTop=24;
+  const H=groups.length*rowH+padTop+6, W=labelW+chartW+20;
+  const x=v=>labelW+(v/100)*chartW;
+  const [hov,setHov]=useState(null);
+  return (
+    <div className="overflow-x-auto">
+      <svg viewBox={`0 0 ${W} ${H}`} className="w-full min-w-[680px]">
+        {[0,25,50,75,100].map(t=>(
+          <g key={t}>
+            <line x1={x(t)} y1={padTop-6} x2={x(t)} y2={H-2} stroke="currentColor" strokeOpacity=".08"/>
+            <text x={x(t)} y={padTop-10} textAnchor="middle" fontSize="10" fill="currentColor" opacity=".4">{t}</text>
+          </g>
+        ))}
+        {groups.map((g,i)=>{
+          const y=padTop+i*rowH;
+          const bars=[['MOBILE',VIOLET],['DESKTOP',SKY]].filter(([s])=>g[s]!==undefined);
+          return (
+            <g key={g.url} onMouseEnter={()=>setHov(i)} onMouseLeave={()=>setHov(null)}>
+              <title>{`${pathOf(g.url)} — Mobile ${g.MOBILE??'—'} · Desktop ${g.DESKTOP??'—'}`}</title>
+              <rect x="0" y={y} width={W} height={rowH} rx="6" fill="currentColor" opacity={hov===i?.06:0}/>
+              <text x={labelW-10} y={y+rowH/2+3} textAnchor="end" fontSize="11" fill="currentColor" opacity={hov===i?.85:.55}>
+                {pathOf(g.url).length>32?'…'+pathOf(g.url).slice(-31):pathOf(g.url)}
+              </text>
+              {bars.map(([s,color],j)=>{
+                const v=g[s],by=y+4+j*13,err=v===null;
+                const w=err?34:Math.max((v/100)*chartW,12);
+                const inside=w>46;
+                return (
+                  <g key={s}>
+                    <rect x={labelW} y={by} width={chartW} height="10" rx="5" fill="currentColor" opacity=".05"/>
+                    <rect className="bar" x={labelW} y={by} width={w} height="10" rx="5" fill={err?'#94a3b8':color}/>
+                    <text x={inside?labelW+w-6:labelW+w+6} y={by+8.5}
+                          textAnchor={inside?'end':'start'} fontSize="9.5" fontWeight="700"
+                          fill={inside?'#fff':(err?'#94a3b8':scoreColor(v))}>{err?'lỗi':v}</text>
+                  </g>
+                );
+              })}
+            </g>
+          );
+        })}
+      </svg>
+    </div>
+  );
+}
+
+/* Line chart điểm TB qua các lần chạy trong tháng — kiểu Mosaic gradient area */
+function TrendChart({labels,mobile,desktop}){
+  const W=1100,H=200,padL=44,padR=16,padT=14,padB=30;
+  const iw=W-padL-padR,ih=H-padT-padB;
+  const [hov,setHov]=useState(null);
+  const x=i=>padL+(labels.length<2?iw/2:(i/(labels.length-1))*iw);
+  const y=v=>padT+ih-(v/100)*ih;
+  const path=a=>a.map((v,i)=>(i?'L':'M')+x(i).toFixed(1)+','+y(v).toFixed(1)).join(' ');
+  const area=a=>path(a)+` L${x(a.length-1).toFixed(1)},${padT+ih} L${x(0).toFixed(1)},${padT+ih} Z`;
+  let tip=null;
+  if(hov!=null){
+    const cx=x(hov);
+    const lines=[mobile.length&&{c:VIOLET,t:`Mobile: ${mobile[hov]}`,v:mobile[hov]},
+                 desktop.length&&{c:SKY,t:`Desktop: ${desktop[hov]}`,v:desktop[hov]}].filter(Boolean);
+    const bw=Math.max(...lines.map(l=>l.t.length),(labels[hov]||'').length)*7.2+24;
+    const bh=18+lines.length*16;
+    let bx=cx-bw/2; bx=Math.max(2,Math.min(bx,W-bw-2));
+    const by=Math.max(2,Math.min(...lines.map(l=>y(l.v)))-bh-10);
+    tip=(
+      <g pointerEvents="none">
+        {lines.map((l,k)=><circle key={k} cx={cx} cy={y(l.v)} r="5" fill={l.c} stroke="#fff" strokeWidth="2"/>)}
+        <rect x={bx} y={by} width={bw} height={bh} rx="7" fill="#0f172a" opacity=".92"/>
+        <text x={bx+11} y={by+15} fontSize="11.5" fontWeight="700" fill="#fff">{labels[hov]}</text>
+        {lines.map((l,k)=>(
+          <g key={k}>
+            <circle cx={bx+14} cy={by+27+k*16} r="3.5" fill={l.c}/>
+            <text x={bx+24} y={by+31+k*16} fontSize="11.5" fill="#e2e8f0">{l.t}</text>
+          </g>
+        ))}
+      </g>
+    );
+  }
+  return (
+    <svg viewBox={`0 0 ${W} ${H}`} className="w-full">
+      <defs>
+        <linearGradient id="gv" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stopColor={VIOLET} stopOpacity=".22"/><stop offset="100%" stopColor={VIOLET} stopOpacity="0"/></linearGradient>
+        <linearGradient id="gs" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stopColor={SKY} stopOpacity=".18"/><stop offset="100%" stopColor={SKY} stopOpacity="0"/></linearGradient>
+      </defs>
+      {[0,25,50,75,100].map(t=>(
+        <g key={t}>
+          <line x1={padL} y1={y(t)} x2={W-padR} y2={y(t)} stroke="currentColor" strokeOpacity=".07"/>
+          <text x={padL-8} y={y(t)+4.5} textAnchor="end" fontSize="12" fill="currentColor" opacity=".6">{t}</text>
+        </g>
+      ))}
+      {labels.map((lb,i)=>(
+        <text key={i} x={x(i)} y={H-9} textAnchor="middle" fontSize="12" fill="currentColor" opacity=".65">{lb}</text>
+      ))}
+      {mobile.length>0&&<><path d={area(mobile)} fill="url(#gv)"/><path d={path(mobile)} fill="none" stroke={VIOLET} strokeWidth="2.2"/></>}
+      {desktop.length>0&&<><path d={area(desktop)} fill="url(#gs)"/><path d={path(desktop)} fill="none" stroke={SKY} strokeWidth="2.2"/></>}
+      {mobile.map((v,i)=><circle key={'m'+i} cx={x(i)} cy={y(v)} r="2.6" fill={VIOLET}/>)}
+      {desktop.map((v,i)=><circle key={'d'+i} cx={x(i)} cy={y(v)} r="2.6" fill={SKY}/>)}
+      {labels.map((lb,i)=>(
+        <rect key={'h'+i} x={x(i)-iw/Math.max(labels.length,1)/2} y={padT} width={iw/Math.max(labels.length,1)} height={ih}
+          fill="transparent" onMouseEnter={()=>setHov(i)} onMouseLeave={()=>setHov(null)}/>
+      ))}
+      {tip}
+    </svg>
+  );
+}
+
+function Dashboard(){
+  const [data,setData]=useState(null);
+  const [month,setMonth]=useState('');
+  const [run,setRun]=useState('');
+  const [err,setErr]=useState('');
+  const [sort,setSort]=useState({i:null,dir:1}); // i=index cột (raw row); dir -1 giảm / 1 tăng
+  const [q,setQ]=useState('');
+
+  const load=useCallback(async m=>{
+    setErr('');
+    try{
+      const r=await(await fetch('/api/results'+(m?'?month='+m:''))).json();
+      if(r.error){setErr(r.error);dechoBus.act('sad');dechoBus.say('❌ Đệ đọc PSI Sheet không được, Đại ca xem lỗi trên màn hình nhé.');return}
+      setData(r);setMonth(r.tab||'');
+      const runs=[...new Set(r.rows.map(x=>x[0]))].sort();
+      const latest=runs[runs.length-1]||'';
+      setRun(latest);
+      if(latest){
+        const rows=r.rows.filter(x=>x[0]===latest);
+        const sc=s=>rows.filter(x=>x[2]===s).map(x=>parseFloat(x[3])).filter(n=>!isNaN(n));
+        const avg=a=>a.length?Math.round(a.reduce((p,c)=>p+c,0)/a.length):null;
+        const am=avg(sc('MOBILE')),ad=avg(sc('DESKTOP'));
+        const all=rows.map(x=>({u:x[1],v:parseFloat(x[3])})).filter(x=>!isNaN(x.v));
+        const worst=all.length?all.reduce((p,c)=>c.v<p.v?c:p):null;
+        let cmt=`📊 Tháng ${r.tab}: mobile TB **${am??'—'}**, desktop TB **${ad??'—'}**.`;
+        if(worst)cmt+=`\nĐuối nhất là **${pathOf(worst.u)}** (${worst.v}đ)${worst.v<50?' — Đại ca cho team xem gấp nha 🔴':''}`;
+        dechoBus.say(cmt,9000);
+      }else dechoBus.say('Dashboard chưa có dữ liệu — Đại ca qua Chat nói "chạy kiểm tra ngay" là có liền.');
+    }catch(e){setErr(e.message)}
+  },[]);
+  useEffect(()=>{load('')},[load]);
+
+  useEffect(()=>{ /* bối cảnh cho DeCho */
+    if(!data||!run)return;
+    const rows=data.rows.filter(x=>x[0]===run);
+    const sc=s=>rows.filter(x=>x[2]===s).map(x=>parseFloat(x[3])).filter(n=>!isNaN(n));
+    const avg=a=>a.length?Math.round(a.reduce((p,c)=>p+c,0)/a.length):'—';
+    const lines=rows.slice(0,40).map(x=>`${pathOf(x[1])} ${x[2]}: score=${x[3]}, LCP=${x[5]||'?'}ms, CLS=${x[6]||'?'}`);
+    setPageSub(`${data.rows.length} dòng · ${[...new Set(data.rows.map(x=>x[0]))].length} lần chạy trong tháng ${data.tab}`);
+    dechoCtx.info=`Dashboard PSI tháng ${data.tab}, lần chạy ${run}. Điểm TB mobile ${avg(sc('MOBILE'))}, desktop ${avg(sc('DESKTOP'))}. Chi tiết từng dòng:\n`+lines.join('\n');
+  },[data,run]);
+
+  if(err)return <div className="p-8 text-red-500 text-sm"><IconText text={'❌ '+err}/></div>;
+  if(!data)return <Spinner/>;
+
+  const runs=[...new Set(data.rows.map(x=>x[0]))].sort();
+  const rows=data.rows.filter(x=>x[0]===run);
+  const nums=(rs,s)=>rs.filter(x=>x[2]===s).map(x=>parseFloat(x[3])).filter(n=>!isNaN(n));
+  const avg=a=>a.length?Math.round(a.reduce((p,c)=>p+c,0)/a.length):null;
+  const am=avg(nums(rows,'MOBILE')),ad=avg(nums(rows,'DESKTOP'));
+  const all=rows.map(x=>({u:x[1],s:x[2],v:parseFloat(x[3])})).filter(x=>!isNaN(x.v));
+  const best=all.length?all.reduce((p,c)=>c.v>p.v?c:p):null;
+  const worst=all.length?all.reduce((p,c)=>c.v<p.v?c:p):null;
+  const errsN=rows.filter(x=>x[3]==='ERROR').length;
+  /* chuỗi điểm TB theo từng lần chạy (sparkline + trend) */
+  const seriesM=runs.map(rn=>avg(nums(data.rows.filter(x=>x[0]===rn),'MOBILE'))).filter(v=>v!=null);
+  const seriesD=runs.map(rn=>avg(nums(data.rows.filter(x=>x[0]===rn),'DESKTOP'))).filter(v=>v!=null);
+  const trendLb=runs.map(rn=>rn.slice(5,16).replace(' ','\u00a0'));
+  const byUrl={};
+  rows.forEach(x=>{const n=parseFloat(x[3]);(byUrl[x[1]]=byUrl[x[1]]||{url:x[1]})[x[2]]=isNaN(n)?null:n});
+  const groups=Object.values(byUrl).sort((a,b)=>{
+    const mn=g=>Math.min(...[g.MOBILE,g.DESKTOP].filter(v=>v!=null).concat([101]));
+    return mn(a)-mn(b); /* trang tệ nhất lên đầu */
+  });
+  const h=data.headers;
+  /* lọc theo URL (cột 1) rồi sort */
+  const fRows=q.trim()?rows.filter(x=>String(x[1]||'').toLowerCase().includes(q.trim().toLowerCase())):rows;
+  const sortedRows=sort.i==null?fRows:[...fRows].sort((a,b)=>{
+    let va=a[sort.i],vb=b[sort.i];
+    const na=parseFloat(va),nb=parseFloat(vb);
+    if(!isNaN(na)||!isNaN(nb)){
+      va=isNaN(na)?-Infinity:na; vb=isNaN(nb)?-Infinity:nb;
+      return sort.dir*(va-vb);
+    }
+    return sort.dir*String(va??'').localeCompare(String(vb??''));
+  });
+  const pillOf=v=>v==null?null:(v>=90?'bg-emerald-500/20 text-emerald-700 dark:text-emerald-400':v>=50?'bg-amber-500/20 text-amber-700 dark:text-amber-400':'bg-red-500/20 text-red-700 dark:text-red-400');
+  const delta=s=>s.length>1?s[s.length-1]-s[s.length-2]:null;
+  const fmtD=d=>d==null?null:(d>0?'+':'')+d;
+
+  return (
+    <div className="flex-1 min-h-0 overflow-y-auto px-6 py-5 bg-transparent">
+      <div className="max-w-[1180px] mx-auto flex flex-col gap-5">
+        <HeaderSlot>
+          <Select value={month} onChange={v=>load(v)} className="w-32"
+                  options={data.tabs.slice().reverse()}/>
+          <Select value={run} onChange={setRun} className="w-56"
+                  options={runs.slice().reverse().map((t,i)=>({value:t,label:t+(i===0?' (mới nhất)':'')}))}/>
+        </HeaderSlot>
+
+        {/* Stat cards */}
+        <div className="grid grid-cols-12 gap-5">
+          <div className="col-span-12 sm:col-span-6 xl:col-span-3">
+            <StatCard label="Điểm TB Mobile" value={am} pill={fmtD(delta(seriesM))} pillColor={pillOf(am)} spark={seriesM} sparkColor={VIOLET}/>
+          </div>
+          <div className="col-span-12 sm:col-span-6 xl:col-span-3">
+            <StatCard label="Điểm TB Desktop" value={ad} pill={fmtD(delta(seriesD))} pillColor={pillOf(ad)} spark={seriesD} sparkColor={SKY}/>
+          </div>
+          <div className="col-span-12 sm:col-span-6 xl:col-span-3">
+            <StatCard label="Tốt nhất" value={best?.v} pill={best?best.s[0]:null} pillColor={pillOf(best?.v)} sub={best?pathOf(best.u):''}/>
+          </div>
+          <div className="col-span-12 sm:col-span-6 xl:col-span-3">
+            <StatCard label="Tệ nhất / Lỗi" value={worst?.v} pill={errsN?errsN+' lỗi':null}
+              pillColor="bg-red-500/20 text-red-700 dark:text-red-400" sub={worst?pathOf(worst.u):''}/>
+          </div>
+        </div>
+
+        {/* Trend — full width, thấp */}
+        <div className={mosaicCard}>
+          <div className="px-5 pt-4 pb-1 flex items-center gap-3 border-b border-slate-100 dark:border-slate-800">
+            <h3 className="font-semibold text-slate-800 dark:text-slate-100 text-[15px]">Xu hướng trong tháng</h3>
+            <span className="text-[11px] text-slate-400">điểm TB mỗi lần chạy</span>
+            <span className="ml-auto flex gap-3 text-[11px] text-slate-400">
+              <span><i className="inline-block w-2.5 h-2.5 rounded-full mr-1" style={{background:VIOLET}}/>Mobile</span>
+              <span><i className="inline-block w-2.5 h-2.5 rounded-full mr-1" style={{background:SKY}}/>Desktop</span>
+            </span>
+          </div>
+          <div className="px-4 py-2">
+            {seriesM.length>1||seriesD.length>1
+              ?<TrendChart labels={trendLb} mobile={seriesM} desktop={seriesD}/>
+              :<div className="text-sm text-slate-400 py-8 text-center">Cần ≥2 lần chạy trong tháng để vẽ xu hướng</div>}
+          </div>
+        </div>
+
+        {/* Bars per URL — full width, không cuộn trong card, trang tệ lên đầu */}
+        <div className={mosaicCard}>
+          <div className="px-5 pt-4 pb-1 flex items-center gap-3 border-b border-slate-100 dark:border-slate-800">
+            <h3 className="font-semibold text-slate-800 dark:text-slate-100 text-[15px]">Performance Score theo URL</h3>
+            <span className="text-[11px] text-slate-400">sắp theo trang tệ nhất</span>
+            <span className="ml-auto flex gap-3 text-[11px] text-slate-400">
+              <span><i className="inline-block w-2.5 h-2.5 rounded-full mr-1" style={{background:VIOLET}}/>Mobile</span>
+              <span><i className="inline-block w-2.5 h-2.5 rounded-full mr-1" style={{background:SKY}}/>Desktop</span>
+            </span>
+          </div>
+          <div className="p-4">
+            {groups.length?<ScoreChart groups={groups}/>:<div className="text-sm text-slate-400">Chưa có dữ liệu</div>}
+          </div>
+        </div>
+
+        {/* Table — Mosaic style */}
+        <div className={mosaicCard}>
+          <div className="px-5 pt-4 pb-3 border-b border-slate-100 dark:border-slate-800">
+            <h3 className="font-semibold text-slate-800 dark:text-slate-100 text-[15px]">Chi tiết <span className="text-slate-400 font-normal">({rows.length} dòng)</span></h3>
+          </div>
+          <div className="overflow-auto h-[62vh]">
+            <table className="w-full text-[12.5px]">
+              <thead>
+                <tr className="text-[10.5px] uppercase tracking-wide text-slate-400">
+                  {h.slice(1).map((x,j)=>{
+                    const i=j+1,active=sort.i===i;
+                    return (
+                      <th key={x} className="sticky top-0 z-10 bg-slate-100 dark:bg-slate-800 px-2.5 py-2.5 text-right first:text-left font-semibold whitespace-nowrap">
+                        <div className="inline-flex items-center gap-2">
+                          <button onClick={()=>setSort(s=>({i,dir:s.i===i?-s.dir:-1}))}
+                            className={"inline-flex items-center gap-1 uppercase tracking-wide transition select-none "+(active?'text-violet-500':'hover:text-slate-600 dark:hover:text-slate-200')}>
+                            {x}
+                            <svg className="w-3 h-3 flex-none" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                              {active
+                                ?(sort.dir===-1?<path d="M12 5v14M19 12l-7 7-7-7"/>:<path d="M12 19V5M5 12l7-7 7 7"/>)
+                                :<path d="M8 9l4-4 4 4M8 15l4 4 4-4" opacity=".45"/>}
+                            </svg>
+                          </button>
+                          {j===0&&(
+                            <div className="relative normal-case">
+                              <svg className="w-3.5 h-3.5 absolute left-2 top-1/2 -translate-y-1/2 text-slate-400 pointer-events-none" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/></svg>
+                              <input value={q} onChange={e=>setQ(e.target.value)} placeholder="Tìm..."
+                                className="w-32 max-w-full pl-7 pr-2 py-1 text-[12px] font-normal tracking-normal rounded-md border border-slate-300 dark:border-slate-600 bg-white dark:bg-slate-900 text-slate-700 dark:text-slate-200 outline-none focus:border-violet-400 focus:ring-2 focus:ring-violet-500/20"/>
+                            </div>
+                          )}
+                        </div>
+                      </th>
+                    );
+                  })}
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
+                {sortedRows.map((x,ri)=><tr key={ri} className="hover:bg-slate-50 dark:hover:bg-slate-800/40">
+                  {h.slice(1).map((_,j)=>{
+                    const i=j+1,v=x[i]??'';
+                    return <td key={j} title={i===1?v:undefined}
+                      className={"px-2.5 py-1.5 text-right whitespace-nowrap first:text-left first:max-w-[220px] first:truncate "+(v==='ERROR'?'bg-red-100 dark:bg-red-900/40':cellCls(i,v))}>
+                      {i===1?pathOf(v):v}
+                    </td>;
+                  })}
+                </tr>)}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/* ──────────────── Overview / Alerts / URL Intelligence (wireframe phase 1) ──────────────── */
+const _agentCache={t:0,data:null,promise:null,alertsPromise:null};
+function useAgentData(){
+  const [d,setD]=useState(_agentCache.data||{psi:null,seo:null,sum:null,alerts:null});
+  useEffect(()=>{
+    let on=true;
+    const get=async u=>{try{return await(await fetch(u)).json()}catch(e){return null}};
+    const loadAlerts=()=>{
+      if(!_agentCache.alertsPromise){
+        _agentCache.alertsPromise=get('/api/alerts').then(alerts=>{
+          _agentCache.alertsPromise=null;
+          _agentCache.data={...(_agentCache.data||{psi:null,seo:null,sum:null}),alerts};
+          return _agentCache.data;
+        }).catch(()=>{
+          _agentCache.alertsPromise=null;
+          return _agentCache.data;
+        });
+      }
+      return _agentCache.alertsPromise;
+    };
+    const fresh=_agentCache.data&&Date.now()-_agentCache.t<60000;
+    if(fresh){
+      setD(_agentCache.data);
+      if(!_agentCache.data.alerts)loadAlerts().then(data=>{if(on&&data)setD(data)});
+      return()=>{on=false};
+    }
+    if(!_agentCache.promise){
+      _agentCache.promise=Promise.all([get('/api/results'),get('/api/seo/results'),get('/api/seo/summary')])
+        .then(([psi,seo,sum])=>{
+          _agentCache.data={psi,seo,sum,alerts:_agentCache.data&&_agentCache.data.alerts};_agentCache.t=Date.now();_agentCache.promise=null;
+          return _agentCache.data;
+        });
+    }
+    _agentCache.promise.then(data=>{
+      if(on)setD(data);
+      loadAlerts().then(next=>{if(on&&next)setD(next)});
+    });
+    return()=>{on=false};
+  },[]);
+  return d;
+}
+const lastRun=psi=>{if(!psi||!psi.rows||!psi.rows.length)return null;const runs=[...new Set(psi.rows.map(x=>x[0]))].sort();return runs[runs.length-1]};
+const avgOf=a=>a.length?Math.round(a.reduce((p,c)=>p+c,0)/a.length):null;
+const psiRunRows=(psi,run)=>psi.rows.filter(x=>x[0]===run);
+
+function computeAlerts(psi,seo,serverAlerts){
+  if(serverAlerts&&Array.isArray(serverAlerts.alerts)){
+    return serverAlerts.alerts.map(a=>({
+      lv:a.lv||a.level||'med',icon:a.icon||'warn',text:a.text||'',go:a.go||'alerts',
+      evidence:a.evidence||[],confidence:a.confidence||'low',score:a.score||0,source:a.source||''
+    })).filter(a=>a.text);
+  }
+  const alerts=[];
+  if(psi&&psi.rows&&psi.rows.length){
+    const runs=[...new Set(psi.rows.map(x=>x[0]))].sort();
+    const cur=psiRunRows(psi,runs[runs.length-1]);
+    const prev=runs.length>1?psiRunRows(psi,runs[runs.length-2]):[];
+    const prevMap={};prev.forEach(x=>{prevMap[x[1]+x[2]]=parseFloat(x[3])});
+    cur.forEach(x=>{
+      const v=parseFloat(x[3]);
+      if(x[3]==='ERROR')alerts.push({lv:'high',icon:'warn',text:`${pathOf(x[1])} (${x[2].toLowerCase()}): check PSI lỗi`,go:'dash'});
+      else if(!isNaN(v)&&v<50)alerts.push({lv:'high',icon:'zap',text:`${pathOf(x[1])} (${x[2].toLowerCase()}): score ${v} — dưới ngưỡng 50`,go:'dash'});
+      const pv=prevMap[x[1]+x[2]];
+      if(!isNaN(v)&&pv!=null&&pv-v>=10)alerts.push({lv:'med',icon:'down',text:`${pathOf(x[1])} (${x[2].toLowerCase()}): score tụt ${Math.round(pv-v)} điểm (${pv}→${v})`,go:'dash'});
+    });
+  }
+  if(seo&&seo.rows&&seo.rows.length&&seo.headers){
+    const h=seo.headers,iu=h.indexOf('url'),ic=h.indexOf('clicks'),icc=h.indexOf('clicks_change_%');
+    seo.rows.forEach(r=>{
+      const ch=parseFloat(r[icc]),clicks=parseFloat(r[ic]);
+      if(!isNaN(ch)&&ch<=-20&&clicks>=20)
+        alerts.push({lv:ch<=-40?'high':'med',icon:'down',text:`${pathOf(r[iu]||'')}: clicks giảm ${ch}% so với tháng trước (${seo.tab})`,go:'urls'});
+    });
+  }
+  alerts.sort((a,b)=>(a.lv==='high'?0:1)-(b.lv==='high'?0:1));
+  return alerts;
+}
+
+function MiniLine({labels,series}){
+  const W=1100,H=130,padL=70,padR=44,padT=12,padB=26;
+  const iw=W-padL-padR,ih=H-padT-padB;
+  const [hov,setHov]=useState(null);
+  const all=series.flatMap(s=>s.data);
+  const max=Math.max(...all,1);
+  const x=i=>padL+(labels.length<2?iw/2:(i/(labels.length-1))*iw);
+  const y=v=>padT+ih-(v/max)*ih;
+  const path=a=>a.map((v,i)=>(i?'L':'M')+x(i).toFixed(1)+','+y(v).toFixed(1)).join(' ');
+  const fmt=v=>v>=1e6?(v/1e6).toFixed(1)+'M':v>=1e3?(v/1e3).toFixed(0)+'k':v;
+  /* tooltip cho điểm đang hover */
+  let tip=null;
+  if(hov!=null){
+    const cx=x(hov);
+    const lines=series.map(s=>({c:s.color,t:`${s.name}: ${fmt(s.data[hov])}`}));
+    const bw=Math.max(...lines.map(l=>l.t.length),labels[hov].length)*7.2+24;
+    const bh=18+lines.length*16;
+    let bx=cx-bw/2; bx=Math.max(2,Math.min(bx,W-bw-2));
+    const by=Math.max(2,Math.min(...series.map(s=>y(s.data[hov])))-bh-10);
+    tip=(
+      <g pointerEvents="none">
+        {series.map((s,k)=><circle key={k} cx={cx} cy={y(s.data[hov])} r="5" fill={s.color} stroke="#fff" strokeWidth="2"/>)}
+        <rect x={bx} y={by} width={bw} height={bh} rx="7" fill="#0f172a" opacity=".92"/>
+        <text x={bx+11} y={by+15} fontSize="11.5" fontWeight="700" fill="#fff">{labels[hov]}</text>
+        {lines.map((l,k)=>(
+          <g key={k}>
+            <circle cx={bx+14} cy={by+27+k*16} r="3.5" fill={l.c}/>
+            <text x={bx+24} y={by+31+k*16} fontSize="11.5" fill="#e2e8f0">{l.t}</text>
+          </g>
+        ))}
+      </g>
+    );
+  }
+  return (
+    <svg viewBox={`0 0 ${W} ${H}`} className="w-full">
+      {[0,.5,1].map(t=>(
+        <g key={t}>
+          <line x1={padL} y1={y(max*t)} x2={W-padR} y2={y(max*t)} stroke="currentColor" strokeOpacity=".07"/>
+          <text x={padL-8} y={y(max*t)+4.5} textAnchor="end" fontSize="12" fill="currentColor" opacity=".6">{fmt(Math.round(max*t))}</text>
+        </g>
+      ))}
+      {labels.map((lb,i)=>{
+        const anc=i===0?'start':i===labels.length-1?'end':'middle';
+        return <text key={i} x={x(i)} y={H-8} textAnchor={anc} fontSize="12" fill="currentColor" opacity=".65">{lb}</text>;
+      })}
+      {series.map(s=>(
+        <g key={s.name}>
+          <path d={path(s.data)} fill="none" stroke={s.color} strokeWidth="2.6"/>
+          {s.data.map((v,i)=><circle key={i} cx={x(i)} cy={y(v)} r="3.4" fill={s.color}/>)}
+        </g>
+      ))}
+      {/* vùng bắt hover theo từng cột (dễ trỏ hơn chấm nhỏ) */}
+      {labels.map((lb,i)=>(
+        <rect key={'h'+i} x={x(i)-iw/Math.max(labels.length,1)/2} y={padT} width={iw/Math.max(labels.length,1)} height={ih}
+          fill="transparent" onMouseEnter={()=>setHov(i)} onMouseLeave={()=>setHov(null)}/>
+      ))}
+      {tip}
+    </svg>
+  );
+}
+
+function Overview({go}){
+  const {psi,seo,sum,alerts:serverAlerts}=useAgentData();
+  const [cfg,setCfg]=useState(null);
+  useEffect(()=>{(async()=>{try{setCfg(await(await fetch('/api/config')).json())}catch(e){}})()},[]);
+  useEffect(()=>{
+    if(!psi||!seo||!sum)return;
+    const run=lastRun(psi);
+    const rows=run?psiRunRows(psi,run):[];
+    const sc=s=>rows.filter(x=>x[2]===s).map(x=>parseFloat(x[3])).filter(n=>!isNaN(n));
+    const avg=a=>a.length?Math.round(a.reduce((p,c)=>p+c,0)/a.length):'—';
+    const ms=(sum.months||[]).map(m=>`${m.month}: clicks=${m.clicks??'—'}, views=${m.views??'—'}, users=${m.users??'—'}`).join('; ');
+    const al=computeAlerts(psi,seo,serverAlerts).slice(0,8).map(a=>`[${a.lv}] ${a.text}`).join('\n');
+    setPageSub('DeCho đang theo dõi PageSpeed + GSC + GA4');
+    dechoCtx.info=`Màn hình Tổng quan. PSI lần chạy ${run||'—'}: điểm TB mobile ${avg(sc('MOBILE'))}, desktop ${avg(sc('DESKTOP'))}. SEO theo tháng: ${ms||'chưa có'}. Alerts:\n${al||'không có'}`;
+  },[psi,seo,sum,serverAlerts]);
+  if(!psi||!seo||!sum)return <Spinner/>;
+
+  const run=lastRun(psi);
+  const rows=run?psiRunRows(psi,run):[];
+  const health=avgOf(rows.map(x=>parseFloat(x[3])).filter(n=>!isNaN(n)));
+  const months=sum.months||[];
+  const curM=months[months.length-1],prevM=months[months.length-2];
+  const clicksPct=curM&&prevM&&prevM.clicks?Math.round((curM.clicks-prevM.clicks)/prevM.clicks*100):null;
+  const alerts=computeAlerts(psi,seo,serverAlerts);
+  const high=alerts.filter(a=>a.lv==='high').length;
+  const runs=[...new Set((psi.rows||[]).map(x=>x[0]))].sort();
+  const sAvg=rn=>avgOf(psiRunRows(psi,rn).map(x=>parseFloat(x[3])).filter(n=>!isNaN(n)));
+  const psiSeries=runs.map(sAvg).filter(v=>v!=null);
+
+  return (
+    <div className="flex-1 min-h-0 overflow-y-auto px-6 py-5 bg-transparent">
+      <div className="max-w-[1180px] mx-auto flex flex-col gap-5">
+        <HeaderSlot>
+          <button onClick={()=>go('dash')} className={chipCls+" !text-sm !px-3.5 !py-2 !rounded-lg inline-flex items-center gap-1.5"}><NavIcon id="dash" cls="w-4 h-4"/>PageSpeed</button>
+          <button onClick={()=>go('chat')} className="px-3.5 py-2 rounded-lg text-sm font-medium text-white bg-violet-500 hover:bg-violet-600 shadow-xs inline-flex items-center gap-1.5"><NavIcon id="chat" cls="w-4 h-4"/>Hỏi DeCho</button>
+        </HeaderSlot>
+
+        <div className="grid gap-4" style={{gridTemplateColumns:'repeat(auto-fit,minmax(170px,1fr))'}}>
+          <StatCard label="Website health" value={health} pill={run?'PSI':null} pillColor={health!=null?(health>=90?'bg-emerald-500/20 text-emerald-700':'bg-amber-500/20 text-amber-700 dark:text-amber-400'):''} sub={run?('lần chạy '+run.slice(5,16)):'chưa chạy'}/>
+          <StatCard label="Organic clicks" value={curM?curM.clicks.toLocaleString():null} pill={clicksPct!=null?(clicksPct>0?'+':'')+clicksPct+'%':null}
+            pillColor={clicksPct>=0?'bg-emerald-500/20 text-emerald-700 dark:text-emerald-400':'bg-red-500/20 text-red-700 dark:text-red-400'} sub={curM?('tháng '+curM.month):''}/>
+          <StatCard label="URLs theo dõi" value={cfg?cfg.urls.length:null} sub="PageSpeed checker"/>
+          <StatCard label="Alerts" value={alerts.length} pill={high?high+' high':null} pillColor="bg-red-500/20 text-red-700 dark:text-red-400" sub={alerts.length?'cần xem':'mọi thứ ổn ✅'}/>
+        </div>
+
+        <div className="grid grid-cols-12 gap-5">
+          <div className={"col-span-12 "+mosaicCard}>
+            <div className="px-5 pt-4 pb-1 border-b border-slate-100 dark:border-slate-800 flex items-center gap-2">
+              <h3 className="font-semibold text-[15px]">SEO trend theo tháng</h3>
+              <span className="ml-auto flex gap-3 text-[11px] text-slate-400">
+                <span><i className="inline-block w-2.5 h-2.5 rounded-full mr-1" style={{background:VIOLET}}/>Clicks</span>
+                <span><i className="inline-block w-2.5 h-2.5 rounded-full mr-1" style={{background:SKY}}/>Views</span>
+              </span>
+            </div>
+            <div className="px-3 py-2">
+              {months.length>1
+                ?<MiniLine labels={months.map(m=>m.month)} series={[{name:'clicks',color:VIOLET,data:months.map(m=>m.clicks||0)},{name:'views',color:SKY,data:months.map(m=>m.views||0)}]}/>
+                :<div className="text-sm text-slate-400 py-8 text-center">Cần ≥2 tháng báo cáo SEO</div>}
+            </div>
+          </div>
+          <div className={"col-span-12 "+mosaicCard}>
+            <div className="px-5 pt-4 pb-1 border-b border-slate-100 dark:border-slate-800 flex items-center gap-2">
+              <h3 className="font-semibold text-[15px]">PageSpeed trend ({psi.tab||'—'})</h3>
+              <span className="ml-auto text-[11px] text-slate-400">điểm TB mỗi lần chạy</span>
+            </div>
+            <div className="px-3 py-2">
+              {psiSeries.length>1
+                ?<MiniLine labels={runs.map(r=>r.slice(5,16))} series={[{name:'avg',color:VIOLET,data:psiSeries}]}/>
+                :<div className="text-sm text-slate-400 py-8 text-center">Cần ≥2 lần chạy PSI trong tháng</div>}
+            </div>
+          </div>
+        </div>
+
+        <div className="grid grid-cols-12 gap-5">
+          <div className={"col-span-12 xl:col-span-7 "+mosaicCard}>
+            <div className="px-5 pt-4 pb-2 border-b border-slate-100 dark:border-slate-800 flex items-center">
+              <h3 className="font-semibold text-[15px] flex items-center gap-2"><span className="text-red-500"><NavIcon id="alerts" cls="w-4 h-4"/></span>Alerts cần xử lý</h3>
+              {alerts.length>3&&<button onClick={()=>{openInsightTab('alerts');go('insights')}} className="ml-auto text-xs text-violet-500 hover:underline">Xem tất cả ({alerts.length})</button>}
+            </div>
+            <div className="p-4 flex flex-col gap-2">
+              {alerts.length?alerts.slice(0,3).map((a,i)=>(
+                <button key={i} onClick={()=>{if(a.go&&a.go!=='alerts')go(a.go);else{openInsightTab('alerts');go('insights')}}} className="flex items-start gap-2.5 text-left text-[13px] px-3 py-2 rounded-lg hover:bg-slate-50 dark:hover:bg-slate-800/50">
+                  <span className={"mt-0.5 flex-none "+(a.lv==='high'?'text-red-500':'text-amber-500')}><NavIcon id={a.icon} cls="w-4 h-4"/></span>
+                  <span className={a.lv==='high'?'text-red-600 dark:text-red-400':'text-slate-600 dark:text-slate-300'}>{a.text}</span>
+                </button>
+              )):<div className="text-sm text-slate-400 py-6 text-center"><IconText text="Không có alert nào — Đệ canh kỹ rồi, chill đi Đại ca 🟢"/></div>}
+            </div>
+          </div>
+          <div className={"col-span-12 xl:col-span-5 "+mosaicCard}>
+            <div className="px-5 pt-4 pb-2 border-b border-slate-100 dark:border-slate-800">
+              <h3 className="font-semibold text-[15px] flex items-center gap-2"><span className="text-violet-500"><NavIcon id="clock" cls="w-4 h-4"/></span>Việc sắp diễn ra</h3>
+            </div>
+            <div className="p-4 flex flex-col gap-2.5 text-[13px] text-slate-600 dark:text-slate-300">
+              {cfg&&<React.Fragment>
+                <div className="flex gap-2"><span className="text-violet-500 mt-0.5 flex-none"><NavIcon id="zap" cls="w-4 h-4"/></span><span>PageSpeed check: <b>{cfg.schedule_mode}</b> lúc <b>{cfg.schedule_time}</b>{cfg.schedule_mode==='monthly'?` (ngày ${cfg.schedule_day_of_month})`:''}</span></div>
+                <div className="flex gap-2"><span className="text-sky-500 mt-0.5 flex-none"><NavIcon id="trend" cls="w-4 h-4"/></span><span>Báo cáo SEO: ngày <b>{cfg.seo_run_day_of_month}</b> hàng tháng lúc <b>{cfg.seo_run_time}</b></span></div>
+              </React.Fragment>}
+              <div className="flex gap-2"><span className="text-slate-400 mt-0.5 flex-none"><NavIcon id="save" cls="w-4 h-4"/></span><span>Kết quả tự ghi vào Google Sheet (PSI + SEO + log)</span></div>
+              <button onClick={()=>go('config')} className="self-start mt-1 text-xs text-violet-500 hover:underline">Chỉnh lịch →</button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function UrlIntel(){
+  const {psi,seo}=useAgentData();
+  const [q,setQ]=useState('');
+  const [sel,setSel]=useState(null);
+  const [sort,setSort]=useState({key:'views',dir:-1}); // dir: -1 giảm dần, 1 tăng dần
+  useEffect(()=>{ /* bối cảnh chi tiết cho DeCho: data từng dòng + URL đang chọn */
+    if(!psi||!seo||!seo.headers||!seo.headers.length)return;
+    const run=lastRun(psi);
+    const pm={};
+    if(run)psiRunRows(psi,run).forEach(x=>{const k=pathOf(x[1]);(pm[k]=pm[k]||{})[x[2]]=x[3]});
+    const h=seo.headers,idx={};h.forEach((c,i)=>idx[c]=i);
+    const g=(r,c)=>r[idx[c]]??'';
+    const lines=(seo.rows||[]).slice(0,60).map(r=>{
+      const p=pathOf(g(r,'url'));const ps=pm[p]||{};
+      return `${p}: views=${g(r,'views')} (Δ${g(r,'views_change_%')}%), users=${g(r,'users')}, clicks=${g(r,'clicks')} (Δ${g(r,'clicks_change_%')}%), impressions=${g(r,'impressions')}, PSI mobile=${ps.MOBILE??'—'}, desktop=${ps.DESKTOP??'—'}`;
+    });
+    setPageSub(`Traffic (GSC/GA4 tháng ${seo.tab||'—'}) + PageSpeed (lần chạy mới nhất) theo từng URL`);
+    dechoCtx.info=`Màn hình URL Intelligence: bảng hợp nhất traffic GSC/GA4 tháng ${seo.tab} + PageSpeed (lần chạy ${run||'—'}), ${(seo.rows||[]).length} URL. Δ% = so với tháng trước. Dữ liệu từng dòng:\n`
+      +lines.join('\n')
+      +(sel?`\n\nNgười dùng ĐANG XEM CHI TIẾT: ${sel.path} — views ${sel.views}, users ${sel.users}, clicks ${sel.clicks}, impressions ${sel.impr}, PSI mobile ${sel.psiM??'—'} / desktop ${sel.psiD??'—'}`:'');
+  },[psi,seo,sel]);
+  if(!psi||!seo)return <Spinner/>;
+
+  const run=lastRun(psi);
+  const psiMap={};
+  if(run)psiRunRows(psi,run).forEach(x=>{
+    const k=pathOf(x[1]);
+    (psiMap[k]=psiMap[k]||{})[x[2]]=parseFloat(x[3]);
+  });
+  const h=seo.headers||[],idx={};h.forEach((c,i)=>idx[c]=i);
+  const g=(r,c)=>r[idx[c]];
+  const items=(seo.rows||[]).map(r=>{
+    const path=pathOf(g(r,'url')||'');
+    return {path,url:g(r,'url'),views:+g(r,'views')||0,users:+g(r,'users')||0,clicks:+g(r,'clicks')||0,
+            impr:+g(r,'impressions')||0,clicksCh:g(r,'clicks_change_%'),viewsCh:g(r,'views_change_%'),
+            psiM:psiMap[path]?psiMap[path].MOBILE:null,psiD:psiMap[path]?psiMap[path].DESKTOP:null};
+  }).filter(it=>!q||it.path.toLowerCase().includes(q.toLowerCase()))
+    .sort((a,b)=>{
+      const k=sort.key;
+      let va=a[k],vb=b[k];
+      if(k==='viewsCh'||k==='clicksCh'){va=parseFloat(va);vb=parseFloat(vb)}
+      if(k==='path')return sort.dir*String(va).localeCompare(String(vb));
+      va=(va==null||isNaN(va))?-Infinity:+va; vb=(vb==null||isNaN(vb))?-Infinity:+vb;
+      return sort.dir*(va-vb);
+    });
+  const runsAll=[...new Set((psi.rows||[]).map(x=>x[0]))].sort();
+  const hist=sel?runsAll.map(rn=>{
+    const row=psiRunRows(psi,rn).find(x=>pathOf(x[1])===sel.path&&x[2]==='MOBILE');
+    return row?parseFloat(row[3]):null;
+  }).filter(v=>v!=null&&!isNaN(v)):[];
+  const chPill=v=>{const n=parseFloat(v);if(isNaN(n))return <span className="text-slate-400">—</span>;
+    return <span className={"px-1.5 py-0.5 rounded-full text-[11px] font-semibold "+(n>=0?'bg-emerald-500/20 text-emerald-700 dark:text-emerald-400':'bg-red-500/20 text-red-700 dark:text-red-400')}>{n>0?'+':''}{n}%</span>};
+  const scoreTxt=v=>v==null||isNaN(v)?<span className="text-slate-400">—</span>:<b style={{color:scoreColor(v)}}>{v}</b>;
+
+  return (
+    <div className="flex-1 min-h-0 overflow-y-auto px-6 py-5 bg-transparent">
+      <div className="max-w-[1180px] mx-auto flex flex-col gap-4">
+        <div className={mosaicCard}>
+          <div className="overflow-auto h-[calc(100vh-110px)]">
+            <table className="w-full text-[12.5px]">
+              <thead><tr className="text-[10.5px] uppercase tracking-wide text-slate-400">
+                {[['URL','path'],['Views','views'],['Δ Views','viewsCh'],['Users','users'],['Clicks','clicks'],['Δ Clicks','clicksCh'],['Impressions','impr'],['PSI M','psiM'],['PSI D','psiD']].map(([c,k])=>{
+                  const active=sort.key===k;
+                  return (
+                    <th key={c} className="sticky top-0 z-10 bg-slate-100 dark:bg-slate-800 px-3 py-2.5 text-right first:text-left font-semibold whitespace-nowrap">
+                      <div className="inline-flex items-center gap-2">
+                        <button onClick={()=>setSort(s=>({key:k,dir:s.key===k?-s.dir:-1}))}
+                          className={"inline-flex items-center gap-1 uppercase tracking-wide transition select-none "+(active?'text-violet-500':'hover:text-slate-600 dark:hover:text-slate-200')}>
+                          {c}
+                          <svg className="w-3 h-3 flex-none" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                            {active
+                              ?(sort.dir===-1?<path d="M12 5v14M19 12l-7 7-7-7"/>:<path d="M12 19V5M5 12l7-7 7 7"/>)
+                              :<path d="M8 9l4-4 4 4M8 15l4 4 4-4" opacity=".45"/>}
+                          </svg>
+                        </button>
+                        {k==='path'&&(
+                          <div className="relative normal-case">
+                            <svg className="w-3.5 h-3.5 absolute left-2 top-1/2 -translate-y-1/2 text-slate-400 pointer-events-none" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/></svg>
+                            <input value={q} onChange={e=>setQ(e.target.value)} placeholder="Tìm URL..."
+                              className="w-52 max-w-full pl-7 pr-2 py-1 text-[12px] font-normal tracking-normal rounded-md border border-slate-300 dark:border-slate-600 bg-white dark:bg-slate-900 text-slate-700 dark:text-slate-200 outline-none focus:border-violet-400 focus:ring-2 focus:ring-violet-500/20"/>
+                          </div>
+                        )}
+                      </div>
+                    </th>
+                  );
+                })}
+              </tr></thead>
+              <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
+                {items.map((it,i)=>(
+                  <tr key={i} onClick={()=>setSel(it)} className={"cursor-pointer hover:bg-slate-50 dark:hover:bg-slate-800/40 "+(sel&&sel.path===it.path?'bg-violet-50 dark:bg-violet-900/20':'')}>
+                    <td className="px-3 py-1.5 max-w-[280px] truncate" title={it.url}>{it.path}</td>
+                    <td className="px-3 py-1.5 text-right">{it.views.toLocaleString()}</td>
+                    <td className="px-3 py-1.5 text-right">{chPill(it.viewsCh)}</td>
+                    <td className="px-3 py-1.5 text-right">{it.users.toLocaleString()}</td>
+                    <td className="px-3 py-1.5 text-right">{it.clicks.toLocaleString()}</td>
+                    <td className="px-3 py-1.5 text-right">{chPill(it.clicksCh)}</td>
+                    <td className="px-3 py-1.5 text-right">{it.impr.toLocaleString()}</td>
+                    <td className="px-3 py-1.5 text-right">{scoreTxt(it.psiM)}</td>
+                    <td className="px-3 py-1.5 text-right">{scoreTxt(it.psiD)}</td>
+                  </tr>
+                ))}
+                {!items.length&&<tr><td colSpan="9" className="px-3 py-8 text-center text-slate-400">Không có URL khớp</td></tr>}
+              </tbody>
+            </table>
+          </div>
+        </div>
+
+        {sel&&(
+          <div className={mosaicCard+" p-5 sticky bottom-0 z-20 shadow-[0_-8px_24px_-12px_rgba(0,0,0,0.25)] ring-1 ring-violet-200 dark:ring-violet-900"}>
+            <div className="flex items-center gap-3 mb-3">
+              <h3 className="font-semibold text-[15px] truncate">{sel.path}</h3>
+              <a href={sel.url} target="_blank" className="text-xs text-violet-500 hover:underline flex-none">mở trang ↗</a>
+              <button onClick={()=>setSel(null)} className="ml-auto flex-none text-slate-400 hover:text-slate-600 w-7 h-7 grid place-items-center rounded-lg hover:bg-slate-100 dark:hover:bg-slate-800">
+                <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M18 6L6 18M6 6l12 12"/></svg>
+              </button>
+            </div>
+            <div className="grid gap-4" style={{gridTemplateColumns:'repeat(auto-fit,minmax(150px,1fr))'}}>
+              <div><div className="text-[11px] uppercase text-slate-400 font-semibold">PSI Mobile</div><div className="text-2xl font-bold" style={{color:sel.psiM!=null?scoreColor(sel.psiM):undefined}}>{sel.psiM??'—'}</div></div>
+              <div><div className="text-[11px] uppercase text-slate-400 font-semibold">PSI Desktop</div><div className="text-2xl font-bold" style={{color:sel.psiD!=null?scoreColor(sel.psiD):undefined}}>{sel.psiD??'—'}</div></div>
+              <div><div className="text-[11px] uppercase text-slate-400 font-semibold">Views / Users</div><div className="text-2xl font-bold">{sel.views.toLocaleString()}<span className="text-sm text-slate-400"> / {sel.users.toLocaleString()}</span></div></div>
+              <div><div className="text-[11px] uppercase text-slate-400 font-semibold">Clicks / Impr.</div><div className="text-2xl font-bold">{sel.clicks.toLocaleString()}<span className="text-sm text-slate-400"> / {sel.impr.toLocaleString()}</span></div></div>
+            </div>
+            {hist.length>1&&(
+              <div className="mt-4">
+                <div className="text-[11px] uppercase text-slate-400 font-semibold mb-1">PSI Mobile qua các lần chạy ({psi.tab})</div>
+                <div className="max-w-md"><Sparkline points={hist} color={VIOLET}/></div>
+              </div>
+            )}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+/* Trích metric Clarity (best-effort, không vỡ nếu shape lạ) */
+function clarityMetrics(data){
+  if(!Array.isArray(data))return [];
+  const out=[];
+  for(const m of data){
+    const name=m&&(m.metricName||m.name);if(!name)continue;
+    const info=m&&m.information;let val='—';
+    if(Array.isArray(info)&&info.length){
+      const f=info[0],k=Object.keys(f).find(k=>typeof f[k]==='number')||Object.keys(f)[0];
+      if(k)val=String(f[k]);
+    }
+    out.push({label:name,value:val});
+  }
+  return out.slice(0,8);
+}
+
+/* Modal tạo campaign — nhập MẬT KHẨU ở ô riêng (type=password), KHÔNG đi qua chat/không lưu lịch sử */
+function CreateCampaignModal({onClose,onDone}){
+  const [name,setName]=useState(''),[budget,setBudget]=useState('100000'),[pw,setPw]=useState('');
+  const [busy,setBusy]=useState(false),[msg,setMsg]=useState(null);
+  const submit=async()=>{
+    if(!pw){setMsg({err:'Nhập mật khẩu xác nhận.'});return}
+    setBusy(true);setMsg(null);
+    try{
+      const r=await(await fetch('/api/ads/create-campaign',{method:'POST',headers:{'Content-Type':'application/json'},
+        body:JSON.stringify({password:pw,name:name||undefined,budget:Number(budget)||undefined})})).json();
+      if(r.ok){setMsg({ok:`✅ Đã tạo "${r.name}" (PAUSED) · ${r.sitelinks} sitelink. Vào Google Ads review rồi bật.`});setTimeout(onDone,1600)}
+      else setMsg({err:r.error||'Tạo không được.'});
+    }catch(e){setMsg({err:e.message})}
+    finally{setBusy(false)}
+  };
+  const inp="mt-1 w-full text-sm px-3 py-2 rounded-lg bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 outline-none focus:border-violet-400";
+  return ReactDOM.createPortal(
+    <div className="fixed inset-0 z-[90] bg-black/50 backdrop-blur-sm grid place-items-center p-4" onClick={onClose}>
+      <div className="w-full max-w-md rounded-2xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 shadow-2xl p-5 flex flex-col gap-3" onClick={e=>e.stopPropagation()}>
+        <h3 className="font-bold text-[15px]">Tạo campaign mới (Google Ads)</h3>
+        <p className="text-[12px] text-slate-400 -mt-1">Tạo ở trạng thái <b>PAUSED</b> — chưa tiêu tiền tới khi Đại ca tự bật trong Google Ads.</p>
+        <label className="text-xs text-slate-500">Tên campaign<input value={name} onChange={e=>setName(e.target.value)} placeholder="vd: GG_Search_CloudServer" className={inp}/></label>
+        <label className="text-xs text-slate-500">Ngân sách (VND/ngày)<input type="number" value={budget} onChange={e=>setBudget(e.target.value)} className={inp}/></label>
+        <label className="text-xs text-slate-500"><span className="inline-flex items-center gap-1">Mật khẩu xác nhận <NavIcon id="lock" cls="w-3.5 h-3.5"/></span><input type="password" autoComplete="off" value={pw} onChange={e=>setPw(e.target.value)} placeholder="nhập mật khẩu" onKeyDown={e=>{if(e.key==='Enter')submit()}} className={inp}/></label>
+        {msg&&<p className={"text-[12.5px] "+(msg.ok?'text-emerald-600 dark:text-emerald-400':'text-red-500')}><IconText text={msg.ok||msg.err}/></p>}
+        <div className="flex gap-2 justify-end mt-1">
+          <button onClick={onClose} className="px-3.5 py-2 rounded-lg text-sm text-slate-500 hover:bg-slate-100 dark:hover:bg-slate-800">Huỷ</button>
+          <button onClick={submit} disabled={busy} className="px-3.5 py-2 rounded-lg text-sm font-medium text-white bg-violet-500 hover:bg-violet-600 disabled:opacity-50">{busy?'Đang tạo…':'Tạo (PAUSED)'}</button>
+        </div>
+      </div>
+    </div>, document.body);
+}
+
+function AdsView(){
+  const [camps,setCamps]=useState(null);
+  const [perf,setPerf]=useState(null);
+  const [ldp,setLdp]=useState(null),[clarity,setClarity]=useState(null);
+  const [showCreate,setShowCreate]=useState(false);
+  const [range,setRange]=useState(()=>{
+    const iso=d=>d.toISOString().slice(0,10);
+    const yest=new Date(Date.now()-864e5);
+    return {start:iso(new Date(yest-29*864e5)),end:iso(yest),label:'30 ngày gần nhất'};
+  });
+  const [err,setErr]=useState('');
+  const load=useCallback(async rng=>{
+    setErr('');setPerf(null);setLdp(null);
+    try{
+      const [c,p,l]=await Promise.all([
+        fetch('/api/ads/campaigns').then(r=>r.json()),
+        fetch(`/api/ads/perf?start=${rng.start}&end=${rng.end}`).then(r=>r.json()),
+        fetch(`/api/ads/ldp?start=${rng.start}&end=${rng.end}`).then(r=>r.json()).catch(()=>({rows:[]})),
+      ]);
+      if(c.error||p.error){setErr(c.error||p.error);return}
+      setCamps(c.campaigns);setPerf(p);setLdp(l);
+    }catch(e){setErr(e.message)}
+  },[]);
+  useEffect(()=>{load(range)},[]);
+  useEffect(()=>{ /* Clarity: luôn 3 ngày, fetch 1 lần — KHÔNG theo filter ngày */
+    fetch('/api/clarity').then(r=>r.json()).then(setClarity).catch(()=>setClarity({configured:false}));
+  },[]);
+  useEffect(()=>{ /* DeCho chỉnh filter qua chat dock */
+    const h=e=>{
+      const a=e.detail||{};
+      if(a.type!=='ads_range'||!a.start||!a.end)return;
+      const fmt=s=>{const[y,m,d]=s.split('-');return `${d}/${m}/${y}`};
+      const r={start:a.start,end:a.end,label:`${fmt(a.start)} → ${fmt(a.end)}`};
+      setRange(r);load(r);
+    };
+    window.addEventListener('decho-ui',h);
+    return()=>window.removeEventListener('decho-ui',h);
+  },[load]);
+  useEffect(()=>{
+    if(!perf)return;
+    const agg={},daily={};
+    perf.rows.forEach(r=>{
+      const a=agg[r.name]=agg[r.name]||{status:r.status,impr:0,cost:0,clicks:0,conv:0};
+      a.impr+=r.impressions;a.cost+=r.cost;a.clicks+=r.clicks;a.conv+=r.conversions;
+      const d=daily[r.date]=daily[r.date]||{cost:0,clicks:0,conv:0};
+      d.cost+=r.cost;d.clicks+=r.clicks;d.conv+=r.conversions;
+    });
+    const tot=Object.values(agg).reduce((p,a)=>({impr:p.impr+a.impr,cost:p.cost+a.cost,clicks:p.clicks+a.clicks,conv:p.conv+a.conv}),{impr:0,cost:0,clicks:0,conv:0});
+    const line=(n,a)=>`${n} [${a.status||''}]: impressions=${a.impr}, clicks=${a.clicks}, CTR=${a.impr?(a.clicks/a.impr*100).toFixed(2):0}%, cost=${a.cost.toFixed(0)}, conversions=${a.conv.toFixed(1)}, CPA=${a.conv?(a.cost/a.conv).toFixed(0):'N/A'}`;
+    setPageSub(`Google Ads · read-only monitor · ${perf.start} → ${perf.end}`);
+    dechoCtx.info=`Màn hình Paid Campaigns (Google Ads, ${perf.start}→${perf.end}, cost theo đơn vị tiền tài khoản).\n`
+      +`TỔNG: ${line('Tất cả campaign',{status:'ALL',...tot})}\n`
+      +`THEO CAMPAIGN:\n`+Object.entries(agg).sort((x,y)=>y[1].cost-x[1].cost).map(([n,a])=>line(n,a)).join('\n')
+      +`\nTHEO NGÀY (cost/clicks/conv):\n`+Object.keys(daily).sort().map(d=>`${d}: ${daily[d].cost.toFixed(0)} / ${daily[d].clicks} / ${daily[d].conv.toFixed(1)}`).join('\n')
+      +(camps?`\nDANH SÁCH CAMPAIGN (${camps.length}): `+camps.map(c=>`${c.name} (${c.status}, ${c.channel})`).join('; '):'');
+  },[perf,camps]);
+
+  if(err)return (
+    <div className="p-8 flex flex-col items-start gap-3">
+      <p className="text-sm text-red-500"><IconText text={'❌ '+err}/></p>
+      <button onClick={()=>load(range)} className="px-3.5 py-2 rounded-lg text-sm font-medium text-white bg-violet-500 hover:bg-violet-600 shadow-xs inline-flex items-center gap-1.5"><NavIcon id="refresh" cls="w-4 h-4"/>Thử lại</button>
+    </div>
+  );
+  if(!perf||!camps)return <Spinner label="Đệ đang gọi Google Ads…"/>;
+
+  /* aggregate theo campaign + theo ngày */
+  const byCamp={},byDate={};
+  perf.rows.forEach(r=>{
+    const a=byCamp[r.name]=byCamp[r.name]||{name:r.name,status:r.status,impressions:0,clicks:0,cost:0,conversions:0,absTopImpr:0,topImpr:0};
+    a.impressions+=r.impressions;a.clicks+=r.clicks;a.cost+=r.cost;a.conversions+=r.conversions;
+    a.absTopImpr+=(r.absTopPct||0)/100*r.impressions;a.topImpr+=(r.topPct||0)/100*r.impressions;  /* gộp % có trọng số */
+    const d=byDate[r.date]=byDate[r.date]||{cost:0,clicks:0};
+    d.cost+=r.cost;d.clicks+=r.clicks;
+  });
+  const campRows=Object.values(byCamp).sort((a,b)=>b.cost-a.cost);
+  const dates=Object.keys(byDate).sort();
+  const totCost=campRows.reduce((p,c)=>p+c.cost,0),totClicks=campRows.reduce((p,c)=>p+c.clicks,0),
+        totConv=campRows.reduce((p,c)=>p+c.conversions,0),totImpr=campRows.reduce((p,c)=>p+c.impressions,0),
+        totAbsTop=campRows.reduce((p,c)=>p+c.absTopImpr,0),totTop=campRows.reduce((p,c)=>p+c.topImpr,0);
+  const fmtN=v=>v>=1e6?(v/1e6).toFixed(1)+'M':v>=1e3?(v/1e3).toFixed(1)+'k':Math.round(v).toLocaleString();
+
+  return (
+    <div className="flex-1 min-h-0 overflow-y-auto px-6 py-5 bg-transparent">
+      <div className="max-w-[1180px] mx-auto flex flex-col gap-5">
+        <HeaderSlot>
+          <DateRangePicker value={range} onApply={r=>{setRange(r);load(r)}}/>
+          <button onClick={()=>setShowCreate(true)} className="px-3.5 py-2 rounded-lg text-sm font-medium text-violet-600 dark:text-violet-400 border border-violet-300 dark:border-violet-700 hover:bg-violet-50 dark:hover:bg-violet-500/10 inline-flex items-center gap-1">+ Tạo campaign</button>
+          <button onClick={()=>load(range)} className="px-3.5 py-2 rounded-lg text-sm font-medium text-white bg-violet-500 hover:bg-violet-600 shadow-xs inline-flex items-center gap-1.5"><NavIcon id="refresh" cls="w-4 h-4"/>Tải lại</button>
+        </HeaderSlot>
+
+        <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+          <StatCard label="CTR" value={totImpr?(totClicks/totImpr*100).toFixed(2)+'%':'—'} sub="clicks / impressions"/>
+          <StatCard label="Impressions" value={fmtN(totImpr)} sub={range.label||(perf.start+' → '+perf.end)}/>
+          <StatCard label="Impr. (Abs.Top) %" value={totImpr?(totAbsTop/totImpr*100).toFixed(1)+'%':'—'} sub="ở vị trí top tuyệt đối"/>
+          <StatCard label="Impr. (Top) %" value={totImpr?(totTop/totImpr*100).toFixed(1)+'%':'—'} sub="ở khu vực top"/>
+          <StatCard label="Avg. CPC" value={totClicks?fmtN(totCost/totClicks):'—'} sub="cost / click"/>
+          <StatCard label="Cost / conv." value={totConv?fmtN(totCost/totConv):'—'} sub={totConv?'':'chưa có conversion'}/>
+          <StatCard label="Conv. rate" value={totClicks?(totConv/totClicks*100).toFixed(2)+'%':'—'} sub="conv / click"/>
+          <StatCard label="Avg. CPM" value={totImpr?fmtN(totCost/totImpr*1000):'—'} sub="cost / 1000 impr"/>
+        </div>
+
+        <div className={mosaicCard}>
+          <div className="px-5 pt-4 pb-1 border-b border-slate-100 dark:border-slate-800 flex items-center gap-2">
+            <h3 className="font-semibold text-[15px]">Chi tiêu & clicks theo ngày</h3>
+            <span className="ml-auto flex gap-3 text-[11px] text-slate-400">
+              <span><i className="inline-block w-2.5 h-2.5 rounded-full mr-1" style={{background:VIOLET}}/>Cost</span>
+              <span><i className="inline-block w-2.5 h-2.5 rounded-full mr-1" style={{background:SKY}}/>Clicks</span>
+            </span>
+          </div>
+          <div className="px-3 py-2">
+            {dates.length>1
+              ?<MiniLine labels={dates.map(d=>d.slice(5))} series={[
+                  {name:'cost',color:VIOLET,data:dates.map(d=>Math.round(byDate[d].cost))},
+                  {name:'clicks',color:SKY,data:dates.map(d=>byDate[d].clicks)}]}/>
+              :<div className="text-sm text-slate-400 py-8 text-center">Chưa đủ dữ liệu theo ngày</div>}
+          </div>
+        </div>
+
+        <div className={mosaicCard}>
+          <div className="px-5 pt-4 pb-3 border-b border-slate-100 dark:border-slate-800">
+            <h3 className="font-semibold text-[15px]">Theo campaign <span className="text-slate-400 font-normal">({perf.start} → {perf.end})</span></h3>
+          </div>
+          <div className="overflow-x-auto">
+            <table className="w-full text-[12.5px]">
+              <thead><tr className="text-[10.5px] uppercase tracking-wide text-slate-400 bg-slate-50 dark:bg-slate-800/60">
+                {['Campaign','Status','Impr.','CTR','Impr. (Abs.Top)%','Impr. (Top)%','Avg. CPC','Cost','Cost/conv','Conv. rate'].map(c=>
+                  <th key={c} className="px-3 py-2.5 text-right first:text-left font-semibold whitespace-nowrap">{c}</th>)}
+              </tr></thead>
+              <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
+                {campRows.map((c,i)=>(
+                  <tr key={i} className="hover:bg-slate-50 dark:hover:bg-slate-800/40">
+                    <td className="px-3 py-1.5 max-w-[300px] truncate" title={c.name}>{c.name}</td>
+                    <td className="px-3 py-1.5 text-right">
+                      <span className={"px-1.5 py-0.5 rounded-full text-[11px] font-semibold "+(c.status==='ENABLED'?'bg-emerald-500/20 text-emerald-700 dark:text-emerald-400':'bg-slate-200 dark:bg-slate-700 text-slate-500')}>{c.status}</span>
+                    </td>
+                    <td className="px-3 py-1.5 text-right">{fmtN(c.impressions)}</td>
+                    <td className="px-3 py-1.5 text-right">{c.impressions?(c.clicks/c.impressions*100).toFixed(2)+'%':'—'}</td>
+                    <td className="px-3 py-1.5 text-right">{c.impressions?(c.absTopImpr/c.impressions*100).toFixed(1)+'%':'—'}</td>
+                    <td className="px-3 py-1.5 text-right">{c.impressions?(c.topImpr/c.impressions*100).toFixed(1)+'%':'—'}</td>
+                    <td className="px-3 py-1.5 text-right">{c.clicks?fmtN(c.cost/c.clicks):'—'}</td>
+                    <td className="px-3 py-1.5 text-right font-semibold">{fmtN(c.cost)}</td>
+                    <td className="px-3 py-1.5 text-right">{c.conversions?fmtN(c.cost/c.conversions):'—'}</td>
+                    <td className="px-3 py-1.5 text-right">{c.clicks?(c.conversions/c.clicks*100).toFixed(2)+'%':'—'}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+
+        {ldp&&ldp.rows&&ldp.rows.length>0&&(
+        <div className={mosaicCard}>
+          <div className="px-5 pt-4 pb-3 border-b border-slate-100 dark:border-slate-800">
+            <h3 className="font-semibold text-[15px]">Theo landing page <span className="text-slate-400 font-normal">({ldp.start} → {ldp.end})</span></h3>
+          </div>
+          <div className="overflow-x-auto">
+            <table className="w-full text-[12.5px]">
+              <thead><tr className="text-[10.5px] uppercase tracking-wide text-slate-400 bg-slate-50 dark:bg-slate-800/60">
+                {['Landing page','Impr.','Clicks','CTR','Avg. CPC','Cost','Conv.','Bounce','Speed'].map(h=>
+                  <th key={h} className="px-3 py-2.5 text-right first:text-left font-semibold whitespace-nowrap">{h}</th>)}
+              </tr></thead>
+              <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
+                {ldp.rows.slice(0,40).map((r,i)=>(
+                  <tr key={i} className="hover:bg-slate-50 dark:hover:bg-slate-800/40">
+                    <td className="px-3 py-1.5 max-w-[340px] truncate"><a href={r.url} target="_blank" rel="noopener" className="text-violet-500 hover:underline" title={r.url}>{(r.base_url||'').replace(/^https?:\/\//,'')}</a></td>
+                    <td className="px-3 py-1.5 text-right">{fmtN(r.impressions)}</td>
+                    <td className="px-3 py-1.5 text-right">{fmtN(r.clicks)}</td>
+                    <td className="px-3 py-1.5 text-right">{r.ctr}%</td>
+                    <td className="px-3 py-1.5 text-right">{fmtN(r.avg_cpc)}</td>
+                    <td className="px-3 py-1.5 text-right font-semibold">{fmtN(r.cost)}</td>
+                    <td className="px-3 py-1.5 text-right">{r.conversions}</td>
+                    <td className="px-3 py-1.5 text-right">{r.bounce_rate!=null?r.bounce_rate+'%':'—'}</td>
+                    <td className="px-3 py-1.5 text-right">{r.speed_score!=null?r.speed_score:'—'}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+          {ldp.clarity_heatmap&&<div className="px-5 py-2.5 text-[11.5px] text-slate-400 border-t border-slate-100 dark:border-slate-800">Soi hành vi: <a href={ldp.clarity_heatmap} target="_blank" rel="noopener" className="text-violet-500 hover:underline">Clarity heatmap</a> · <a href={ldp.clarity_recordings} target="_blank" rel="noopener" className="text-violet-500 hover:underline">recordings</a></div>}
+        </div>)}
+
+        {clarity&&clarity.configured&&(
+        <div className={mosaicCard+" p-5 flex flex-col gap-3"}>
+          <div className="flex items-center gap-2 flex-wrap">
+            <h3 className="font-semibold text-[15px]">Microsoft Clarity <span className="text-slate-400 font-normal">(UX · 3 ngày gần nhất)</span></h3>
+            {clarity.stale&&<span className="text-[10.5px] px-1.5 py-0.5 rounded-full bg-amber-100 dark:bg-amber-900/40 text-amber-600 dark:text-amber-400">dữ liệu lưu tạm</span>}
+            {clarity.fetched_at&&<span className="ml-auto text-[11px] text-slate-400">Cập nhật {new Date(clarity.fetched_at*1000).toLocaleString('vi-VN',{hour:'2-digit',minute:'2-digit',day:'2-digit',month:'2-digit'})}</span>}
+            {clarity.heatmap&&<a href={clarity.heatmap} target="_blank" rel="noopener" className={(clarity.fetched_at?'':'ml-auto ')+'text-[12px] text-violet-500 hover:underline'}>Heatmap ↗</a>}
+            {clarity.recordings&&<a href={clarity.recordings} target="_blank" rel="noopener" className="text-[12px] text-violet-500 hover:underline">Recordings ↗</a>}
+          </div>
+          {clarity.error
+            ?<p className="text-xs text-slate-400">Không lấy được Clarity: {clarity.error}</p>
+            :clarityMetrics(clarity.data).length
+              ?<div className="grid gap-2.5" style={{gridTemplateColumns:'repeat(auto-fit,minmax(150px,1fr))'}}>
+                {clarityMetrics(clarity.data).map((m,i)=><div key={i} className="rounded-xl border border-slate-200 dark:border-slate-700 px-3 py-2"><div className="text-[10.5px] uppercase text-slate-400 truncate" title={m.label}>{m.label}</div><div className="text-[15px] font-bold truncate">{m.value}</div></div>)}
+              </div>
+              :<p className="text-xs text-slate-400">Đã kết nối Clarity. Hỏi DeCho “phân tích clarity” để xem chi tiết hành vi.</p>}
+        </div>)}
+      </div>
+      {showCreate&&<CreateCampaignModal onClose={()=>setShowCreate(false)} onDone={()=>{setShowCreate(false);load(range)}}/>}
+    </div>
+  );
+}
+
+function MetaLine({meta}){
+  if(!meta)return null;
+  const c=meta.cache||{};
+  const source=String(meta.source||'');
+  const windowLabel=String(meta.window||'');
+  const prettySource=source.includes('Alerts + Opportunity')
+    ?'Nguồn tổng hợp Insights'
+    :source;
+  const prettyWindow=windowLabel==='weekly planning snapshot'
+    ?'kế hoạch tuần'
+    :windowLabel.replace(/latest · limit \d+/,'mới nhất');
+  const prettyCache=c.source
+    ?(String(c.source).includes('stale')?'đang dùng cache cũ':String(c.source).includes('disk')?'đang dùng cache trên máy':'đang dùng cache')
+    :'';
+  const bits=[
+    prettySource,
+    prettyWindow,
+    prettyCache,
+    c.age_seconds!=null?`${c.age_seconds}s trước`:'',
+    meta.timezone,
+  ].filter(Boolean);
+  return <div className="text-[11.5px] text-slate-400 flex flex-wrap gap-x-2 gap-y-1"><span>{bits.join(' · ')}</span>{meta.note&&<span>{meta.note}</span>}</div>;
+}
+
+function Evidence({items}){
+  const arr=(items||[]).filter(Boolean);
+  if(!arr.length)return <span className="text-slate-400">—</span>;
+  return <ul className="mt-1 flex flex-col gap-1 text-[12px] text-slate-500 dark:text-slate-400">
+    {arr.slice(0,5).map((e,i)=><li key={i} className="flex gap-1.5"><span className="text-violet-400 flex-none">•</span><span>{String(e)}</span></li>)}
+  </ul>;
+}
+function MaybeEvidence({items}){
+  const arr=(items||[]).filter(Boolean);
+  return arr.length?<Evidence items={arr}/>:null;
+}
+
+function InsightRow({title,sub,score,priority,children}){
+  const p=String(priority||'').toLowerCase();
+  const sev=(p==='p0'||p==='high'||score>=85)?'high':((p==='p1'||p==='medium'||p==='med'||score>=65)?'medium':'low');
+  const palette={
+    high:{
+      tone:'text-red-500',
+      icon:'warn',
+      summary:'border-l-2 border-red-300 dark:border-red-800 bg-red-50/45 dark:bg-red-950/15 hover:bg-red-50/80 dark:hover:bg-red-950/25',
+      badge:'text-red-600 dark:text-red-300 border-red-200 dark:border-red-800 bg-red-50 dark:bg-red-950/30',
+    },
+    medium:{
+      tone:'text-amber-500',
+      icon:'warn',
+      summary:'border-l-2 border-amber-300 dark:border-amber-800 bg-amber-50/40 dark:bg-amber-950/15 hover:bg-amber-50/75 dark:hover:bg-amber-950/25',
+      badge:'text-amber-700 dark:text-amber-300 border-amber-200 dark:border-amber-800 bg-amber-50 dark:bg-amber-950/30',
+    },
+    low:{
+      tone:'text-violet-500',
+      icon:'chart',
+      summary:'border-l-2 border-transparent hover:bg-slate-50 dark:hover:bg-slate-800/40',
+      badge:'text-violet-500 border-violet-200 dark:border-violet-800 bg-violet-50 dark:bg-violet-950/25',
+    },
+  }[sev];
+  return (
+    <details className="group border-b border-slate-100 dark:border-slate-800 last:border-b-0">
+      <summary className={"cursor-pointer list-none px-4 py-3 flex items-start gap-3 transition-colors "+palette.summary}>
+        <span className={"mt-0.5 "+palette.tone}><NavIcon id={palette.icon} cls="w-4 h-4"/></span>
+        <span className="min-w-0 flex-1">
+          <span className="block text-[13.5px] font-semibold text-slate-800 dark:text-slate-100">{title}</span>
+          {sub&&<span className="block text-[12px] text-slate-400 mt-0.5">{sub}</span>}
+        </span>
+        {(priority||score!=null)&&<span className={"text-[11px] px-2 py-0.5 rounded-full border flex-none "+palette.badge}>{priority||score}</span>}
+      </summary>
+      <div className="border-t border-slate-100/80 dark:border-slate-800/80 px-11 pt-3.5 pb-4 text-[13px] text-slate-600 dark:text-slate-300">{children}</div>
+    </details>
+  );
+}
+
+const detailTitleMap={
+  actions:'Việc nên làm',
+  alerts:'Cảnh báo',
+  opportunities:'Opportunity',
+  root_causes:'Root cause',
+  experiments:'Experiment',
+  tracking_issues:'Tracking',
+};
+const insightNorm=s=>String(s||'').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g,'').replace(/\s+/g,' ').trim();
+const evidenceDiff=(items,base)=>(items||[]).filter(e=>!new Set((base||[]).map(x=>String(x))).has(String(e)));
+const isJustEvidence=(text,base)=>{
+  const parts=String(text||'').split(';').map(x=>x.trim()).filter(Boolean);
+  if(!parts.length)return false;
+  const evidenceSet=new Set((base||[]).map(x=>String(x).trim()));
+  return parts.every(x=>evidenceSet.has(x));
+};
+function visibleInsightDetails(details){
+  const d=details||{};
+  const visibleAlerts=(d.alerts||[]).filter(a=>!(
+    (d.opportunities||[]).length && (a.derived_from==='opportunity' || insightNorm(a.text).includes('opportunity score'))
+  ));
+  const visibleActions=(d.actions||[]).filter(a=>{
+    const title=insightNorm(a.title);
+    if(!title)return true;
+    if(visibleAlerts.some(x=>insightNorm(x.text)===title))return false;
+    if((d.tracking_issues||[]).some(x=>insightNorm(x.text)===title))return false;
+    return true;
+  });
+  return {...d,actions:visibleActions,alerts:visibleAlerts};
+}
+function DetailBlock({label,items,render}){
+  const arr=(items||[]).filter(Boolean);
+  if(!arr.length)return null;
+  return (
+    <div className="mt-3 first:mt-0">
+      <div className="text-[11px] font-bold uppercase tracking-wide text-slate-400 mb-1.5">{label}</div>
+      <div className="space-y-2">
+        {arr.slice(0,4).map((item,i)=>(
+          <div key={i} className="border-l-2 border-slate-200 dark:border-slate-700 pl-3 text-[12.5px] leading-relaxed">
+            {render(item)}
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+function InsightGroupRow({group,go}){
+  const details=group.details||{};
+  const visibleDetails=visibleInsightDetails(details);
+  const extraEvidence=items=>evidenceDiff(items,group.evidence);
+  const visibleCounts=Object.fromEntries(Object.entries(visibleDetails).filter(([,v])=>(v||[]).length).map(([k,v])=>[k,v.length]));
+  const countText=Object.entries(visibleCounts).map(([k,v])=>`${detailTitleMap[k]||k}: ${v}`).join(' · ');
+  const target=group.label||group.key||'Insight';
+  const sources=(group.sources||[]).join(', ')||group.type||'Insight';
+  const openTarget=group.type==='url'?'urls':(group.type==='campaign'?'ads':'insights');
+  return (
+    <InsightRow title={target} sub={`${sources}${countText?' · '+countText:''}`} score={group.score} priority={group.priority}>
+      <div className="grid gap-3">
+        <div className="text-[12.5px]">
+          <b>Confidence:</b> {group.confidence||'medium'}
+          {group.evidence&&group.evidence.length>0&&<><span className="mx-2 text-slate-300">·</span><b>Evidence chính:</b><Evidence items={group.evidence}/></>}
+        </div>
+        <DetailBlock label="Cảnh báo" items={visibleDetails.alerts} render={a=><>
+          <div className="font-semibold text-slate-700 dark:text-slate-200">{a.text||'Alert'}</div>
+          <MaybeEvidence items={extraEvidence(a.evidence)}/>
+        </>}/>
+        <DetailBlock label="Tracking" items={details.tracking_issues} render={i=><>
+          <div className="font-semibold text-slate-700 dark:text-slate-200">{i.text||'Tracking issue'}</div>
+          <MaybeEvidence items={extraEvidence(i.evidence)}/>
+        </>}/>
+        <DetailBlock label="Opportunity" items={details.opportunities} render={o=><>
+          <div className="font-semibold text-slate-700 dark:text-slate-200">Score {o.score||'—'} · {(o.sources||[]).join(', ')||'Opportunity'}</div>
+          <MaybeEvidence items={extraEvidence(o.evidence)}/>
+        </>}/>
+        <DetailBlock label="Root cause" items={details.root_causes} render={h=><>
+          <Evidence items={h.root_causes}/>
+          <MaybeEvidence items={extraEvidence(h.evidence)}/>
+        </>}/>
+        <DetailBlock label="Việc nên làm" items={visibleDetails.actions} render={a=><>
+          <div className="font-semibold text-slate-700 dark:text-slate-200">{a.title||'Action'}</div>
+          {a.why&&!isJustEvidence(a.why,group.evidence)&&<div className="text-slate-500 dark:text-slate-400">{a.why}</div>}
+          <div className="text-slate-400">{a.priority||'P2'} · {a.confidence||'medium'}</div>
+        </>}/>
+        <DetailBlock label="Experiment" items={details.experiments} render={e=><>
+          <div className="font-semibold text-slate-700 dark:text-slate-200">{e.title||'Experiment'}</div>
+          {e.hypothesis&&<div><b>Hypothesis:</b> {e.hypothesis}</div>}
+          {e.change&&<div><b>Change:</b> {e.change}</div>}
+          {e.success_metric&&<div><b>Success:</b> {e.success_metric}</div>}
+        </>}/>
+        <button onClick={()=>go&&go(openTarget)} className="mt-1 inline-flex w-fit items-center gap-1.5 text-xs font-semibold text-violet-500 hover:underline">
+          Mở {openTarget==='urls'?'URL Intelligence':openTarget==='ads'?'Paid Campaigns':'Insights'} <span>→</span>
+        </button>
+      </div>
+    </InsightRow>
+  );
+}
+
+function InsightLab({go}){
+  const filters=[
+    ['all','Tất cả','chart'],
+    ['p0','P0','warn'],
+    ['alerts','Có cảnh báo','alerts'],
+    ['tracking','Có tracking','turn'],
+    ['campaign','Campaign','ads'],
+  ];
+  const [filter,setFilter]=useState(()=>window.__dechoInsightFilter||'all');
+  const [data,setData]=useState(null);
+  const [busy,setBusy]=useState(false);
+  const load=useCallback(async()=>{
+    setBusy(true);
+    try{setData(await(await fetch('/api/weekly-autopilot')).json())}
+    catch(e){setData({error:e.message})}
+    finally{setBusy(false)}
+  },[]);
+  useEffect(()=>{load()},[load]);
+  useEffect(()=>{
+    const h=e=>{
+      const next=e.detail||'all';
+      if(filters.some(x=>x[0]===next))setFilter(next);
+    };
+    window.addEventListener('decho-insight-filter',h);
+    return()=>window.removeEventListener('decho-insight-filter',h);
+  },[]);
+  useEffect(()=>{
+    setPageSub('Tổng hợp theo từng URL/campaign: việc cần làm, cảnh báo, nguyên nhân, thử nghiệm và tracking');
+    if(data){
+      const count=(data.entity_groups||data.next_actions||[]).length;
+      dechoCtx.info=`Màn hình Insights tổng hợp có ${count} nhóm theo URL/campaign. Mỗi nhóm gom việc cần làm, cảnh báo, opportunity, root cause, experiment và tracking.`;
+    }
+  },[data,filter]);
+  const meta=data&&data._meta;
+  const err=data&&data.error;
+  const groups=data&&data.entity_groups||[];
+  const actions=data&&data.next_actions||[];
+  const filteredGroups=groups.filter(g=>{
+    const counts=g.detail_counts||{};
+    if(filter==='p0')return String(g.priority||'').toUpperCase()==='P0';
+    if(filter==='alerts')return !!(visibleInsightDetails(g.details||{}).alerts||[]).length;
+    if(filter==='tracking')return !!counts.tracking_issues;
+    if(filter==='campaign')return g.type==='campaign';
+    return true;
+  });
+  return (
+    <div className="flex-1 min-h-0 overflow-hidden px-6 py-5 bg-transparent">
+      <div className="max-w-[1180px] h-full min-h-0 mx-auto flex flex-col gap-3">
+        <HeaderSlot>
+          <button onClick={load} className={chipCls+" !text-sm !px-3.5 !py-2 !rounded-lg inline-flex items-center gap-1.5"}><NavIcon id="refresh" cls={"w-4 h-4"+(busy?" animate-spin":"")}/>Tải lại</button>
+        </HeaderSlot>
+        <div className={mosaicCard+" flex-1 min-h-0 flex flex-col overflow-hidden"}>
+          <div className="px-5 py-2.5 border-b border-slate-100 dark:border-slate-800 flex items-start gap-3 flex-none">
+            <div><MetaLine meta={meta}/></div>
+            {busy&&<span className="ml-auto text-xs text-slate-400">Đang tải...</span>}
+          </div>
+          <div className="flex-none border-b border-slate-100 dark:border-slate-800 bg-slate-50/70 dark:bg-slate-950/35">
+            <div className="px-3 py-2 overflow-x-auto">
+              <div className="flex min-w-max gap-1.5">
+                {filters.map(([id,label,icon])=>{
+                  const active=filter===id;
+                  return <button key={id} onClick={()=>setFilter(id)}
+                    className={(active
+                      ? 'bg-violet-500 text-white shadow-sm'
+                      : 'bg-white/70 dark:bg-slate-900/50 text-slate-500 dark:text-slate-400 hover:text-violet-600 dark:hover:text-violet-300')
+                      +" flex-none h-8 px-3 rounded-full text-[12.5px] font-semibold inline-flex items-center gap-1.5 border border-slate-200/70 dark:border-slate-800 transition-colors"}>
+                    <NavIcon id={icon} cls="w-3.5 h-3.5 flex-none"/>
+                    <span>{label}</span>
+                  </button>
+                })}
+              </div>
+            </div>
+          </div>
+          {err?<div className="p-5 text-sm text-red-500"><IconText text={'❌ '+err}/></div>:null}
+          <div className="flex-1 min-h-0 overflow-y-auto overscroll-contain">
+          {!data||busy?<Spinner/>:(
+            <div className="min-h-full">
+              {filteredGroups.length?filteredGroups.map((g,i)=>(
+                <InsightGroupRow key={g.key||i} group={g} go={go}/>
+              )):groups.length?<div className="p-6 text-sm text-slate-400">Không có nhóm nào khớp bộ lọc này.</div>:actions.length?actions.map((a,i)=>(
+                <InsightRow key={i} title={a.title} sub={`${a.source||'—'} · ${a.confidence||'medium'}`} priority={a.priority}>
+                  <p><b>Target:</b> {a.target||'—'}</p>
+                  <p className="mt-1"><b>Evidence:</b> {a.why||'—'}</p>
+                </InsightRow>
+              )):<div className="p-6 text-sm text-slate-400">Chưa có insight rõ.</div>}
+            </div>
+          )}
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/* ───────────────────────── Config ───────────────────────── */
+function MemoryCard(){
+  const [st,setSt]=useState({loading:true,loaded:false,configured:false,facts:[],at:null});
+  const load=()=>{
+    setSt(s=>({...s,loading:true}));
+    fetch(`/api/memory/records?user_id=${memIds.uid}`).then(r=>r.json())
+      .then(d=>setSt({loading:false,loaded:true,configured:!!d.configured,facts:d.facts||[],error:d.error,at:new Date()}))
+      .catch(e=>setSt(s=>({...s,loading:false,loaded:true,error:e.message,at:new Date()})));
+  };
+  useEffect(()=>{load();const id=setInterval(load,15000);return()=>clearInterval(id)},[]); // tự làm mới mỗi 15s
+  const fmtTime=d=>d?d.toLocaleTimeString('vi-VN',{hour:'2-digit',minute:'2-digit',second:'2-digit'}):'';
+  const resetMemory=()=>{
+    if(!confirm('Reset trí nhớ dài hạn trên máy này? DeCho sẽ dùng actor mới và không kéo các fact cũ nữa.'))return;
+    memIds.resetActor();
+    try{localStorage.removeItem('decho-chat')}catch(e){}
+    setSt({loading:true,loaded:false,configured:false,facts:[],at:null});
+    load();
+    dechoBus.say('Đệ đã đổi actor memory mới. Fact cũ sẽ không còn được kéo vào chat nữa.',6000);
+  };
+  return (
+    <div className={mosaicCard+" p-5 flex flex-col gap-3"} style={{gridColumn:'1/-1'}}>
+      <div className="flex items-center gap-2">
+        <h3 className="text-sm font-bold flex items-center gap-2 flex-none"><span className="text-violet-500"><NavIcon id="chat"/></span>Đệ nhớ gì về Đại ca</h3>
+        <span className="text-[11px] text-slate-400 truncate hidden md:inline">AgentBase Memory — fact dài hạn chỉ lưu khi Đại ca bảo ghi nhớ</span>
+        {st.at&&<span className="ml-auto text-[11px] text-slate-400 flex-none">Cập nhật {fmtTime(st.at)}</span>}
+        <button onClick={load} disabled={st.loading} className={chipCls+(st.at?"":" ml-auto")+" inline-flex items-center gap-1.5 flex-none"}>
+          <NavIcon id="refresh" cls={"w-3.5 h-3.5"+(st.loading?" animate-spin":"")}/>Tải lại
+        </button>
+        <button onClick={resetMemory} className={chipCls+" inline-flex items-center gap-1.5 flex-none text-red-500 border-red-200 dark:border-red-900/60"}>
+          <NavIcon id="trash" cls="w-3.5 h-3.5"/>Reset trí nhớ
+        </button>
+      </div>
+      {!st.loaded?<Spinner/>
+        :!st.configured?<p className="text-xs text-slate-400">Chưa bật memory — cần env <code>MEMORY_ID</code> (xem .env.example).</p>
+        :st.facts.length===0?<p className="text-xs text-slate-400">Chưa có fact nào — nói “ghi nhớ: ...” để Đệ lưu fact dài hạn.{st.error?` (${st.error})`:''}</p>
+        :<ul className="text-[13px] text-slate-600 dark:text-slate-300 flex flex-col gap-1.5">
+          {st.facts.map((f,i)=><li key={i} className="flex gap-2"><span className="text-violet-400 flex-none mt-0.5"><NavIcon id="zap" cls="w-3.5 h-3.5"/></span><span>{f}</span></li>)}
+        </ul>}
+    </div>
+  );
+}
+
+function ConfigView(){
+  const [cfg,setCfg]=useState(null);
+  const [msg,setMsg]=useState('');
+  const load=useCallback(async()=>{
+    const c=await(await fetch('/api/config')).json();
+    setCfg({urls:c.urls,strategies:c.strategies,mode:c.schedule_mode,time:c.schedule_time,
+            day:c.schedule_day_of_month,weekday:c.schedule_weekday,
+            seoDay:c.seo_run_day_of_month??8,seoTime:c.seo_run_time||'08:00',
+            seoTracked:(c.seo_tracked_urls||[]).join('\n')});
+    setMsg('');
+  },[]);
+  useEffect(()=>{load()},[load]);
+  useEffect(()=>{
+    setPageSub('PageSpeed + SEO Agent · lưu là áp dụng ngay, đồng bộ lên Sheet');
+    if(cfg)dechoCtx.info=`Màn hình cấu hình. PageSpeed: ${cfg.urls.filter(u=>u.trim()).length} URL, strategy ${cfg.strategies.join('+')||'chưa chọn'}, lịch ${cfg.mode} lúc ${cfg.time}${cfg.mode==='monthly'?' ngày '+cfg.day:''}. SEO: chạy ngày ${cfg.seoDay} hàng tháng lúc ${cfg.seoTime}, theo dõi ${cfg.seoTracked.trim()?cfg.seoTracked.split('\n').filter(s=>s.trim()).length+' path':'tất cả URL'}.`;
+  },[cfg]);
+
+  if(!cfg)return <Spinner/>;
+
+  const set=p=>setCfg(c=>({...c,...p}));
+  const setUrl=(i,v)=>set({urls:cfg.urls.map((u,j)=>j===i?v:u)});
+  const toggleStrat=s=>set({strategies:cfg.strategies.includes(s)?cfg.strategies.filter(x=>x!==s):[...cfg.strategies,s]});
+  function save(){
+    const body={urls:cfg.urls.map(u=>u.trim()).filter(Boolean),strategies:cfg.strategies,
+                schedule_mode:cfg.mode,schedule_time:cfg.time,
+                schedule_day_of_month:parseInt(cfg.day)||4,schedule_weekday:cfg.weekday,
+                seo_run_day_of_month:parseInt(cfg.seoDay)||8,seo_run_time:cfg.seoTime,
+                seo_tracked_urls:cfg.seoTracked.split('\n').map(s=>s.trim()).filter(Boolean)};
+    const desc=`Lưu cấu hình: **${body.urls.length} URL**, lịch ${body.schedule_mode} lúc ${body.schedule_time}${body.schedule_mode==='monthly'?' ngày '+body.schedule_day_of_month:''}.`;
+    window.dispatchEvent(new CustomEvent('decho-ui',{detail:{kind:'config_pw',payload:{kind:'config',body,desc,
+      onDone:()=>{setMsg('✅ Đã lưu cấu hình');dechoBus.act('nod');
+        dechoBus.say(`✅ Đệ lưu rồi: **${body.urls.length} URL**, lịch ${body.schedule_mode} lúc ${body.schedule_time}. Đệ đồng bộ lên Sheet luôn cho chắc.`);
+        load();}}}}));
+  }
+  const pill=on=>"px-4 py-2 rounded-lg text-[13px] border transition "+(on
+    ?"bg-violet-500 border-violet-500 text-white font-semibold"
+    :"bg-slate-100 dark:bg-slate-800 border-slate-200 dark:border-slate-700 text-slate-500");
+
+  return (
+    <div className="flex-1 min-h-0 overflow-y-auto px-6 py-5 bg-transparent">
+      <div className="max-w-[1150px] mx-auto grid gap-4 items-start" style={{gridTemplateColumns:'minmax(0,1fr) 340px'}}>
+        <div className={mosaicCard+" p-5 flex flex-col gap-3"}>
+          <h3 className="text-sm font-bold flex items-center gap-2"><span className="text-violet-500"><NavIcon id="link"/></span>URLs theo dõi
+            <span className="text-[11.5px] font-normal text-slate-400 ml-auto">{cfg.urls.filter(u=>u.trim()).length} URL</span></h3>
+          <p className="text-xs text-slate-400 -mt-1">Mỗi URL được kiểm tra theo strategy đã chọn, ghi 1 dòng kết quả vào Google Sheet.</p>
+          <div className="grid gap-1.5" style={{gridTemplateColumns:'repeat(auto-fill,minmax(340px,1fr))'}}>
+            {cfg.urls.map((u,i)=>(
+              <div key={i} className="flex gap-1.5">
+                <input value={u} onChange={e=>setUrl(i,e.target.value)} spellCheck={false}
+                  className={"flex-1 min-w-0 font-mono text-xs px-2.5 py-1.5 rounded-lg border outline-none transition bg-white dark:bg-slate-900 text-slate-700 dark:text-slate-200 "+
+                    (u.trim()&&!/^https?:\/\/\S+$/.test(u.trim())?"border-red-400 focus:ring-2 focus:ring-red-500/20":"border-slate-300 dark:border-slate-600 hover:border-slate-400 focus:border-violet-400 focus:ring-2 focus:ring-violet-500/20")}/>
+                <button onClick={()=>set({urls:cfg.urls.filter((_,j)=>j!==i)})} title="Xóa URL"
+                  className="w-7 rounded-lg border border-slate-300 dark:border-slate-600 bg-white dark:bg-slate-900 text-slate-400 hover:text-red-500 hover:border-red-400 text-sm transition">✕</button>
+              </div>
+            ))}
+          </div>
+          <button onClick={()=>set({urls:[...cfg.urls,'']})}
+            className="self-start mt-1 px-3.5 py-1.5 text-xs font-semibold text-violet-500 border border-dashed border-slate-300 dark:border-slate-600 rounded-lg hover:border-violet-400">＋ Thêm URL</button>
+        </div>
+
+        <div className="flex flex-col gap-4 min-w-0">
+          <div className={mosaicCard+" p-5 flex flex-col gap-3"}>
+            <h3 className="text-sm font-bold flex items-center gap-2"><span className="text-violet-500"><NavIcon id="device"/></span>Strategy</h3>
+            <div className="flex gap-2.5">
+              <button className={pill(cfg.strategies.includes('mobile'))} onClick={()=>toggleStrat('mobile')}>Mobile</button>
+              <button className={pill(cfg.strategies.includes('desktop'))} onClick={()=>toggleStrat('desktop')}>Desktop</button>
+            </div>
+          </div>
+          <div className={mosaicCard+" p-5 flex flex-col gap-3"}>
+            <h3 className="text-sm font-bold flex items-center gap-2"><span className="text-violet-500"><NavIcon id="clock"/></span>Lịch chạy tự động</h3>
+            <div className="inline-flex rounded-lg overflow-hidden border border-slate-200 dark:border-slate-700 self-start">
+              {[['daily','Hàng ngày'],['weekly','Hàng tuần'],['monthly','Hàng tháng']].map(([v,lb])=>(
+                <button key={v} onClick={()=>set({mode:v})}
+                  className={"px-3.5 py-2 text-[13px] whitespace-nowrap transition "+(cfg.mode===v?"bg-violet-500 text-white font-semibold":"bg-slate-100 dark:bg-slate-800 text-slate-500 hover:text-slate-700 dark:hover:text-slate-300")}>{lb}</button>
+              ))}
+            </div>
+            <div className="flex gap-2.5 items-center flex-wrap text-xs text-slate-400">
+              lúc <input type="time" className={input} value={cfg.time} onChange={e=>set({time:e.target.value})}/>
+              {cfg.mode==='monthly'&&<span className="flex gap-1.5 items-center">ngày
+                <input type="number" min="1" max="28" className={input+" w-16"} value={cfg.day} onChange={e=>set({day:e.target.value})}/> hàng tháng</span>}
+              {cfg.mode==='weekly'&&
+                <Select value={cfg.weekday} onChange={v=>set({weekday:v})} className="w-32"
+                        options={[['monday','Thứ 2'],['tuesday','Thứ 3'],['wednesday','Thứ 4'],['thursday','Thứ 5'],['friday','Thứ 6'],['saturday','Thứ 7'],['sunday','Chủ nhật']].map(([v,lb])=>({value:v,label:lb}))}/>}
+            </div>
+          </div>
+
+          <div className={mosaicCard+" p-5 flex flex-col gap-3"}>
+            <h3 className="text-sm font-bold flex items-center gap-2"><span className="text-violet-500"><NavIcon id="trend"/></span>SEO Agent</h3>
+            <p className="text-xs text-slate-400 -mt-1">Báo cáo GSC + GA4 tự chạy hàng tháng.</p>
+            <div className="flex gap-2.5 items-center flex-wrap text-xs text-slate-400">
+              ngày <input type="number" min="1" max="28" className={input+" w-16"} value={cfg.seoDay} onChange={e=>set({seoDay:e.target.value})}/>
+              lúc <input type="time" className={input} value={cfg.seoTime} onChange={e=>set({seoTime:e.target.value})}/>
+            </div>
+            <div>
+              <label className="text-xs text-slate-400 block mb-1.5">URLs theo dõi — mỗi dòng 1 path (vd <code className="text-[11px]">/product/vks</code>), để trống = tất cả</label>
+              <textarea rows="4" spellCheck={false} value={cfg.seoTracked} onChange={e=>set({seoTracked:e.target.value})}
+                className="w-full font-mono text-xs px-2.5 py-2 rounded-lg border border-slate-300 dark:border-slate-600 bg-white dark:bg-slate-900 text-slate-700 dark:text-slate-200 outline-none transition hover:border-slate-400 focus:border-violet-400 focus:ring-2 focus:ring-violet-500/20 resize-y"
+                placeholder="(đang theo dõi tất cả URL từ GSC & GA4)"/>
+            </div>
+          </div>
+        </div>
+
+        <MemoryCard/>
+
+        <HeaderSlot>
+          {msg&&<span className="text-xs text-slate-400 max-w-[260px] truncate"><IconText text={msg}/></span>}
+          <button className={chipCls+" !text-sm !px-4 !py-2 !rounded-lg inline-flex items-center gap-1.5"} onClick={load}><NavIcon id="undo" cls="w-4 h-4"/>Hoàn tác</button>
+          <button onClick={save} className="px-4 py-2 rounded-lg text-sm font-bold text-white bg-violet-500 hover:bg-violet-600 shadow-xs inline-flex items-center gap-1.5"><NavIcon id="save" cls="w-4 h-4"/>Lưu cấu hình</button>
+        </HeaderSlot>
+      </div>
+    </div>
+  );
+}
+
+/* ───────────────────────── Shell ───────────────────────── */
+const NAV=[
+  {sec:'Core'},
+  {id:'chat',label:'Chat với DeCho'},
+  {sec:'Analysis'},
+  {id:'home',label:'Tổng quan'},
+  {id:'urls',label:'URL Intelligence'},
+  {id:'dash',label:'PageSpeed'},
+  {id:'ads',label:'Paid Campaigns'},
+  {id:'insights',label:'Insights'},
+  {sec:'System'},
+  {id:'config',label:'Cấu hình'},
+  {id:'psiSheet',label:'PSI Sheet',link:true},
+  {id:'seoSheet',label:'SEO Sheet',link:true},
+];
+const TITLES={home:'Tổng quan',chat:'Chat với DeCho',urls:'URL Intelligence',dash:'PageSpeed · Dashboard',insights:'Insights',ads:'Paid Campaigns',config:'Cấu hình'};
+
+/* ── Particle layers (mỗi vùng 1 kiểu) ─────────────────────────────────────
+   Sidebar: đốm sáng emerald/cyan trôi LÊN như đom đóm. Topbar: chòm sao violet
+   trôi NGANG nối line. Canvas absolute inset-0, pointer-events-none, nằm dưới nội
+   dung (content z-10). Tự co theo khung qua ResizeObserver, scale theo dpr. */
+function useParticleCanvas(draw){
+  const ref=useRef(null);
+  useEffect(()=>{
+    const cv=ref.current, ctx=cv.getContext('2d'), host=cv.parentElement;
+    const dpr=Math.min(window.devicePixelRatio||1,2);
+    let w=0,h=0,raf=0,parts=[],t=0,run=true;
+    function resize(){
+      const r=host.getBoundingClientRect(); w=Math.max(1,r.width); h=Math.max(1,r.height);
+      cv.width=w*dpr; cv.height=h*dpr; cv.style.width=w+'px'; cv.style.height=h+'px';
+      ctx.setTransform(dpr,0,0,dpr,0,0); parts=draw.init(w,h);
+    }
+    function tick(){ if(!run)return; t+=0.016; ctx.clearRect(0,0,w,h); draw.frame(ctx,parts,w,h,t); raf=requestAnimationFrame(tick); }
+    resize(); tick();
+    const ro=new ResizeObserver(resize); ro.observe(host);
+    const onVis=()=>{ if(document.hidden){run=false;cancelAnimationFrame(raf);} else if(!run){run=true;tick();} };
+    document.addEventListener('visibilitychange',onVis);
+    return()=>{run=false;cancelAnimationFrame(raf);ro.disconnect();document.removeEventListener('visibilitychange',onVis);};
+  },[]);
+  return ref;
+}
+
+const SIDEBAR_FX={
+  init(w,h){
+    const n=Math.max(14,Math.min(30,Math.round(h/26)));
+    return Array.from({length:n},()=>({
+      x:Math.random()*w, y:Math.random()*h, r:1+Math.random()*2.2,
+      vy:-(6+Math.random()*16)/60, sway:0.4+Math.random()*0.9, ph:Math.random()*6.28,
+      a:0.22+Math.random()*0.4, c:Math.random()<0.5?'16,185,129':'8,145,178'}));
+  },
+  frame(ctx,parts,w,h,t){
+    for(const p of parts){
+      p.y+=p.vy; p.x+=Math.sin(t*p.sway+p.ph)*0.25;
+      if(p.y<-8){p.y=h+8; p.x=Math.random()*w;}
+      const a=p.a*(0.6+0.4*Math.sin(t*2+p.ph)), R=p.r*4;
+      const g=ctx.createRadialGradient(p.x,p.y,0,p.x,p.y,R);
+      g.addColorStop(0,'rgba('+p.c+','+a+')'); g.addColorStop(1,'rgba('+p.c+',0)');
+      ctx.fillStyle=g; ctx.beginPath(); ctx.arc(p.x,p.y,R,0,6.29); ctx.fill();
+    }
+  }
+};
+function SidebarParticles(){ const ref=useParticleCanvas(SIDEBAR_FX); return <canvas ref={ref} className="absolute inset-0 pointer-events-none" style={{zIndex:0}}/>; }
+
+const TOPBAR_FX={
+  C:'139,92,246',
+  init(w,h){
+    const n=Math.max(10,Math.min(34,Math.round(w/55)));
+    return Array.from({length:n},()=>({
+      x:Math.random()*w, y:Math.random()*h, r:1+Math.random()*1.5,
+      vx:(0.2+Math.random()*0.55)*(Math.random()<0.5?1:-1), vy:(Math.random()-0.5)*0.22,
+      a:0.3+Math.random()*0.4}));
+  },
+  frame(ctx,parts,w,h){
+    const C=this.C;
+    for(const p of parts){
+      p.x+=p.vx; p.y+=p.vy;
+      if(p.x<-12)p.x=w+12; if(p.x>w+12)p.x=-12; if(p.y<-12)p.y=h+12; if(p.y>h+12)p.y=-12;
+    }
+    for(let i=0;i<parts.length;i++)for(let j=i+1;j<parts.length;j++){
+      const a=parts[i],b=parts[j],d=Math.hypot(a.x-b.x,a.y-b.y);
+      if(d<92){ ctx.strokeStyle='rgba('+C+','+(0.16*(1-d/92))+')'; ctx.lineWidth=1;
+        ctx.beginPath(); ctx.moveTo(a.x,a.y); ctx.lineTo(b.x,b.y); ctx.stroke(); }
+    }
+    for(const p of parts){ ctx.fillStyle='rgba('+C+','+p.a+')'; ctx.beginPath(); ctx.arc(p.x,p.y,p.r,0,6.29); ctx.fill(); }
+  }
+};
+function TopbarParticles(){ const ref=useParticleCanvas(TOPBAR_FX); return <canvas ref={ref} className="absolute inset-0 pointer-events-none" style={{zIndex:0}}/>; }
+
+/* Popup nhập mật khẩu để đổi cấu hình — dùng cho cả chat (apply 1 thay đổi) lẫn trang Cấu hình (PUT full) */
+function ConfigPwModal({payload,onClose,onDone}){
+  const [pw,setPw]=useState(''),[busy,setBusy]=useState(false),[msg,setMsg]=useState(null);
+  const submit=async()=>{
+    if(!pw){setMsg({err:'Nhập mật khẩu.'});return}
+    setBusy(true);setMsg(null);
+    try{
+      let r;
+      if(payload.kind==='config')
+        r=await(await fetch('/api/config',{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify({...payload.body,password:pw})})).json();
+      else
+        r=await(await fetch('/api/config/apply',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({...payload.change,password:pw})})).json();
+      if(r.ok){setMsg({ok:r.text||'✅ Đã lưu.'});setTimeout(()=>onDone(r),1100)}
+      else setMsg({err:r.error||'Không áp dụng được.'});
+    }catch(e){setMsg({err:e.message})}finally{setBusy(false)}
+  };
+  return ReactDOM.createPortal(
+    <div className="fixed inset-0 z-[95] bg-black/50 backdrop-blur-sm grid place-items-center p-4" onClick={onClose}>
+      <div className="w-full max-w-sm rounded-2xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 shadow-2xl p-5 flex flex-col gap-3" onClick={e=>e.stopPropagation()}>
+        <h3 className="font-bold text-[15px] inline-flex items-center gap-2"><NavIcon id="lock" cls="w-4 h-4"/>Xác nhận đổi cấu hình</h3>
+        {payload.desc&&<p className="text-[12.5px] text-slate-500 dark:text-slate-400 -mt-1 md" dangerouslySetInnerHTML={{__html:md(payload.desc)}}/>}
+        <label className="text-xs text-slate-500">Mật khẩu<input type="password" autoComplete="off" autoFocus value={pw} onChange={e=>setPw(e.target.value)} onKeyDown={e=>{if(e.key==='Enter')submit()}}
+          className="mt-1 w-full text-sm px-3 py-2 rounded-lg bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 outline-none focus:border-violet-400"/></label>
+        {msg&&<p className={"text-[12.5px] "+(msg.ok?'text-emerald-600 dark:text-emerald-400':'text-red-500')}><IconText text={msg.ok||msg.err}/></p>}
+        <div className="flex gap-2 justify-end mt-1">
+          <button onClick={onClose} className="px-3.5 py-2 rounded-lg text-sm text-slate-500 hover:bg-slate-100 dark:hover:bg-slate-800">Huỷ</button>
+          <button onClick={submit} disabled={busy} className="px-3.5 py-2 rounded-lg text-sm font-medium text-white bg-violet-500 hover:bg-violet-600 disabled:opacity-50">{busy?'Đang lưu…':'Xác nhận'}</button>
+        </div>
+      </div>
+    </div>, document.body);
+}
+
+function App(){
+  const [view,setView]=useState('chat');
+  const face=useFace();
+  const [cfgPw,setCfgPw]=useState(null);
+  const [theme,setTheme]=useLS('psi-theme','light');
+  const [model,setModel]=useLS('psi-model','minimax/minimax-m2.5');
+  const [meta,setMeta]=useState('Đang kết nối...');
+  const [pageSub,setPageSub_]=useState('');
+  const [isMobile,setIsMobile]=useState(()=>typeof window!=='undefined'&&window.matchMedia('(max-width:767px)').matches);
+  useEffect(()=>{
+    const mq=window.matchMedia('(max-width:767px)');
+    const h=e=>setIsMobile(e.matches);
+    mq.addEventListener?mq.addEventListener('change',h):mq.addListener(h);
+    return()=>{mq.removeEventListener?mq.removeEventListener('change',h):mq.removeListener(h)};
+  },[]);
+  useEffect(()=>{
+    const h=e=>setPageSub_(e.detail||'');
+    window.addEventListener('page-sub',h);
+    return()=>window.removeEventListener('page-sub',h);
+  },[]);
+  useEffect(()=>{
+    const h=e=>{const d=e.detail||{};if(d.kind!=='config_pw')return;
+      setCfgPw(d.payload||{kind:'apply',change:d.change,desc:d.desc});};
+    window.addEventListener('decho-ui',h);
+    return()=>window.removeEventListener('decho-ui',h);
+  },[]);
+  const [psiSheet,setPsiSheet]=useState('#');
+  const [seoSheet,setSeoSheet]=useState('#');
+  const [seoMeta,setSeoMeta]=useState('');
+
+  useEffect(()=>{document.documentElement.classList.toggle('dark',theme==='dark')},[theme]);
+  useEffect(()=>{(async()=>{
+    try{
+      const h=await(await fetch('/healthz')).json();
+      setMeta(`Online · ${h.urls} URL · lịch ${h.schedule}${h.configured?'':' · ⚠️ chưa có API key'}`);
+      if(h.sheet_url)setPsiSheet(h.sheet_url);
+    }catch(e){setMeta('Không kết nối được server')}
+    try{
+      const c=await(await fetch('/api/seo/config')).json();
+      const authNote=c.auth_usable?'':(c.auth_configured?' · ⚠️ SEO auth lỗi':' · ⚠️ thiếu service account');
+      setSeoMeta(`${c.site} · GA4 ${c.ga4_property} · lịch ${c.schedule}${authNote}`);
+      if(c.sheet_url)setSeoSheet(c.sheet_url);
+    }catch(e){}
+  })()},[]);
+
+  const DECHO_CHAT={
+    endpoint:'/api/agent/chat/stream',storageKey:'decho-chat',
+    greeting:'Yo Đại ca! Đệ là DeCho 🤖 — all-in-one luôn:\n• "chạy kiểm tra ngay" → đo Core Web Vitals 19 URL\n• "chạy báo cáo SEO tháng vừa rồi" → kéo GSC + GA4\n• "trang nào chậm nhất?", "traffic tháng này sao?" → Đệ đọc Sheet phân tích liền\n• "thêm https://...", "đổi lịch sang daily 8h" → chỉnh cấu hình bằng mồm\n\nChill thôi, nhưng output thì xịn. No cap.',
+    chips:[['play','Kiểm tra PageSpeed','Chạy kiểm tra ngay'],['news','Kiểm tra SEO','Chạy báo cáo SEO tháng vừa rồi'],['dash','Phân tích PSI','Phân tích kết quả PageSpeed lần chạy gần nhất'],['trend','Phân tích SEO','Phân tích số liệu SEO tháng gần nhất'],['ads','Phân tích Ads','Phân tích hiệu suất Google Ads 30 ngày gần nhất'],['clipboard','Kế hoạch tuần','Tuần này nên làm gì?'],['chat','DeCho làm được gì?','DeCho làm được những gì? Hướng dẫn cách dùng nhanh đi']],
+    placeholder:'Nhắn Đệ bất cứ gì: chạy check, báo cáo SEO, phân tích, thêm URL…',
+  };
+  const MOBILE_CHAT={
+    ...DECHO_CHAT,
+    greeting:'Yo Đại ca! Đệ là DeCho — hỏi Đệ về PageSpeed, SEO, Ads hoặc kế hoạch tuần nhé.',
+    placeholder:'Nhắn Đệ...',
+  };
+
+  useEffect(()=>{setPageSub_('')},[view]);
+  useEffect(()=>{
+    dechoCtx.view={home:'Tổng quan',chat:'Chat với DeCho (PSI + SEO + Ads)',urls:'URL Intelligence',dash:'Dashboard PSI',ads:'Paid Campaigns (Google Ads)',insights:'Insights',config:'Cấu hình (PSI + SEO)'}[view]||view;
+  },[view]);
+  useEffect(()=>{dechoCtx.model=model},[model]);
+
+  /* DeCho dẫn chuyện khi chuyển view (mỗi view chỉ nhắc 1 lần mỗi phiên) */
+  const seenTips=useRef(new Set());
+  useEffect(()=>{
+    const TIPS={
+      urls:'URL Intelligence: traffic + PageSpeed gộp theo từng trang. Click 1 dòng để xem chi tiết nha Đại ca.',
+      ads:'Khu Google Ads: Đệ theo dõi campaign, chi tiêu, CTR/CPA — read-only, không đụng tiền của Đại ca.',
+      insights:'Insights gom các việc đáng chú ý, nguyên nhân có thể, thử nghiệm nên chạy và tình trạng tracking.',
+      dash:'Đây là Dashboard — số liệu thật từ PSI Sheet, Đệ vừa đọc xong sẽ bình luận cho Đại ca.',
+      config:'Chỉnh URLs với lịch ở đây nha Đại ca. Bấm Lưu là Đệ nhớ ngay, đồng bộ cả lên Sheet.',
+    };
+    if(TIPS[view]&&!seenTips.current.has(view)){
+      seenTips.current.add(view);
+      dechoBus.say(TIPS[view],6000);
+    }
+  },[view]);
+
+  /* ── Mobile: chỉ hiện khung Chat với DeCho ── */
+  if(isMobile)return (
+    <div className="mobile-shell flex flex-col overflow-hidden">
+      <div className="fixed inset-0 -z-10 bg-cover bg-center" style={{backgroundImage:'url(/static/decho-background.jpeg)'}}/>
+      <div className="fixed inset-0 -z-10 bg-white/35 dark:bg-slate-950/70"/>
+      <header className="flex items-center gap-2 px-3 py-2.5 bg-white/85 dark:bg-slate-900/85 backdrop-blur border-b border-slate-200 dark:border-slate-800 flex-none">
+        <div className="w-8 h-8 rounded-lg overflow-hidden flex-none grid place-items-center bg-gradient-to-br from-emerald-100 to-cyan-100 dark:from-emerald-900 dark:to-cyan-900 border border-slate-200 dark:border-slate-700">
+          <img src={face||"/static/decho-avatar.png"} alt="DeCho" className="w-full h-full object-cover"
+               onError={e=>{e.currentTarget.style.display='none';e.currentTarget.nextSibling.style.display='block'}}/>
+          <span className="text-[11px] font-extrabold text-emerald-600 dark:text-emerald-300" style={{display:'none'}}>Đệ</span>
+        </div>
+        <b className="text-[14px] truncate">DeCho Agent</b>
+        <Select value={model} onChange={setModel} className="ml-auto w-28 flex-none"
+                options={MODELS.map(([v,lb])=>({value:v,label:lb}))}/>
+        <button onClick={()=>setTheme(theme==='light'?'dark':'light')} title="Đổi nền"
+          className="flex-none w-9 h-9 grid place-items-center rounded-lg text-slate-500 hover:bg-slate-100 dark:hover:bg-slate-800">
+          {theme==='light'
+            ?<svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"/></svg>
+            :<svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/></svg>}
+        </button>
+      </header>
+      <ChatView cfg={MOBILE_CHAT} model={model}/>
+    </div>
+  );
+
+  return (
+    <div className="flex h-screen overflow-hidden">
+      {/* Nền toàn app: phong cảnh DeCho hiện rõ + lớp phủ nhẹ giữ độ tương phản */}
+      <div className="fixed inset-0 -z-10 bg-cover bg-center" style={{backgroundImage:'url(/static/decho-background.jpeg)'}}/>
+      <div className="fixed inset-0 -z-10 bg-white/25 dark:bg-slate-950/65"/>
+      {/* Sidebar */}
+      <aside className="w-60 flex-none relative flex flex-col bg-white/80 dark:bg-slate-900/80 backdrop-blur border-r border-slate-200 dark:border-slate-800">
+        <SidebarParticles/>
+        <div className="relative z-10 flex-1 min-h-0 flex flex-col gap-1 p-3">
+        <div className="flex items-center gap-2.5 px-2.5 pb-3 flex-none">
+          <div className="w-9 h-9 rounded-xl grid place-items-center overflow-hidden bg-gradient-to-br from-emerald-100 to-cyan-100 dark:from-emerald-900 dark:to-cyan-900 border border-slate-200 dark:border-slate-700">
+            <img src={face||"/static/decho.png"} alt="DeCho" className="w-full h-full object-cover"
+                 onError={e=>{e.currentTarget.style.display='none';e.currentTarget.nextSibling.style.display='block'}}/>
+            <span className="text-emerald-600 dark:text-emerald-400" style={{display:'none'}}><NavIcon id="zap"/></span>
+          </div>
+          <b className="text-[14.5px]">DeCho Agent</b>
+          <button onClick={()=>setTheme(theme==='light'?'dark':'light')} title={theme==='light'?'Chuyển nền tối':'Chuyển nền sáng'}
+            className="ml-auto flex-none w-8 h-8 grid place-items-center rounded-lg text-slate-500 hover:text-violet-500 hover:bg-slate-100 dark:hover:bg-slate-800 transition">
+            {theme==='light'
+              ?<svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"/></svg>
+              :<svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/></svg>}
+          </button>
+        </div>
+        <nav className="flex-1 min-h-0 overflow-y-auto flex flex-col gap-1 -mr-2 pr-2">
+        {NAV.map((n,i)=>n.sec
+          ?<div key={i} className="text-[10.5px] font-bold tracking-widest uppercase text-slate-400 px-3.5 pt-3 pb-1 flex-none">{n.sec}</div>
+          :n.link
+            ?<a key={n.id} href={n.id==='seoSheet'?seoSheet:psiSheet} target="_blank" className="flex-none flex items-center gap-2.5 px-3.5 py-2.5 rounded-xl text-sm text-slate-500 hover:bg-slate-100 dark:hover:bg-slate-800 hover:text-inherit transition"><NavIcon id={n.id}/>{n.label}</a>
+            :<button key={n.id} onClick={()=>setView(n.id)}
+               className={"flex-none flex items-center gap-2.5 px-3.5 py-2.5 rounded-xl text-sm text-left transition "+(view===n.id
+                 ?"bg-violet-500/10 text-violet-600 dark:text-violet-400 font-semibold"
+                 :"text-slate-500 hover:bg-slate-100 dark:hover:bg-slate-800 hover:text-inherit")}><NavIcon id={n.id}/>{n.label}</button>)}
+        </nav>
+        <DechoDock showAsk={view!=='chat'}/>
+        </div>
+      </aside>
+
+      {/* Content */}
+      <div className="flex-1 min-h-0 flex flex-col min-w-0">
+        <header className="relative z-30 grid items-center gap-3 px-6 py-3 bg-white/80 dark:bg-slate-900/80 backdrop-blur border-b border-slate-200 dark:border-slate-800" style={{gridTemplateColumns:'1fr auto 1fr'}}>
+          <TopbarParticles/>
+          <div className="relative z-10">
+            <h1 className="text-[15px] font-bold">{TITLES[view]}</h1>
+            <p className="text-[11.5px] text-slate-400 flex items-center gap-1.5 mt-0.5">
+              <span className="w-1.5 h-1.5 rounded-full bg-accent shadow-[0_0_6px_#0ea371] flex-none"/>
+              <span className="truncate"><IconText text={pageSub||meta}/></span></p>
+          </div>
+          <div className="flex items-center gap-2 justify-self-center relative z-10">
+            <label className="text-xs text-slate-400">Model</label>
+            <Select value={model} onChange={setModel} className="w-40"
+                    options={MODELS.map(([v,lb])=>({value:v,label:lb}))}/>
+          </div>
+          <div id="header-actions" className="justify-self-end flex items-center gap-2 min-w-0 relative z-10"/>
+        </header>
+        {view==='home'&&<Overview go={setView}/>}
+        {view==='chat'&&<ChatView cfg={DECHO_CHAT} model={model}/>}
+        {view==='urls'&&<UrlIntel/>}
+        {view==='insights'&&<InsightLab go={setView}/>}
+        {view==='ads'&&<AdsView/>}
+        {view==='dash'&&<Dashboard/>}
+        {view==='config'&&<ConfigView/>}
+      </div>
+      {cfgPw&&<ConfigPwModal payload={cfgPw} onClose={()=>setCfgPw(null)}
+                onDone={r=>{cfgPw.onDone&&cfgPw.onDone(r);setCfgPw(null)}}/>}
+    </div>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById('root')).render(<App/>);

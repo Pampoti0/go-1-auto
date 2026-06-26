@@ -161,6 +161,109 @@ class SystemInsightsUtilitiesTest(unittest.TestCase):
         self.assertEqual(root["hypotheses"][0]["target"], "/product/cloud-server")
         self.assertEqual(experiments["experiments"][0]["type"], "tracking")
 
+    def test_weekly_groups_skip_alerts_derived_from_opportunities(self):
+        old_disk_cache = server._API_DISK_CACHE
+        old_opportunity_report = server._opportunity_report
+        old_tracking_report = server._conversion_tracking_report
+        old_ads_alerts = server._ads_campaign_alerts
+        server._API_DISK_CACHE = False
+        server._invalidate_cache()
+        try:
+            server._opportunity_report = lambda limit=50: {
+                "run": "2026-06",
+                "month": "2026-06",
+                "opportunities": [{
+                    "path": "/blog",
+                    "score": 98,
+                    "sources": ["PSI", "SEO"],
+                    "evidence": ["PSI mobile 43.0/100", "LCP 26704ms"],
+                    "confidence": "medium",
+                }],
+            }
+            server._conversion_tracking_report = lambda days=30: {"health": "ok", "issues": []}
+            server._ads_campaign_alerts = lambda days=7: []
+
+            report = server._weekly_autopilot_report()
+        finally:
+            server._invalidate_cache()
+            server._API_DISK_CACHE = old_disk_cache
+            server._opportunity_report = old_opportunity_report
+            server._conversion_tracking_report = old_tracking_report
+            server._ads_campaign_alerts = old_ads_alerts
+
+        self.assertEqual(report["summary"]["alerts"], 0)
+        group = report["entity_groups"][0]
+        self.assertNotIn("alerts", group["detail_counts"])
+        self.assertEqual(group["detail_counts"]["opportunities"], 1)
+
+    def test_insight_entity_groups_merge_cross_tab_details(self):
+        groups = server._insight_entity_groups(
+            actions=[{
+                "target": "/product/cloud-server/",
+                "title": "Fix cloud server",
+                "priority": "P1",
+                "why": "LCP cao",
+                "confidence": "medium",
+                "source": "Weekly",
+            }],
+            alerts=[{
+                "path": "/product/cloud-server",
+                "lv": "high",
+                "text": "/product/cloud-server: score cao",
+                "evidence": ["Alert evidence"],
+                "confidence": "high",
+                "source": "PSI",
+                "score": 90,
+            }],
+            opportunities=[{
+                "path": "/product/cloud-server",
+                "score": 88,
+                "sources": ["PSI", "SEO"],
+                "evidence": ["Opportunity evidence"],
+                "confidence": "medium",
+            }],
+            root_causes=[{
+                "target": "/product/cloud-server",
+                "score": 86,
+                "sources": ["Tracking"],
+                "root_causes": ["Tracking thiếu tín hiệu"],
+                "evidence": ["Root evidence"],
+                "confidence": "high",
+            }],
+            experiments=[{
+                "target": "/product/cloud-server",
+                "title": "Experiment cloud server",
+                "priority_score": 84,
+                "baseline": ["Experiment baseline"],
+                "confidence": "medium",
+                "sources": ["Experiment"],
+            }],
+            tracking_issues=[{
+                "path": "/product/cloud-server",
+                "lv": "high",
+                "score": 92,
+                "text": "Missing conversion",
+                "evidence": ["Tracking evidence"],
+                "confidence": "high",
+            }],
+            limit=10,
+        )
+
+        self.assertEqual(len(groups), 1)
+        group = groups[0]
+        self.assertEqual(group["key"], "/product/cloud-server")
+        self.assertEqual(group["priority"], "P0")
+        self.assertEqual(group["score"], 92)
+        self.assertEqual(group["confidence"], "high")
+        self.assertEqual(group["sources"], ["Experiment", "PSI", "SEO", "Tracking", "Weekly"])
+        self.assertEqual(group["detail_counts"]["actions"], 1)
+        self.assertEqual(group["detail_counts"]["alerts"], 1)
+        self.assertEqual(group["detail_counts"]["opportunities"], 1)
+        self.assertEqual(group["detail_counts"]["root_causes"], 1)
+        self.assertEqual(group["detail_counts"]["experiments"], 1)
+        self.assertEqual(group["detail_counts"]["tracking_issues"], 1)
+        self.assertIn("Tracking evidence", group["evidence"])
+
     def test_insight_paths_are_canonical_without_trailing_slash(self):
         self.assertEqual(server._path_only("https://greennode.ai/blog/"), "/blog")
         self.assertEqual(server._path_only("https://greennode.ai/blog?utm_source=x"), "/blog")
@@ -228,13 +331,32 @@ class SystemInsightsUtilitiesTest(unittest.TestCase):
 
     def test_repair_pagespeed_report_prefix_fixes_clipped_titles(self):
         cases = {
-            "Speed Report — greennode.ai": "PageSpeed Report — greennode.ai",
+            "Speed Report — greennode.ai": "Báo cáo PageSpeed — greennode.ai",
+            "PageSpeed Report — greennode.ai": "Báo cáo PageSpeed — greennode.ai",
+            "Actions ... PageSpeed Report — greennode.ai": "Actions ... Báo cáo PageSpeed — greennode.ai",
             "áo cáo PageSpeed — greennode.ai": "Báo cáo PageSpeed — greennode.ai",
             "  ## ổng quan\n\nScore": "  ## Tổng quan\n\nScore",
         }
         for raw, expected in cases.items():
             with self.subTest(raw=raw):
                 self.assertEqual(server._repair_pagespeed_report_prefix(raw), expected)
+
+    def test_pagespeed_report_guard_replaces_raw_analysis_code(self):
+        headers = ["Timestamp", "URL", "Strategy", "Performance Score", "FCP (ms)", "LCP (ms)", "CLS", "TBT (ms)"]
+        rows = [
+            ["2026-06-25 09:00:00", "https://greennode.ai/blog", "MOBILE", "43", "900", "26704", "0.12", "801"],
+            ["2026-06-25 09:00:00", "https://greennode.ai/product/vdb-postgresql", "MOBILE", "35", "1200", "4652", "1.002", "883"],
+            ["2026-06-25 09:00:00", "https://greennode.ai/", "DESKTOP", "75", "500", "882", "0.019", "460"],
+        ]
+        raw = 'Đệ sẽ phân tích. ```python\nimport pandas as pd\ndata = """Timestamp | URL | Strategy"""\nprint(data)\n```'
+
+        cleaned = server._guard_pagespeed_report_text(raw, "2026-06", headers, rows)
+
+        self.assertIn("Báo cáo PageSpeed (2026-06)", cleaned)
+        self.assertIn("/blog", cleaned)
+        self.assertIn("Evidence: PSI Sheet tab 2026-06", cleaned)
+        self.assertNotIn("```", cleaned)
+        self.assertNotIn("import pandas", cleaned)
 
     def test_repair_response_prefix_fixes_common_clipped_text(self):
         cases = {
@@ -249,6 +371,28 @@ class SystemInsightsUtilitiesTest(unittest.TestCase):
         for raw, expected in cases.items():
             with self.subTest(raw=raw):
                 self.assertEqual(server._repair_response_prefix(raw), expected)
+
+    def test_clean_reply_strips_thinking_and_repairs_prefix(self):
+        self.assertEqual(
+            server._clean_reply("<think>draft</think>ưới đây là báo cáo"),
+            "Dưới đây là báo cáo",
+        )
+        self.assertEqual(
+            server._clean_reply("Ảnh hưởng: UX kém, có thể误触 CTA."),
+            "Ảnh hưởng: UX kém, có thể bấm nhầm CTA.",
+        )
+        self.assertEqual(
+            server._clean_reply("Nội dung ổn 你好 nhưng cần tối ưu LCP."),
+            "Nội dung ổn nhưng cần tối ưu LCP.",
+        )
+
+    def test_psi_comparison_reply_uses_decho_voice(self):
+        reply = server._psi_comparison_reply()
+        self.assertIn("Đệ", reply)
+        self.assertIn("Đại ca", reply)
+        self.assertIn("không có một mốc so sánh cố định", reply)
+        self.assertNotIn("DeCho không dùng", reply)
+        self.assertNotIn("Nó đang", reply)
 
     def test_comparison_period_followup_does_not_route_to_pagespeed(self):
         messages = [
@@ -308,7 +452,7 @@ class SystemInsightsUtilitiesTest(unittest.TestCase):
             {"role": "assistant", "content": "Đọc 150 dòng từ PSI Sheet tab 2026-06. LCP, CLS, TBT và Performance Score."}
         ])
         self.assertIn("PageSpeed", reply)
-        self.assertIn("không dùng một mốc so sánh cố định", reply)
+        self.assertIn("không có một mốc so sánh cố định", reply)
         self.assertIn("các lần đo PSI", reply)
         self.assertNotIn("không có kỳ so sánh tháng", reply)
         self.assertNotIn("SEO", reply)
@@ -320,7 +464,7 @@ class SystemInsightsUtilitiesTest(unittest.TestCase):
             {"role": "assistant", "content": "PageSpeed Report — Tháng 2026-06\nBlog/Tutorial LCP bùng nổ. Nếu đây là trang quan trọng (SEO blog), cần ưu tiên ngay. PSI Sheet tab 2026-06, LCP, CLS, TBT."},
         ])
         self.assertIn("PageSpeed", reply)
-        self.assertIn("không dùng một mốc so sánh cố định", reply)
+        self.assertIn("không có một mốc so sánh cố định", reply)
         self.assertNotIn("SEO", reply)
         self.assertNotIn("SEO tháng 2026-06", reply)
         self.assertNotIn("2026-05", reply)
@@ -331,7 +475,7 @@ class SystemInsightsUtilitiesTest(unittest.TestCase):
             {"role": "assistant", "content": "Với báo cáo PageSpeed vừa rồi, DeCho không dùng một mốc so sánh cố định. Nó đang đọc các lần đo PSI có trong tab hiện tại. Nếu thấy giảm/tăng/phục hồi trong PageSpeed thì đó là so giữa các lần đo PSI đang có."},
         ])
         self.assertIn("PageSpeed", reply)
-        self.assertIn("không dùng một mốc so sánh cố định", reply)
+        self.assertIn("không có một mốc so sánh cố định", reply)
         self.assertNotIn("SEO", reply)
         self.assertNotIn("SEO tháng 2026-06", reply)
         self.assertNotIn("2026-05", reply)
@@ -390,7 +534,7 @@ class SystemInsightsUtilitiesTest(unittest.TestCase):
         server._remember_data_context(uid, sid, "psi", "2026-06")
         reply = server._comparison_period_reply(noisy_history, uid, sid)
         self.assertIn("PageSpeed", reply)
-        self.assertIn("không dùng một mốc so sánh cố định", reply)
+        self.assertIn("không có một mốc so sánh cố định", reply)
         self.assertNotIn("SEO", reply)
         self.assertNotIn("SEO tháng 2026-06", reply)
 
@@ -398,7 +542,7 @@ class SystemInsightsUtilitiesTest(unittest.TestCase):
         reply = server._comparison_period_reply(noisy_history, uid, sid)
         self.assertIn("SEO tháng 2026-06", reply)
         self.assertIn("2026-05", reply)
-        self.assertNotIn("không dùng một mốc so sánh cố định", reply)
+        self.assertNotIn("không có một mốc so sánh cố định", reply)
 
     def test_session_data_context_is_scoped_by_user_and_session(self):
         sid = "shared-session-id"
@@ -416,6 +560,37 @@ class SystemInsightsUtilitiesTest(unittest.TestCase):
         self.assertIn("PageSpeed", reply_a)
         self.assertNotIn("SEO", reply_a)
         self.assertIn("SEO tháng 2026-06", reply_b)
+
+    def test_session_data_context_persists_to_disk_with_ttl(self):
+        old_file = server._SESSION_CONTEXT_FILE
+        old_ttl = server._SESSION_CONTEXT_TTL
+        old_loaded = server._SESSION_CONTEXT_LOADED
+        old_context = dict(server._SESSION_DATA_CONTEXT)
+        try:
+            with tempfile.TemporaryDirectory() as td:
+                server._SESSION_CONTEXT_FILE = Path(td) / "session_context.json"
+                server._SESSION_CONTEXT_TTL = 3600
+                server._SESSION_CONTEXT_LOADED = False
+                server._SESSION_DATA_CONTEXT.clear()
+
+                server._remember_data_context("persist-user", "persist-session", "psi", "2026-06")
+                self.assertTrue(server._SESSION_CONTEXT_FILE.exists())
+
+                server._SESSION_DATA_CONTEXT.clear()
+                server._SESSION_CONTEXT_LOADED = False
+                reply = server._comparison_period_reply([], "persist-user", "persist-session")
+                self.assertIn("PageSpeed", reply)
+
+                key = server._data_context_key("persist-user", "persist-session")
+                server._SESSION_DATA_CONTEXT[key] = {"kind": "seo", "month": "2026-06", "ts": time.time() - 120}
+                server._SESSION_CONTEXT_TTL = 60
+                self.assertIsNone(server._session_data_context("persist-user", "persist-session"))
+        finally:
+            server._SESSION_CONTEXT_FILE = old_file
+            server._SESSION_CONTEXT_TTL = old_ttl
+            server._SESSION_CONTEXT_LOADED = old_loaded
+            server._SESSION_DATA_CONTEXT.clear()
+            server._SESSION_DATA_CONTEXT.update(old_context)
 
     def test_pending_confirmation_is_scoped_by_user_and_session(self):
         sid = "shared-session-id"

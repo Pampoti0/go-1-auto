@@ -516,7 +516,7 @@ def _cache_write_disk(key: str, val):
     try:
         _API_CACHE_DIR.mkdir(parents=True, exist_ok=True)
         p = _cache_disk_path(key)
-        tmp = p.with_suffix(p.suffix + ".tmp")
+        tmp = p.with_name(f"{p.name}.{os.getpid()}.{threading.get_ident()}.{time.time_ns()}.tmp")
         tmp.write_text(json.dumps({"key": key, "ts": time.time(), "value": val}, ensure_ascii=False), encoding="utf-8")
         tmp.replace(p)
     except Exception as e:  # noqa: BLE001
@@ -825,6 +825,47 @@ def api_experiments(limit: int = 8):
         return {"error": _friendly_error_text(e), "experiments": []}
 
 
+def _weekly_action_from_alert(alert: dict) -> dict:
+    target = alert.get("path") or alert.get("name") or alert.get("target") or ""
+    text = str(alert.get("text") or "").strip()
+    evidence = "; ".join((alert.get("evidence") or [])[:2])
+    src = str(alert.get("source") or "Alerts")
+    lowered = " ".join([text, src, evidence]).lower()
+    if "0 conversion" in lowered or "conversion" in lowered:
+        title = f"QA conversion tracking cho {target or text.split(':', 1)[0] or 'campaign/landing page'}"
+        why = "Có spend/click nhưng conversion bằng 0. Kiểm tra Google Ads conversion action, GTM trigger, GA4 key event và form/CTA end-to-end."
+    elif str(alert.get("derived_from") or "") == "opportunity" or "opportunity score" in lowered:
+        title = f"Ưu tiên xử lý opportunity score cao cho {target or text.split(':', 1)[0] or 'trang liên quan'}"
+        why = evidence or "Opportunity score cao, cần xử lý nguồn evidence mạnh nhất trước."
+    elif "clarity" in lowered:
+        title = "Xem heatmap/recording Clarity và sửa điểm friction"
+        why = evidence or text
+    else:
+        title = f"Xử lý cảnh báo: {text}" if text else "Xử lý cảnh báo"
+        why = evidence
+    return {
+        "priority": "P0" if alert.get("lv") == "high" else "P1",
+        "title": title,
+        "why": why,
+        "confidence": alert.get("confidence") or "medium",
+        "source": src,
+        "target": target,
+    }
+
+
+def _weekly_action_from_tracking_issue(issue: dict) -> dict:
+    target = issue.get("path") or issue.get("name") or issue.get("scope") or "tracking"
+    evidence = "; ".join((issue.get("evidence") or [])[:2])
+    return {
+        "priority": "P0" if issue.get("lv") == "high" else "P1",
+        "title": f"QA tracking cho {target}",
+        "why": evidence or issue.get("text") or "Kiểm tra conversion tracking.",
+        "confidence": issue.get("confidence") or "medium",
+        "source": "Tracking",
+        "target": target,
+    }
+
+
 def _weekly_autopilot_report() -> dict:
     # Build the heavy cross-source snapshot once, then derive the other reports
     # from it. This keeps the first Insights load from repeating Ads/Sheet reads
@@ -834,21 +875,15 @@ def _weekly_autopilot_report() -> dict:
     _cache_put(_insight_cache_key("opportunities:30"), 300, _slice_opportunity_report(opportunity_base, 30))
     tracking = _cached(_insight_cache_key("tracking_audit:30"), 300, lambda: _conversion_tracking_report(30))
     alerts = _cache_put(_insight_cache_key("alerts:50"), 300, _alert_report_from_opportunity(opportunity_base, 50))
+    weekly_alerts = [a for a in (alerts.get("alerts") or []) if a.get("derived_from") != "opportunity"]
     root = _cache_put(_insight_cache_key("root_cause:12"), 300, _root_cause_report_from_inputs(opportunity_base, tracking, 12))
     _cache_put(_insight_cache_key("root_cause:20"), 300, _root_cause_report_from_inputs(opportunity_base, tracking, 20))
     experiments = _cache_put(_insight_cache_key("experiments:8"), 300, _experiment_report_from_inputs(opportunity_base, tracking, 8))
     _cache_put(_insight_cache_key("experiments:12"), 300, _experiment_report_from_inputs(opportunity_base, tracking, 12))
 
     actions: list[dict] = []
-    for a in (alerts.get("alerts") or [])[:8]:
-        actions.append({
-            "priority": "P0" if a.get("lv") == "high" else "P1",
-            "title": a.get("text") or "Alert cần xử lý",
-            "why": "; ".join((a.get("evidence") or [])[:2]),
-            "confidence": a.get("confidence") or "medium",
-            "source": a.get("source") or "Alerts",
-            "target": a.get("path") or a.get("name") or "",
-        })
+    for a in weekly_alerts[:8]:
+        actions.append(_weekly_action_from_alert(a))
     for o in (opportunities.get("opportunities") or [])[:8]:
         actions.append({
             "priority": "P1" if _num_value(o.get("score")) >= 70 else "P2",
@@ -859,14 +894,7 @@ def _weekly_autopilot_report() -> dict:
             "target": o.get("path") or "",
         })
     for i in (tracking.get("issues") or [])[:5]:
-        actions.append({
-            "priority": "P0" if i.get("lv") == "high" else "P1",
-            "title": i.get("text") or "Kiểm tra tracking",
-            "why": "; ".join((i.get("evidence") or [])[:2]),
-            "confidence": i.get("confidence") or "medium",
-            "source": "Tracking",
-            "target": i.get("path") or i.get("name") or i.get("scope") or "",
-        })
+        actions.append(_weekly_action_from_tracking_issue(i))
 
     rank = {"P0": 0, "P1": 1, "P2": 2}
     deduped, seen = [], set()
@@ -877,27 +905,39 @@ def _weekly_autopilot_report() -> dict:
         seen.add(key)
         deduped.append(item)
 
+    entity_groups = _insight_entity_groups(
+        actions=deduped,
+        alerts=weekly_alerts,
+        opportunities=opportunities.get("opportunities") or [],
+        root_causes=root.get("hypotheses") or [],
+        experiments=experiments.get("experiments") or [],
+        tracking_issues=tracking.get("issues") or [],
+        limit=12,
+    )
+
     return {
         "generated_at": app_time.iso_now(),
         "timezone": app_time.APP_TZ_NAME,
         "summary": {
-            "alerts": len(alerts.get("alerts") or []),
-            "high_alerts": len([a for a in (alerts.get("alerts") or []) if a.get("lv") == "high"]),
+            "alerts": len(weekly_alerts),
+            "high_alerts": len([a for a in weekly_alerts if a.get("lv") == "high"]),
             "opportunities": len(opportunities.get("opportunities") or []),
             "tracking_health": tracking.get("health"),
             "root_hypotheses": len(root.get("hypotheses") or []),
             "experiments": len(experiments.get("experiments") or []),
+            "entity_groups": len(entity_groups),
         },
+        "entity_groups": entity_groups,
         "next_actions": deduped[:10],
         "top_opportunities": (opportunities.get("opportunities") or [])[:8],
-        "top_alerts": (alerts.get("alerts") or [])[:8],
+        "top_alerts": weekly_alerts[:8],
         "tracking_issues": (tracking.get("issues") or [])[:8],
         "root_causes": (root.get("hypotheses") or [])[:8],
         "experiments": (experiments.get("experiments") or [])[:8],
         "_meta": _report_meta(
             "Alerts + Opportunity + Tracking + Root Cause + Experiments",
             window="weekly planning snapshot",
-            cache_key=_insight_cache_key("weekly_autopilot"),
+            cache_key=_insight_cache_key("weekly_autopilot:v5"),
             note="Read-only planning report; does not create tasks or change campaigns.",
         ),
     }
@@ -933,7 +973,7 @@ def _weekly_autopilot_text(report: dict, max_items: int = 8) -> str:
 @app.get("/api/weekly-autopilot")
 def api_weekly_autopilot():
     try:
-        key = _insight_cache_key("weekly_autopilot")
+        key = _insight_cache_key("weekly_autopilot:v5")
         out = _cached(key, 300, _weekly_autopilot_report, allow_stale=True)
         return _with_meta(out, "Alerts + Opportunity + Tracking + Root Cause + Experiments", window="weekly planning snapshot", cache_key=key)
     except Exception as e:  # noqa: BLE001
@@ -1624,6 +1664,8 @@ def _looks_comparison_period_answer(text: str) -> bool:
     return (
         ("thang lien truoc" in norm and ("so voi" in norm or "dang so voi" in norm or "so sanh" in norm))
         or "khong co baseline co dinh" in norm
+        or "khong co mot moc so sanh co dinh" in norm
+        or "khong co moc so sanh co dinh" in norm
         or "khong dung mot moc so sanh co dinh" in norm
         or ("cac lan do psi" in norm and "moc so sanh co dinh" in norm)
     )
@@ -1675,14 +1717,19 @@ def _latest_data_context(history: list[dict] | None) -> str | None:
 
 def _psi_comparison_reply() -> str:
     return (
-        "Với báo cáo PageSpeed vừa rồi, DeCho **không dùng một mốc so sánh cố định**. "
-        "Nó đang đọc các lần đo PSI có trong tab hiện tại rồi nhận xét theo chuỗi đo: "
-        "điểm mới nhất, điểm thấp/cao, xu hướng giữa các lần đo, và các URL đang kém.\n\n"
-        "Nói gọn: nếu thấy câu 'giảm/tăng/phục hồi' trong PageSpeed, đó là so giữa các lần đo PSI đang có."
+        "PageSpeed **không có một mốc so sánh cố định** kiểu tháng trước/tháng này đâu Đại ca.\n\n"
+        "Đệ đang nhìn các lần đo PSI trong tab hiện tại: lần mới nhất, lần cao/thấp nhất, "
+        "xu hướng giữa các lần đo, và URL nào đang tụt.\n\n"
+        "Nói gọn: khi Đệ nói “giảm”, “tăng” hoặc “phục hồi” trong PageSpeed, "
+        "đó là so giữa các lần đo PSI đang có trong sheet."
     )
 
 
 _SESSION_DATA_CONTEXT: dict[str, dict] = {}
+_SESSION_CONTEXT_LOCK = threading.Lock()
+_SESSION_CONTEXT_FILE = _Path(os.getenv("SESSION_CONTEXT_FILE", ".cache/session_context.json"))
+_SESSION_CONTEXT_TTL = int(os.getenv("SESSION_CONTEXT_TTL", "86400"))
+_SESSION_CONTEXT_LOADED = False
 
 
 def _data_context_key(user_id: str | None, session_id: str | None) -> str | None:
@@ -1691,19 +1738,75 @@ def _data_context_key(user_id: str | None, session_id: str | None) -> str | None
     return f"{user_id or '_anon'}:{session_id}"
 
 
+def _session_context_now() -> float:
+    return time.time()
+
+
+def _session_context_is_fresh(ctx: dict, now: float | None = None) -> bool:
+    try:
+        ts = float(ctx.get("ts") or 0)
+    except (TypeError, ValueError):
+        return False
+    ttl = max(60, int(_SESSION_CONTEXT_TTL or 86400))
+    return bool(ctx.get("kind") in {"seo", "psi"} and ts and (now or _session_context_now()) - ts < ttl)
+
+
+def _load_session_contexts(force: bool = False):
+    global _SESSION_CONTEXT_LOADED
+    with _SESSION_CONTEXT_LOCK:
+        if _SESSION_CONTEXT_LOADED and not force:
+            return
+        _SESSION_CONTEXT_LOADED = True
+        try:
+            payload = json.loads(_SESSION_CONTEXT_FILE.read_text(encoding="utf-8"))
+        except (FileNotFoundError, json.JSONDecodeError, OSError):
+            return
+        now = _session_context_now()
+        for key, ctx in (payload.get("contexts") or {}).items():
+            if isinstance(key, str) and isinstance(ctx, dict) and _session_context_is_fresh(ctx, now):
+                _SESSION_DATA_CONTEXT[key] = {"kind": ctx.get("kind"), "month": ctx.get("month") or "", "ts": float(ctx.get("ts") or now)}
+
+
+def _save_session_contexts():
+    if not _SESSION_CONTEXT_FILE:
+        return
+    now = _session_context_now()
+    fresh = {k: v for k, v in _SESSION_DATA_CONTEXT.items() if isinstance(v, dict) and _session_context_is_fresh(v, now)}
+    _SESSION_DATA_CONTEXT.clear()
+    _SESSION_DATA_CONTEXT.update(fresh)
+    try:
+        _SESSION_CONTEXT_FILE.parent.mkdir(parents=True, exist_ok=True)
+        tmp = _SESSION_CONTEXT_FILE.with_suffix(_SESSION_CONTEXT_FILE.suffix + ".tmp")
+        tmp.write_text(json.dumps({"contexts": fresh}, ensure_ascii=False), encoding="utf-8")
+        tmp.replace(_SESSION_CONTEXT_FILE)
+    except Exception as e:  # noqa: BLE001
+        log.warning("Session context cache ghi lỗi (bỏ qua): %s: %s", type(e).__name__, e)
+
+
 def _remember_data_context(user_id: str | None, session_id: str | None, kind: str, month: str | None = None):
     key = _data_context_key(user_id, session_id)
     if not key or kind not in {"seo", "psi"}:
         return
-    _SESSION_DATA_CONTEXT[key] = {"kind": kind, "month": month or ""}
+    _load_session_contexts()
+    with _SESSION_CONTEXT_LOCK:
+        _SESSION_DATA_CONTEXT[key] = {"kind": kind, "month": month or "", "ts": _session_context_now()}
+        _save_session_contexts()
 
 
 def _session_data_context(user_id: str | None, session_id: str | None) -> dict | None:
     key = _data_context_key(user_id, session_id)
     if not key:
         return None
-    ctx = _SESSION_DATA_CONTEXT.get(key)
-    return dict(ctx) if ctx else None
+    _load_session_contexts()
+    with _SESSION_CONTEXT_LOCK:
+        ctx = _SESSION_DATA_CONTEXT.get(key)
+        if not ctx:
+            return None
+        if not _session_context_is_fresh(ctx):
+            _SESSION_DATA_CONTEXT.pop(key, None)
+            _save_session_contexts()
+            return None
+        return {"kind": ctx.get("kind"), "month": ctx.get("month") or ""}
 
 
 def _seo_comparison_reply(month: str | None, source: str) -> str:
@@ -1931,9 +2034,12 @@ def _repair_response_prefix(text: str) -> str:
 def _repair_pagespeed_report_prefix(text: str) -> str:
     """Fix occasional clipped first characters in PageSpeed report titles."""
     text = _repair_response_prefix(text)
+    text = text.replace("PageSpeed Report", "Báo cáo PageSpeed").replace("Speed Report", "Báo cáo PageSpeed")
     fixes = (
-        ("# Speed Report", "# PageSpeed Report"),
-        ("Speed Report", "PageSpeed Report"),
+        ("# PageSpeed Report", "# Báo cáo PageSpeed"),
+        ("PageSpeed Report", "Báo cáo PageSpeed"),
+        ("# Speed Report", "# Báo cáo PageSpeed"),
+        ("Speed Report", "Báo cáo PageSpeed"),
         ("# áo cáo PageSpeed", "# Báo cáo PageSpeed"),
         ("áo cáo PageSpeed", "Báo cáo PageSpeed"),
         ("# 📊 áo cáo PageSpeed", "# 📊 Báo cáo PageSpeed"),
@@ -1945,6 +2051,36 @@ def _repair_pagespeed_report_prefix(text: str) -> str:
         if body.startswith(bad):
             return leading + good + body[len(bad):]
     return text
+
+
+def _repair_stray_foreign_text(text: str) -> str:
+    """Remove or translate accidental non-Vietnamese fragments in model replies."""
+    import re as _re
+
+    fixes = (
+        ("误触", "bấm nhầm"),
+    )
+    for bad, good in fixes:
+        text = text.replace(bad, f" {good} ")
+    text = _re.sub(r"[ \t]{2,}", " ", text)
+    text = _re.sub(r"\s+([,.;:!?])", r"\1", text)
+
+    cjk_re = _re.compile(r"[\u3400-\u4dbf\u4e00-\u9fff\u3040-\u30ff\uac00-\ud7af]+")
+    if not cjk_re.search(text):
+        return text
+    # DeCho trả lời tiếng Việt; nếu còn ký tự CJK lạc vào một câu Việt/domain thì bỏ cụm đó.
+    looks_vietnamese_or_domain = bool(_re.search(r"[ăâđêôơưáàảãạéèẻẽẹíìỉĩịóòỏõọúùủũụýỳỷỹỵ]|Đệ|Đại ca|PageSpeed|SEO|Google", text, _re.I))
+    if not looks_vietnamese_or_domain:
+        return text
+    text = cjk_re.sub("", text)
+    text = _re.sub(r"[ \t]{2,}", " ", text)
+    text = _re.sub(r"\s+([,.;:!?])", r"\1", text)
+    return text
+
+
+def _clean_reply(text: str | None) -> str:
+    """Common cleanup for every model/user-visible final reply."""
+    return _repair_stray_foreign_text(_repair_response_prefix(_strip_think(str(text or "")))).strip()
 
 
 def _results_prompt(tab: str, headers: list, rows: list) -> str:
@@ -1966,6 +2102,148 @@ def _results_prompt(tab: str, headers: list, rows: list) -> str:
     )
 
 
+def _looks_like_raw_analysis_leak(text: str) -> bool:
+    import re
+
+    raw = str(text or "")
+    low = raw.lower()
+    leak_markers = (
+        "```python", "import pandas", "dataframe", "pd.", "timestamp | url | strategy",
+        "data = \"\"\"", "read_csv", "to_markdown", "print(", "```py",
+    )
+    return (
+        any(m in low for m in leak_markers)
+        or len(raw) > 5000
+        or len(re.findall(r"https?://", raw)) >= 8
+    )
+
+
+def _pagespeed_summary_text(tab: str, headers: list, rows: list) -> str:
+    def idx(*names, default=None):
+        lowered = [str(h or "").strip().lower() for h in headers or []]
+        for name in names:
+            needle = str(name).lower()
+            for i, h in enumerate(lowered):
+                if needle == h or needle in h:
+                    return i
+        return default
+
+    ts_i = idx("timestamp", default=0 if headers else None)
+    url_i = idx("url", "page", default=1 if len(headers or []) > 1 else 0)
+    strategy_i = idx("strategy", "device")
+    score_i = idx("performance score", "score")
+    lcp_i = idx("lcp")
+    cls_i = idx("cls")
+    tbt_i = idx("tbt")
+
+    def cell(row, i, default=""):
+        return row[i] if i is not None and i < len(row) else default
+
+    def num(row, i):
+        return _num_value(cell(row, i, ""), default=None)
+
+    usable = [r for r in rows or [] if r]
+    if ts_i is not None and usable:
+        stamps = [str(cell(r, ts_i, "")).strip() for r in usable if str(cell(r, ts_i, "")).strip()]
+        latest_ts = sorted(stamps)[-1] if stamps else ""
+        latest_rows = [r for r in usable if str(cell(r, ts_i, "")).strip() == latest_ts] if latest_ts else usable
+    else:
+        latest_ts, latest_rows = "", usable
+
+    def avg_score(strategy_name):
+        vals = [
+            num(r, score_i) for r in latest_rows
+            if score_i is not None and str(cell(r, strategy_i, "")).upper() == strategy_name
+        ]
+        vals = [v for v in vals if isinstance(v, (int, float))]
+        return round(sum(vals) / len(vals)) if vals else None
+
+    scored = [
+        (num(r, score_i), r) for r in latest_rows
+        if isinstance(num(r, score_i), (int, float))
+    ]
+    scored.sort(key=lambda x: x[0])
+    worst = scored[:3]
+
+    issue_rows = []
+    for r in latest_rows:
+        path = _path_only(str(cell(r, url_i, "")))
+        strategy = str(cell(r, strategy_i, "") or "").upper() or "—"
+        lcp = num(r, lcp_i)
+        cls = num(r, cls_i)
+        tbt = num(r, tbt_i)
+        issues = []
+        if isinstance(lcp, (int, float)) and lcp >= 4000:
+            issues.append(f"LCP {round(lcp):,}ms".replace(",", "."))
+        if isinstance(cls, (int, float)) and cls >= 0.1:
+            issues.append(f"CLS {cls:g}")
+        if isinstance(tbt, (int, float)) and tbt >= 600:
+            issues.append(f"TBT {round(tbt):,}ms".replace(",", "."))
+        if issues:
+            issue_rows.append((path, strategy, "; ".join(issues)))
+    seen_issue, compact_issues = set(), []
+    for path, strategy, issue in issue_rows:
+        key = (path, issue)
+        if key in seen_issue:
+            continue
+        seen_issue.add(key)
+        compact_issues.append(f"{path} ({strategy}): {issue}")
+        if len(compact_issues) >= 4:
+            break
+
+    mobile_avg, desktop_avg = avg_score("MOBILE"), avg_score("DESKTOP")
+    avg_bits = []
+    if mobile_avg is not None:
+        avg_bits.append(f"Mobile TB **{mobile_avg}**")
+    if desktop_avg is not None:
+        avg_bits.append(f"Desktop TB **{desktop_avg}**")
+
+    worst_bits = []
+    for score, r in worst:
+        path = _path_only(str(cell(r, url_i, "")))
+        strategy = str(cell(r, strategy_i, "") or "").title() or "—"
+        metrics = []
+        lcp = num(r, lcp_i)
+        cls = num(r, cls_i)
+        tbt = num(r, tbt_i)
+        if isinstance(lcp, (int, float)):
+            metrics.append(f"LCP {round(lcp):,}ms".replace(",", "."))
+        if isinstance(cls, (int, float)):
+            metrics.append(f"CLS {cls:g}")
+        if isinstance(tbt, (int, float)):
+            metrics.append(f"TBT {round(tbt):,}ms".replace(",", "."))
+        worst_bits.append(f"{path} ({strategy}) score **{round(score)}**" + (f" — {', '.join(metrics)}" if metrics else ""))
+
+    lines = [
+        f"**Báo cáo PageSpeed ({tab})**",
+        f"- Đã đọc **{len(usable)} dòng** từ PSI Sheet" + (f"; lần đo mới nhất **{latest_ts}** có {len(latest_rows)} dòng." if latest_ts else "."),
+    ]
+    if avg_bits:
+        lines.append("- " + "; ".join(avg_bits) + ".")
+    if worst_bits:
+        lines.append("- Trang cần chú ý: " + "; ".join(worst_bits[:3]) + ".")
+    if compact_issues:
+        lines.append("- Bất thường chính: " + "; ".join(compact_issues) + ".")
+    lines.extend([
+        "",
+        "**Nên làm tiếp**",
+        "1. Ưu tiên xử lý URL có score thấp hoặc LCP/CLS/TBT cao nhất.",
+        "2. Với LCP cao: tối ưu ảnh/hero, preload tài nguyên chính, giảm render-blocking.",
+        "3. Với CLS/TBT cao: cố định kích thước layout và defer JS không critical.",
+        "",
+        f"Evidence: PSI Sheet tab {tab}, {len(usable)} dòng. Confidence: medium.",
+        "Nếu Đại ca muốn số mới nhất thì nói **chạy kiểm tra ngay**, Đệ đo liền.",
+    ])
+    return "\n".join(lines)
+
+
+def _guard_pagespeed_report_text(text: str, tab: str, headers: list, rows: list) -> str:
+    repaired = _repair_pagespeed_report_prefix(text)
+    if _looks_like_raw_analysis_leak(repaired):
+        return _pagespeed_summary_text(tab, headers, rows)
+    return repaired
+
+
 def _analyze_results(question: str, model: str, tab: str, headers: list, rows: list) -> str:
     """Bản non-stream (dùng cho /api/chat cũ)."""
     import httpx
@@ -1985,7 +2263,7 @@ def _analyze_results(question: str, model: str, tab: str, headers: list, rows: l
     if not content:
         reasoning = _strip_think(msg.get("reasoning_content") or msg.get("reasoning") or "")
         content = reasoning or "❌ Model không trả về nội dung phân tích."
-    return content
+    return _guard_pagespeed_report_text(content, tab, headers, rows)
 
 
 def _keyword_intent(message: str) -> dict | None:
@@ -3431,7 +3709,7 @@ async def agent_chat_stream(req: ChatStreamRequest, request: Request = None):
     async def gen():
         def ev(obj):
             if obj.get("type") == "final" and obj.get("text"):
-                obj = {**obj, "text": _repair_response_prefix(str(obj["text"]))}
+                obj = {**obj, "text": _clean_reply(obj["text"])}
                 final_parts.append(str(obj["text"]))
             return f"data: {json.dumps(obj, ensure_ascii=False)}\n\n"
 
@@ -3894,7 +4172,7 @@ async def agent_chat_stream(req: ChatStreamRequest, request: Request = None):
                 _results_prompt(tab, headers, rows) + extra + _proactive_suffix(),
                 include_history=False,
                 buffer_until_final=True,
-                final_transform=_repair_pagespeed_report_prefix,
+                final_transform=lambda text: _guard_pagespeed_report_text(text, tab, headers, rows),
             ):
                 yield chunk
             yield ev({"type": "done"})
@@ -4435,8 +4713,10 @@ def decho_ask(req: DechoAskRequest, request: Request = None):
             def _fmt(s):
                 y, mo, d = s.split("-")
                 return f"{d}/{mo}/{y}"
-            reply = (f"Dạ để Đệ chỉnh filter liền: **{_fmt(rng['start'])} → {_fmt(rng['end'])}**. "
-                     "Số liệu đang lên màn hình đó Đại ca — xem xong cần Đệ phân tích thì hỏi tiếp nha!")
+            reply = _clean_reply(
+                f"Dạ để Đệ chỉnh filter liền: **{_fmt(rng['start'])} → {_fmt(rng['end'])}**. "
+                "Số liệu đang lên màn hình đó Đại ca — xem xong cần Đệ phân tích thì hỏi tiếp nha!"
+            )
             if memory_agent.configured() and req.user_id and req.session_id:
                 threading.Thread(target=memory_agent.persist_turns_safe,
                                  args=(req.user_id, req.session_id,
@@ -4453,14 +4733,14 @@ def decho_ask(req: DechoAskRequest, request: Request = None):
                 ]))
             except Exception as e:  # noqa: BLE001
                 log.warning("Memory identity lookup lỗi (dock, bỏ qua): %s: %s", type(e).__name__, e)
-        reply = _identity_memory_answer(identity_name, _identity_fact_matches(facts, identity_name, trusted_only=True))
+        reply = _clean_reply(_identity_memory_answer(identity_name, _identity_fact_matches(facts, identity_name, trusted_only=True)))
         if memory_agent.configured() and req.user_id and req.session_id:
             threading.Thread(target=memory_agent.persist_turns_safe,
                              args=(req.user_id, req.session_id,
                                    [("user", req.question), ("assistant", reply)]), daemon=True).start()
         return {"reply": reply}
     if _looks_comparison_period_question(req.question):
-        reply = _comparison_period_reply([], req.user_id, req.session_id)
+        reply = _clean_reply(_comparison_period_reply([], req.user_id, req.session_id))
         if memory_agent.configured() and req.user_id and req.session_id:
             threading.Thread(target=memory_agent.persist_turns_safe,
                              args=(req.user_id, req.session_id,
@@ -4468,6 +4748,7 @@ def decho_ask(req: DechoAskRequest, request: Request = None):
         return {"reply": reply}
     relation_reply = _metric_relationship_reply(req.question)
     if relation_reply:
+        relation_reply = _clean_reply(relation_reply)
         if memory_agent.configured() and req.user_id and req.session_id:
             threading.Thread(target=memory_agent.persist_turns_safe,
                              args=(req.user_id, req.session_id,
@@ -4475,6 +4756,7 @@ def decho_ask(req: DechoAskRequest, request: Request = None):
         return {"reply": relation_reply}
     insights_reply = _insights_grounded_reply(req.question)
     if insights_reply:
+        insights_reply = _clean_reply(insights_reply)
         if memory_agent.configured() and req.user_id and req.session_id:
             threading.Thread(target=memory_agent.persist_turns_safe,
                              args=(req.user_id, req.session_id,
@@ -4510,7 +4792,7 @@ def decho_ask(req: DechoAskRequest, request: Request = None):
             headers={"Authorization": f"Bearer {MAAS_API_KEY}"}, timeout=90)
         r.raise_for_status()
         msg = r.json()["choices"][0]["message"]
-        reply = _strip_think(msg.get("content") or "") or _strip_think(msg.get("reasoning_content") or "")
+        reply = _clean_reply(msg.get("content") or "") or _clean_reply(msg.get("reasoning_content") or "")
         reply = reply or "Đệ bí câu này rồi Đại ca 😅"
         if memory_agent.configured() and req.user_id and req.session_id:
             threading.Thread(target=memory_agent.persist_turns_safe,
@@ -4557,7 +4839,7 @@ def decho_vision(req: VisionRequest):
             return {"error": f"Model '{model}' chưa đọc được ảnh (HTTP {r.status_code}). "
                              f"Cần cấu hình MAAS_VISION_MODEL là model hỗ trợ ảnh. Chi tiết: {body}"}
         msg = r.json()["choices"][0]["message"]
-        reply = _strip_think(msg.get("content") or "") or _strip_think(msg.get("reasoning_content") or "")
+        reply = _clean_reply(msg.get("content") or "") or _clean_reply(msg.get("reasoning_content") or "")
         reply = reply or "Đệ nhìn ảnh nhưng chưa mô tả được gì rõ ràng 😅"
         if memory_agent.configured() and req.user_id and req.session_id:
             threading.Thread(target=memory_agent.persist_turns_safe,
@@ -4975,6 +5257,141 @@ def _merge_hypotheses_by_target(hypotheses: list[dict], limit: int) -> list[dict
     return out[:max(1, min(int(limit or 12), 30))]
 
 
+def _insight_entity_ref(*values) -> tuple[str, str, str] | None:
+    """Return (key, label, type) for grouping cross-tab Insights by the same target."""
+    for value in values:
+        raw = str(value or "").strip()
+        if not raw:
+            continue
+        if raw.startswith(("http://", "https://", "/")):
+            path = _path_only(raw)
+            return path, path, "url"
+        low = raw.lower()
+        if low in {"account", "all", "config"}:
+            return low, raw, "account"
+        if low in {"clarity", "project"}:
+            return low, raw, "project"
+        return low, raw, "campaign"
+    return None
+
+
+def _insight_sources(values) -> list[str]:
+    import re
+
+    out = []
+    for value in values or []:
+        for part in re.split(r"[,+]", str(value or "")):
+            item = part.strip()
+            if item:
+                out.append(item)
+    return _unique_strings(out, 8)
+
+
+def _alert_entity_ref(alert: dict) -> tuple[str, str, str] | None:
+    ref = _insight_entity_ref(alert.get("path"), alert.get("target"), alert.get("name"), alert.get("scope"))
+    if ref:
+        return ref
+    text = str(alert.get("text") or "").strip()
+    head = text.split(":", 1)[0].strip()
+    if head.startswith(("http://", "https://", "/")):
+        return _insight_entity_ref(head)
+    if "clarity" in str(alert.get("source") or "").lower() or text.lower().startswith("clarity "):
+        return "clarity", "Clarity", "project"
+    if head and len(head) <= 120:
+        return _insight_entity_ref(head)
+    return None
+
+
+def _insight_add_detail(groups: dict, ref: tuple[str, str, str] | None, section: str, item: dict,
+                        *, score=None, priority=None, confidence=None, sources=None, evidence=None):
+    if not ref:
+        return
+    key, label, typ = ref
+    group = groups.setdefault(key, {
+        "key": key,
+        "label": label,
+        "type": typ,
+        "score": 0,
+        "priority": "P2",
+        "confidence": "low",
+        "sources": [],
+        "evidence": [],
+        "details": {
+            "actions": [],
+            "alerts": [],
+            "opportunities": [],
+            "root_causes": [],
+            "experiments": [],
+            "tracking_issues": [],
+        },
+        "_seen": set(),
+    })
+    group["score"] = round(max(_num_value(group.get("score")), _num_value(score if score is not None else item.get("score") or item.get("priority_score"))))
+    rank = {"P0": 0, "P1": 1, "P2": 2}
+    cur_p = group.get("priority") or "P2"
+    next_p = priority or item.get("priority")
+    if not next_p:
+        next_p = "P0" if str(item.get("lv") or item.get("level") or "").lower() == "high" else ("P1" if group["score"] >= 65 else "P2")
+    if rank.get(str(next_p), 9) < rank.get(str(cur_p), 9):
+        group["priority"] = str(next_p)
+    group["confidence"] = _stronger_confidence(group.get("confidence"), confidence or item.get("confidence"))
+    item_sources = sources if sources is not None else item.get("sources")
+    if isinstance(item_sources, str):
+        item_sources = [item_sources]
+    if not item_sources and item.get("source"):
+        item_sources = [item.get("source")]
+    group["sources"] = sorted(set(group.get("sources") or []) | set(_insight_sources(item_sources or [])))
+    group["evidence"] = _unique_strings([*(group.get("evidence") or []), *(evidence or item.get("evidence") or item.get("baseline") or [])], 8)
+    sig = "|".join([
+        section,
+        str(item.get("title") or item.get("text") or item.get("target") or item.get("path") or item.get("name") or ""),
+        str(item.get("score") or item.get("priority_score") or item.get("priority") or ""),
+    ])
+    if sig not in group["_seen"]:
+        group["_seen"].add(sig)
+        group["details"][section].append(dict(item))
+
+
+def _insight_entity_groups(*, actions: list[dict] | None = None, alerts: list[dict] | None = None,
+                           opportunities: list[dict] | None = None, root_causes: list[dict] | None = None,
+                           experiments: list[dict] | None = None, tracking_issues: list[dict] | None = None,
+                           limit: int = 12) -> list[dict]:
+    groups: dict[str, dict] = {}
+    for item in actions or []:
+        _insight_add_detail(groups, _insight_entity_ref(item.get("target")), "actions", item,
+                            priority=item.get("priority"), confidence=item.get("confidence"), sources=[item.get("source")] if item.get("source") else [])
+    for item in alerts or []:
+        _insight_add_detail(groups, _alert_entity_ref(item), "alerts", item,
+                            priority="P0" if item.get("lv") == "high" else "P1",
+                            confidence=item.get("confidence"), sources=[item.get("source")] if item.get("source") else [])
+    for item in opportunities or []:
+        _insight_add_detail(groups, _insight_entity_ref(item.get("path") or item.get("target")), "opportunities", item,
+                            score=item.get("score"), confidence=item.get("confidence"), sources=item.get("sources") or [])
+    for item in root_causes or []:
+        _insight_add_detail(groups, _insight_entity_ref(item.get("target")), "root_causes", item,
+                            score=item.get("score"), confidence=item.get("confidence"), sources=item.get("sources") or [],
+                            evidence=item.get("evidence") or [])
+    for item in experiments or []:
+        _insight_add_detail(groups, _insight_entity_ref(item.get("target")), "experiments", item,
+                            score=item.get("priority_score"), confidence=item.get("confidence"), sources=item.get("sources") or [],
+                            evidence=item.get("baseline") or [])
+    for item in tracking_issues or []:
+        _insight_add_detail(groups, _insight_entity_ref(item.get("path"), item.get("name"), item.get("scope")), "tracking_issues", item,
+                            score=item.get("score"), priority="P0" if item.get("lv") == "high" else "P1",
+                            confidence=item.get("confidence"), sources=["Tracking"], evidence=item.get("evidence") or [])
+
+    priority_rank = {"P0": 0, "P1": 1, "P2": 2}
+    out = []
+    for group in groups.values():
+        group["sources"] = [s for s in _unique_strings(group.get("sources") or [], 8) if s and s != "None"]
+        group["evidence"] = _unique_strings(group.get("evidence") or [], 8)
+        group["detail_counts"] = {k: len(v or []) for k, v in (group.get("details") or {}).items() if v}
+        group.pop("_seen", None)
+        out.append(group)
+    out.sort(key=lambda g: (priority_rank.get(g.get("priority"), 9), -_num_value(g.get("score")), g.get("label") or ""))
+    return out[:max(1, min(int(limit or 12), 30))]
+
+
 def _psi_latest_by_path() -> tuple[dict, str | None]:
     """{path: {MOBILE, DESKTOP, lcp, cls, tbt}} của lần chạy mới nhất."""
     try:
@@ -5115,21 +5532,25 @@ def _ads_campaign_alerts(days: int = 7) -> list[dict]:
         p = prev_g.get(name, {})
         if c["cost"] >= cost_floor and not c["conv"]:
             alerts.append({"lv": "high", "icon": "money", "go": "ads", "source": "Ads",
+                           "name": name,
                            "text": f"{name}: tiêu {_fmt_money(c['cost'])} trong {days} ngày nhưng 0 conversion",
                            "evidence": [f"Ads {cur.get('start')} → {cur.get('end')}: cost={_fmt_money(c['cost'])}, conversions=0"],
                            "confidence": "high", "score": 90})
         if p.get("cost") and c["cost"] >= cost_floor and c["cost"] / p["cost"] >= 1.5:
             alerts.append({"lv": "med", "icon": "trend", "go": "ads", "source": "Ads",
+                           "name": name,
                            "text": f"{name}: chi tiêu tăng {round((c['cost'] / p['cost'] - 1) * 100)}% so với kỳ trước",
                            "evidence": [f"Kỳ này {_fmt_money(c['cost'])}; kỳ trước {_fmt_money(p['cost'])}"],
                            "confidence": "medium", "score": 70})
         if c["impr"] >= 1000 and c["ctr"] < 1:
             alerts.append({"lv": "med", "icon": "down", "go": "ads", "source": "Ads",
+                           "name": name,
                            "text": f"{name}: CTR thấp {round(c['ctr'], 2)}% với {_fmt_num(c['impr'])} impressions",
                            "evidence": [f"Ads CTR={round(c['ctr'], 2)}%, impressions={_fmt_num(c['impr'])}"],
                            "confidence": "medium", "score": 65})
         if c.get("cpa") and p.get("cpa") and c["cpa"] / p["cpa"] >= 1.5:
             alerts.append({"lv": "med", "icon": "trend", "go": "ads", "source": "Ads",
+                           "name": name,
                            "text": f"{name}: CPA tăng {round((c['cpa'] / p['cpa'] - 1) * 100)}%",
                            "evidence": [f"CPA kỳ này {_fmt_money(c['cpa'])}; kỳ trước {_fmt_money(p['cpa'])}"],
                            "confidence": "medium", "score": 68})
@@ -5800,6 +6221,7 @@ def _alert_report_from_opportunity(opp: dict, limit: int = 50) -> dict:
             continue
         src = "+".join(o.get("sources") or [])
         alerts.append({"lv": lv, "icon": "warn" if lv == "high" else "trend", "go": "urls", "source": src,
+                       "path": o.get("path"), "derived_from": "opportunity",
                        "text": f"{o['path']}: opportunity score {o['score']} ({src})",
                        "evidence": o.get("evidence", []), "confidence": o.get("confidence", "low"),
                        "score": o["score"]})
@@ -6324,7 +6746,7 @@ async def chat_stream(req: ChatStreamRequest, request: Request = None):
                                     *history,
                                     {"role": "user", "content": req.message}]}
             think_re = _re.compile(r"<think>.*?(?:</think>|$)", _re.S)
-            raw_acc, sent = "", 0
+            raw_acc = ""
             reasoning_acc = []
             try:
                 async with httpx.AsyncClient(timeout=300) as client:
@@ -6353,12 +6775,6 @@ async def chat_stream(req: ChatStreamRequest, request: Request = None):
                             if not c:
                                 continue
                             raw_acc += c
-                            visible = think_re.sub("", raw_acc).lstrip()
-                            # giữ lại 12 ký tự cuối phòng thẻ <think>/</think> đang gõ dở
-                            safe = max(0, len(visible) - 12)
-                            if safe > sent:
-                                yield ev({"type": "delta", "delta": visible[sent:safe]})
-                                sent = safe
             except Exception as e:  # noqa: BLE001
                 yield ev({"type": "error", "text": f"❌ Lỗi phân tích: {type(e).__name__}: {e}"})
                 yield ev({"type": "done"})
@@ -6368,12 +6784,12 @@ async def chat_stream(req: ChatStreamRequest, request: Request = None):
                 # content rỗng: model dồn hết vào reasoning → dùng phần đó (đã lọc think)
                 visible = think_re.sub("", "".join(reasoning_acc)).strip()
                 if visible:
+                    visible = _guard_pagespeed_report_text(visible, tab, headers, rows)
                     yield ev({"type": "final", "text": visible})
                 else:
                     yield ev({"type": "error", "text": "❌ Model không trả về nội dung phân tích — thử lại hoặc đổi model khác (Gemma không có thinking)."})
             else:
-                if len(visible) > sent:
-                    yield ev({"type": "delta", "delta": visible[sent:]})
+                visible = _guard_pagespeed_report_text(visible, tab, headers, rows)
                 yield ev({"type": "final", "text": visible})
             yield ev({"type": "done"})
             return

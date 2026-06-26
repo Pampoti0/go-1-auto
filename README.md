@@ -33,7 +33,7 @@ Một nơi duy nhất thay cho PageSpeed Insights, Search Console, GA4, Google A
 ## Kiến trúc
 
 ```
-┌─ UI: static/index.html (React + Tailwind qua CDN, no build) ─┐
+┌─ UI: static/index.html (prebuilt React + Tailwind, local vendor) ┐
 │ Tổng quan · Chat · URL Intelligence · PageSpeed · Insights   │
 │ Paid Campaigns · Cấu hình + DeCho                            │
 └──────────────────────────┬───────────────────────────────────┘
@@ -60,10 +60,14 @@ Một nơi duy nhất thay cho PageSpeed Insights, Search Console, GA4, Google A
 ```bash
 python3 -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
+npm install                  # chỉ cần khi sửa frontend
+npm run build:frontend       # build frontend/app.jsx + template → static/index.html
 cp .env.example .env        # điền PSI_API_KEY, SHEET_ID, MAAS_*, SEO_*
 # credentials: service_account.json cho PSI Sheet + SEO/GSC/GA4
 python server.py            # http://localhost:8000
 ```
+
+Frontend runtime không dùng Babel/CDN. Khi sửa UI, chỉnh `frontend/app.jsx` và `frontend/index.template.html` nếu cần layout shell, chạy `npm run build:frontend`, rồi commit lại `static/index.html`, `static/dist/` và `static/vendor/`.
 
 ### SEO service account
 
@@ -114,6 +118,15 @@ API_STALE_CACHE_TTL=21600
 ```
 
 `/api/system-health` sẽ hiển thị nguồn cache, tuổi cache và trạng thái từng nguồn dữ liệu. Các report trong tab Insights dùng stale-while-revalidate: nếu cache disk đã quá TTL ngắn nhưng vẫn nằm trong `API_STALE_CACHE_TTL`, UI trả dữ liệu cũ ngay rồi refresh nền. Xóa `.cache/api` khi muốn ép DeCho đọc lại toàn bộ report.
+
+Context follow-up của chat (`SEO` hay `PageSpeed` đang là báo cáo gần nhất) cũng được lưu qua RAM + disk để sống qua restart local/dev:
+
+```bash
+SESSION_CONTEXT_FILE=.cache/session_context.json
+SESSION_CONTEXT_TTL=86400
+```
+
+Context này chỉ là gợi ý hội thoại theo `user_id:session_id`, không thay thế auth thật.
 
 ### Test intent/filter parser
 
